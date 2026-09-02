@@ -122,3 +122,32 @@ def test_unwrap_passes_through_plain_urls():
 )
 def test_looks_like_listing(url, title, expected):
     assert _looks_like_listing(url, title) is expected
+
+
+def test_exa_backend_parses_results(monkeypatch):
+    """Exa returns results[] with url + highlights; parse into SearchResult."""
+    from circle_leads.discovery.web_search import ExaBackend
+
+    class FakeResp:
+        status_code = 200
+        def raise_for_status(self): pass
+        def json(self):
+            return {"results": [
+                {"url": "https://ai-founders.circle.so", "title": "AI Founders",
+                 "highlights": ["a community for AI founders hiring developers"]},
+            ]}
+
+    class FakeSession:
+        def post(self, *a, **k): return FakeResp()
+
+    backend = ExaBackend("key", FakeSession())
+    results = backend.search("AI founders", count=5)
+    assert len(results) == 1
+    assert results[0].url == "https://ai-founders.circle.so"
+    assert "hiring developers" in results[0].snippet
+
+
+def test_exa_is_preferred_when_key_set(monkeypatch):
+    monkeypatch.setenv("EXA_API_KEY", "x")
+    from circle_leads.discovery.web_search import choose_backend
+    assert choose_backend().name == "exa"

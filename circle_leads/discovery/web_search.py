@@ -7,9 +7,11 @@ handful of queries, fetch the result pages, pull out every circle.so link and
 Discover listing, and rank them.
 
 Search backend is pluggable. It picks the first that is configured:
-  - Brave Search API   (BRAVE_API_KEY)      -- generous free tier
-  - SerpAPI            (SERPAPI_API_KEY)
-  - DuckDuckGo HTML    (no key; best-effort, may rate-limit)
+  - Exa               (EXA_API_KEY)        -- neural search, best at finding
+                                              real communities; recommended
+  - Brave Search API  (BRAVE_API_KEY)      -- generous free tier
+  - SerpAPI           (SERPAPI_API_KEY)
+  - DuckDuckGo HTML   (no key; best-effort, may rate-limit)
 
 Every request is the polite, public kind a browser makes. It reads listing and
 result pages only; it never logs in, never joins, and never touches the user's
@@ -36,11 +38,11 @@ USER_AGENT = "circle-leads/0.1 (community discovery; public pages only)"
 
 # Query templates. {q} is the user's niche, e.g. "flutter developer".
 DEFAULT_QUERY_TEMPLATES = [
-    '"circle.so" {q} community',
-    '{q} founders community circle.so',
-    'site:circle.so {q}',
-    'best circle.so communities {q}',
-    '{q} startup OR SaaS community circle.so hiring',
+    "{q} community where members hire developers and freelancers",
+    "{q} founders and startup community",
+    "community for {q} looking for developers to build their product",
+    "best online communities for {q}",
+    "{q} community discussions asks and offers hiring",
 ]
 
 # Public directories worth fetching directly (no search key needed).
@@ -61,6 +63,53 @@ class SearchBackend(Protocol):
     name: str
 
     def search(self, query: str, *, count: int = 10) -> list[SearchResult]: ...
+
+
+class ExaBackend:
+    """Exa neural search -- finds relevant pages semantically, not by keyword.
+
+    Far better at surfacing real <slug>.circle.so communities than a keyword
+    scrape, and it accepts a domain filter so results stay on circle.so.
+    """
+
+    name = "exa"
+
+    def __init__(self, api_key, session=None, include_domains=None):
+        self._key = api_key
+        self._http = session or requests.Session()
+        self._include_domains = include_domains
+
+    def search(self, query: str, *, count: int = 10) -> list[SearchResult]:
+        body = {
+            "query": query,
+            "type": "auto",
+            "numResults": count,
+            "contents": {"highlights": True},
+        }
+        if self._include_domains:
+            body["includeDomains"] = self._include_domains
+        try:
+            resp = self._http.post(
+                "https://api.exa.ai/search",
+                headers={"x-api-key": self._key, "Content-Type": "application/json"},
+                json=body,
+                timeout=30,
+            )
+            resp.raise_for_status()
+        except requests.RequestException as exc:
+            logger.warning("Exa search failed: %s", exc.__class__.__name__)
+            return []
+        out = []
+        for item in resp.json().get("results", []):
+            highlights = " ".join(item.get("highlights", []) or [])
+            out.append(
+                SearchResult(
+                    title=item.get("title", "") or "",
+                    url=item.get("url", "") or "",
+                    snippet=(item.get("summary") or highlights or "")[:500],
+                )
+            )
+        return out
 
 
 class BraveBackend:
@@ -161,6 +210,8 @@ def _unwrap_ddg(href: str) -> str:
 
 def choose_backend(session: requests.Session | None = None) -> SearchBackend | None:
     """Pick the first configured backend, or None if only fetching directories."""
+    if key := os.environ.get("EXA_API_KEY"):
+        return ExaBackend(key, session, include_domains=["circle.so"])
     if key := os.environ.get("BRAVE_API_KEY"):
         return BraveBackend(key, session)
     if key := os.environ.get("SERPAPI_API_KEY"):
