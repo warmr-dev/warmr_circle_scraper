@@ -32,6 +32,9 @@ CIRCLE_HOST_RX = re.compile(
 RESERVED_SLUGS = {
     "app", "www", "api", "help", "discover", "status", "docs", "developers",
     "blog", "support", "admin", "assets", "cdn", "api-headless", "marketing",
+    "login", "community", "signup", "sign-in", "auth", "static", "media",
+    "email", "mail", "go", "link", "links", "share", "embed", "webhooks",
+    "circle-compass-assets", "compass", "brand", "partners", "build-summit",
 }
 
 

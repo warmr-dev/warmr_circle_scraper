@@ -13,6 +13,7 @@ from circle_leads.config.settings import (
     load_requirements,
 )
 from circle_leads.discovery.finder import rank_extracted, rank_from_html
+from circle_leads.discovery.web_search import discover_by_search
 from circle_leads.discovery.discover_communities import (
     dedupe,
     extract_from_text,
@@ -138,6 +139,69 @@ def find_cmd(ctx, from_html, urls, free_only, min_score, limit):
         f"\n{len(ranked)} candidate(s). Open the join URLs and join the ones that "
         "fit -- as yourself, one click each.\nThen read them and paste posts into "
         "`circle-leads triage`."
+    )
+
+
+
+@cli.command("search-web")
+@click.argument("niche")
+@click.option("--free-only", is_flag=True, help="Only show communities marked free.")
+@click.option("--min-score", type=int, default=15, show_default=True)
+@click.option("--limit", type=int, default=30, show_default=True)
+@click.option("--no-fetch", is_flag=True, help="Don't fetch result pages (faster, shallower).")
+@click.option("--no-directories", is_flag=True, help="Skip Discover / Hive Index.")
+@click.pass_context
+def search_web_cmd(ctx, niche, free_only, min_score, limit, no_fetch, no_directories):
+    """Search the public web for Circle communities in a niche, and rank them.
+
+    Runs topic searches, pulls circle.so links out of the results and known
+    directories, and ranks them. It reads public pages only -- it never joins
+    anything and never uses your account.
+
+    \b
+      circle-leads search-web "flutter developer"
+      circle-leads search-web "startup founders" --free-only
+
+    Backend: set BRAVE_API_KEY or SERPAPI_API_KEY for best results; otherwise a
+    keyless DuckDuckGo fallback is used (may be rate-limited).
+    """
+    click.echo(f"Searching public sources for '{niche}' communities...", err=True)
+    disc = discover_by_search(
+        niche,
+        fetch_result_pages=not no_fetch,
+        include_directories=not no_directories,
+    )
+    click.echo(
+        f"  backend={disc.backend} queries={disc.queries_run} "
+        f"pages_fetched={disc.pages_fetched}",
+        err=True,
+    )
+
+    ranked = disc.ranked
+    if free_only:
+        ranked = [c for c in ranked if c.is_free]
+    ranked = [c for c in ranked if c.score >= min_score][:limit]
+
+    if not ranked:
+        click.echo(
+            "\nNothing found. The keyless search backend may be rate-limited -- "
+            "set BRAVE_API_KEY (free tier) for reliable results, or save a page "
+            "and use `circle-leads find --from-html`."
+        )
+        return
+
+    click.echo(f"\n{'TIER':<14}{'SCORE':>5}  {'FREE':<5} COMMUNITY")
+    click.echo("-" * 72)
+    for c in ranked:
+        click.echo(f"{c.tier:<14}{c.score:>5}  {'yes' if c.is_free else 'no':<5} {(c.name or c.slug)[:34]}")
+        pos=[r for r in c.reasons[:5] if not r.startswith("not:")]
+        if pos:
+            click.echo(f"{'':19}why: {', '.join(pos)}")
+        click.echo(f"{'':19}join: {c.join_url}")
+    click.echo("-" * 72)
+    click.echo(
+        f"\n{len(ranked)} candidate(s). Open the join URLs, join the ones that "
+        "fit -- as yourself, one click each."
     )
 
 

@@ -409,6 +409,35 @@ for your niche ("Flutter", "startup founders", "SaaS", "no-code"), then saving
 those result pages. The finder ranks whatever you feed it; it's only as good as
 the pages you point it at. It never joins anything and never uses your account.
 
+
+## Auto-search: let it find them for you
+
+`find` ranks pages you save. `search-web` runs the searches itself:
+
+```bash
+circle-leads search-web "flutter developer"
+circle-leads search-web "startup founders" --free-only
+```
+
+It runs several topic queries, pulls every `circle.so` link out of the results
+and known directories (Circle Discover, Hive Index), fetches the "best
+communities" pages that link out to real subdomains, and ranks the lot. A real
+run for "flutter developer" surfaces Circle's own **Hire Freelance Developers**
+marketplace and founder communities — free, and exactly where hiring happens.
+
+**Search backend** (it picks the first configured):
+- `BRAVE_API_KEY` — Brave Search, generous free tier, most reliable
+- `SERPAPI_API_KEY` — SerpAPI
+- none — a keyless DuckDuckGo fallback (works, but can rate-limit)
+
+For steady use, get a free Brave Search API key and put it in `.env`. It reads
+public pages only, never joins anything, and never touches your account.
+
+**Why there is no "list every community" button:** Circle publishes no such
+list, and enumerating `*.circle.so` subdomains would be a scan against their
+infrastructure — it gets IPs blocked and returns mostly dead or private hosts.
+Topic search finds the ones that are real, relevant, and join-able.
+
 ---
 
 # Part 3 — Daily use

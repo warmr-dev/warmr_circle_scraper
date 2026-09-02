@@ -1,0 +1,124 @@
+"""Tests for web-search community discovery, with a stub backend (no network)."""
+
+import pytest
+
+from circle_leads.discovery.web_search import (
+    SearchDiscovery,
+    SearchResult,
+    _looks_like_listing,
+    _unwrap_ddg,
+    discover_by_search,
+)
+
+
+class StubBackend:
+    """Returns canned results and records the queries it was asked."""
+
+    name = "stub"
+
+    def __init__(self, results):
+        self.results = results
+        self.queries = []
+
+    def search(self, query, *, count=10):
+        self.queries.append(query)
+        return self.results
+
+
+def test_search_finds_and_ranks_communities():
+    backend = StubBackend([
+        SearchResult(
+            title="SaaS Founders — the community for startup founders",
+            url="https://saas-founders.circle.so",
+            snippet="A community for SaaS founders building software products",
+        ),
+        SearchResult(
+            title="Yoga Circle",
+            url="https://yoga-circle.circle.so",
+            snippet="Daily yoga and meditation",
+        ),
+    ])
+    disc = discover_by_search(
+        "startup founders", backend=backend,
+        fetch_result_pages=False, include_directories=False, request_delay=0,
+    )
+    assert disc.backend == "stub"
+    assert disc.queries_run == 5  # five query templates
+    slugs = {c.slug for c in disc.ranked}
+    assert "saas-founders" in slugs
+    top = disc.ranked[0]
+    assert top.slug == "saas-founders"
+    assert top.score > 0
+
+
+def test_the_niche_is_substituted_into_queries():
+    backend = StubBackend([])
+    discover_by_search(
+        "flutter developer", backend=backend,
+        fetch_result_pages=False, include_directories=False, request_delay=0,
+    )
+    assert any("flutter developer" in q for q in backend.queries)
+
+
+def test_circle_links_are_pulled_from_snippets():
+    backend = StubBackend([
+        SearchResult(
+            title="Best communities",
+            url="https://example.com/blog/best",
+            snippet="Check out founders-hub.circle.so and indie-devs.circle.so",
+        ),
+    ])
+    disc = discover_by_search(
+        "founders", backend=backend,
+        fetch_result_pages=False, include_directories=False, request_delay=0,
+    )
+    slugs = {c.slug for c in disc.ranked}
+    assert "founders-hub" in slugs
+    assert "indie-devs" in slugs
+
+
+def test_infrastructure_hosts_are_not_returned():
+    backend = StubBackend([
+        SearchResult(title="Sign in", url="https://login.circle.so/sign_in", snippet=""),
+        SearchResult(title="Community", url="https://community.circle.so", snippet=""),
+        SearchResult(title="Real", url="https://real-founders.circle.so", snippet="founders"),
+    ])
+    disc = discover_by_search(
+        "founders", backend=backend,
+        fetch_result_pages=False, include_directories=False, request_delay=0,
+    )
+    slugs = {c.slug for c in disc.ranked}
+    assert "real-founders" in slugs
+    assert "login" not in slugs
+    assert "community" not in slugs
+
+
+def test_empty_backend_and_no_directories_finds_nothing():
+    """An empty search backend with directories off returns nothing."""
+    disc = discover_by_search(
+        "founders", backend=StubBackend([]),
+        fetch_result_pages=False, include_directories=False, request_delay=0,
+    )
+    assert isinstance(disc, SearchDiscovery)
+    assert disc.ranked == []
+
+
+def test_ddg_redirect_is_unwrapped():
+    wrapped = "//duckduckgo.com/l/?uddg=https%3A%2F%2Ffounders.circle.so&rut=abc"
+    assert _unwrap_ddg(wrapped) == "https://founders.circle.so"
+
+
+def test_unwrap_passes_through_plain_urls():
+    assert _unwrap_ddg("https://x.circle.so") == "https://x.circle.so"
+
+
+@pytest.mark.parametrize(
+    "url,title,expected",
+    [
+        ("https://saas-founders.circle.so", "SaaS", True),
+        ("https://example.com/best-communities", "Best founder communities", True),
+        ("https://example.com/random", "Some blog post", False),
+    ],
+)
+def test_looks_like_listing(url, title, expected):
+    assert _looks_like_listing(url, title) is expected
