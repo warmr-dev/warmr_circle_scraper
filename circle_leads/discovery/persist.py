@@ -74,6 +74,14 @@ def persist_finds(
                 continue
             if v.is_free is not None:
                 rc.is_free = v.is_free
+            if getattr(v, "price", None):
+                rc.price_label = v.price
+            elif v.is_free:
+                rc.price_label = "Free"
+            # The user wants free communities, so push confirmed-paid ones down.
+            if v.is_free is False and "paid" not in rc.reasons:
+                rc.score = max(0, rc.score - 25)
+                rc.reasons = list(rc.reasons) + ["paid"]
             if v.title and (not rc.name or rc.name == rc.slug):
                 rc.name = v.title.split("|")[0].strip()[:80] or rc.name
         # A real community subdomain is worth more than a Discover listing.

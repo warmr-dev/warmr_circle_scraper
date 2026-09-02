@@ -154,3 +154,40 @@ def test_validation_keeps_live_subdomains(db):
         min_score=25, validate=True, session=session,
     )
     assert result.new_count == 1
+
+
+# --- Price detection / paid deprioritization --------------------------------
+
+def test_extract_price_reads_discover_product_html():
+    from circle_leads.discovery.validate_finds import _extract_price
+    html = '<h2 class="text-heading-2xl">$197</h2><span>/month</span>'
+    price, is_free = _extract_price(html)
+    assert is_free is False
+    assert "197" in price
+
+
+def test_extract_price_reports_free_when_no_price():
+    from circle_leads.discovery.validate_finds import _extract_price
+    price, is_free = _extract_price("<div>Join this community for free</div>")
+    assert is_free is True
+    assert price == "Free"
+
+
+def test_paid_communities_are_deprioritized(db):
+    class R:
+        def __init__(self, s, t): self.status_code, self.text = s, t
+    class Sess:
+        def get(self, url, **kw):
+            if "paid" in url:
+                return R(200, '<h2>$197</h2><span>/month</span>')
+            return R(200, '<title>ok</title> free to join')
+    result = persist_finds(
+        db,
+        [
+            rc("paidcomm", 60, url="https://discover.circle.so/products/paidcomm"),
+            rc("freecomm", 60, url="https://discover.circle.so/products/freecomm"),
+        ],
+        min_score=10, validate=True, session=Sess(),
+    )
+    scores = {r["slug"]: r["score"] for r in new_since(db)}
+    assert scores["freecomm"] > scores["paidcomm"]

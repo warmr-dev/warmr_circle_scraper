@@ -421,11 +421,15 @@ async function loadCommunities() {
     <thead><tr><th>Community</th><th>Score</th><th>Why</th><th>Status</th><th></th></tr></thead>
     <tbody>${data.communities.map(c => {
       const joined = c.access_status !== 'not_visited';
-      const free = (c.price_label || '').toLowerCase().startsWith('free');
-      const why = (c.relevance_reasons || []).filter(r => !r.startsWith('not:')).slice(0,4).join(', ');
+      const price = c.price_label || '';
+      const isPaid = price.includes('$');
+      const isFree = price.toLowerCase() === 'free';
+      const badge = isFree ? '<span class="tag" style="margin-left:6px;color:var(--high)">free</span>'
+        : isPaid ? `<span class="tag" style="margin-left:6px;color:var(--medium)">${esc(price)}</span>`
+        : '<span class="tag muted" style="margin-left:6px">price on site</span>';
+      const why = (c.relevance_reasons || []).filter(r => !r.startsWith('not:') && r !== 'paid').slice(0,4).join(', ');
       return `<tr>
-        <td><a href="${esc(c.url)}" target="_blank" rel="noopener">${esc(c.name || c.slug)} ↗</a>
-            ${free ? '<span class="tag" style="margin-left:6px">free</span>' : ''}</td>
+        <td><a href="${esc(c.url)}" target="_blank" rel="noopener">${esc(c.name || c.slug)} ↗</a>${badge}</td>
         <td>${Math.round(c.relevance_score)}</td>
         <td class="muted">${esc(why || '—')}</td>
         <td>${joined ? `<span class="pill HIGH">${esc(c.access_status)}</span>` : '<span class="muted">not visited</span>'}</td>

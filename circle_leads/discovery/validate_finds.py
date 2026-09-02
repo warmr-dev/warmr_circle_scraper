@@ -49,6 +49,7 @@ class Validation:
     ok: bool
     is_free: bool | None = None
     title: str | None = None
+    price: str | None = None
     reason: str = ""
 
 
@@ -59,6 +60,45 @@ def _title(html: str) -> str | None:
     import html as _html
 
     return _html.unescape(re.sub(r"\s+", " ", m.group(1)).strip())[:120] or None
+
+
+
+# A Discover product page renders the price into the HTML, e.g.
+#   <h2 ...>$197</h2><span ...>/month</span>
+# so pull the largest priced amount with a period, or "Free" when there is no
+# price at all.
+_PRICE_RX = re.compile(
+    r"\$\s?([\d,]+(?:\.\d{2})?)\s*"
+    r"(?:</[^>]+>\s*<[^>]+>\s*)?"
+    r"(/\s?(?:mo|month|year|yr)|per\s?(?:month|year))?",
+    re.I,
+)
+
+
+def _extract_price(html: str) -> tuple[str | None, bool | None]:
+    """Return (label, is_free) from a Discover product page's HTML."""
+    text = html or ""
+    matches = _PRICE_RX.findall(text)
+    priced = []
+    for amount, period in matches:
+        try:
+            value = float(amount.replace(",", ""))
+        except ValueError:
+            continue
+        # Ignore tiny fragments the SPA emits ($1, $100 with no period) unless
+        # they carry a billing period.
+        if value >= 1 and (period or value >= 5):
+            priced.append((value, f"${amount}{(' ' + period.strip()) if period else ''}"))
+    if priced:
+        # The headline price is the largest amount that has a billing period,
+        # else the largest amount seen.
+        with_period = [p for p in priced if "/" in p[1] or "per" in p[1].lower()]
+        best = max(with_period or priced, key=lambda p: p[0])
+        return best[1], False
+    # No price rendered anywhere -> free to join.
+    if re.search(r"\bfree\b", text, re.I):
+        return "Free", True
+    return None, None
 
 
 def validate_url(
@@ -88,7 +128,8 @@ def validate_url(
         # (/startups, /ai-agents) as SEO pages, not joinable communities.
         if "/products/" not in url:
             return Validation(ok=False, reason="Discover category/SEO slug, not a community")
-        return Validation(ok=True, title=None)
+        price, is_free = _extract_price(resp.text)
+        return Validation(ok=True, title=_title(resp.text), is_free=is_free, price=price)
 
     if resp.status_code >= 400 and resp.status_code != 403:
         # 403 on a real community means "members only", which is fine.
