@@ -1,10 +1,17 @@
-"""Tests for persisting search finds and flagging new ones."""
+"""Tests for persisting search finds and flagging new ones.
+
+Validation hits the network, so these unit tests pass validate=False and cover
+validation separately with a stubbed session.
+"""
 
 import pytest
 
 from circle_leads.discovery.finder import RankedCommunity
 from circle_leads.discovery.persist import new_since, persist_finds
 from circle_leads.storage.database import Database
+
+# Subdomain finds get a +15 boost in persist; account for it in expectations.
+SUBDOMAIN_BOOST = 15
 
 
 @pytest.fixture
@@ -20,53 +27,67 @@ def rc(slug, score, name=None, url=None, free=False):
     )
 
 
+def save(db, finds, **kw):
+    kw.setdefault("validate", False)
+    return persist_finds(db, finds, **kw)
+
+
 def test_first_run_flags_everything_new(db):
-    result = persist_finds(db, [rc("a", 60), rc("b", 40)], niche="founders", min_score=25)
+    result = save(db, [rc("a", 60), rc("b", 40)], niche="founders", min_score=25)
     assert result.new_count == 2
     assert {c.slug for c in result.new} == {"a", "b"}
 
 
 def test_second_run_flags_nothing_new(db):
     finds = [rc("a", 60), rc("b", 40)]
-    persist_finds(db, finds, niche="founders", min_score=25)
-    second = persist_finds(db, finds, niche="founders", min_score=25)
+    save(db, finds, niche="founders", min_score=25)
+    second = save(db, finds, niche="founders", min_score=25)
     assert second.new_count == 0
     assert second.unchanged == 2
 
 
 def test_only_genuinely_new_slugs_are_flagged(db):
-    persist_finds(db, [rc("a", 60)], niche="founders", min_score=25)
-    second = persist_finds(db, [rc("a", 60), rc("c", 50)], niche="founders", min_score=25)
+    save(db, [rc("a", 60)], niche="founders", min_score=25)
+    second = save(db, [rc("a", 60), rc("c", 50)], niche="founders", min_score=25)
     assert {x.slug for x in second.new} == {"c"}
 
 
 def test_min_score_filters_finds(db):
-    result = persist_finds(db, [rc("a", 60), rc("low", 10)], min_score=25)
+    result = save(db, [rc("a", 60), rc("low", 10)], min_score=25)
     assert result.new_count == 1
     assert new_since(db) and all(r["slug"] != "low" for r in new_since(db))
 
 
 def test_improved_score_updates_but_does_not_reflag(db):
-    persist_finds(db, [rc("a", 40)], min_score=25)
-    second = persist_finds(db, [rc("a", 70)], min_score=25)
+    save(db, [rc("a", 40)], min_score=25)
+    second = save(db, [rc("a", 70)], min_score=25)
     assert second.new_count == 0
     assert len(second.updated) == 1
-    assert new_since(db)[0]["score"] == 70
+    assert new_since(db)[0]["score"] == 70 + SUBDOMAIN_BOOST
 
 
 def test_new_since_lists_unvisited_best_first(db):
-    persist_finds(db, [rc("a", 40), rc("b", 80), rc("c", 60)], min_score=25)
+    save(db, [rc("a", 40), rc("b", 80), rc("c", 60)], min_score=25)
     rows = new_since(db)
     assert [r["slug"] for r in rows] == ["b", "c", "a"]
 
 
+def test_subdomain_finds_are_boosted_over_discover(db):
+    """A real <slug>.circle.so community outranks a same-score Discover listing."""
+    save(db, [
+        rc("sub", 50, url="https://sub.circle.so"),
+        rc("disc", 50, url="https://discover.circle.so/products/disc"),
+    ], min_score=25)
+    rows = {r["slug"]: r["score"] for r in new_since(db)}
+    assert rows["sub"] > rows["disc"]
+
+
 def test_find_never_implies_approval(db):
-    """A discovered community stays a candidate, not approved for ingestion."""
     from sqlalchemy import select
 
     from circle_leads.storage.models import Community
 
-    persist_finds(db, [rc("a", 60)], min_score=25)
+    save(db, [rc("a", 60)], min_score=25)
     with db.session() as s:
         c = s.scalar(select(Community).where(Community.slug == "a"))
         assert c.permission_status == "candidate"
@@ -77,8 +98,59 @@ def test_find_never_implies_approval(db):
 def test_persist_logs_activity(db):
     from circle_leads.storage.activity import recent_activity
 
-    persist_finds(db, [rc("a", 60)], niche="flutter", min_score=25)
+    save(db, [rc("a", 60)], niche="flutter", min_score=25)
     with db.session() as s:
         events = recent_activity(s, kind="discover")
     assert events
     assert "flutter" in events[0]["summary"]
+
+
+# --- Validation (stubbed session, no network) -------------------------------
+
+
+class StubResp:
+    def __init__(self, status, text):
+        self.status_code = status
+        self.text = text
+
+
+class StubSession:
+    def __init__(self, mapping):
+        self.mapping = mapping
+
+    def get(self, url, **kw):
+        for key, resp in self.mapping.items():
+            if key in url:
+                return resp
+        return StubResp(200, "<title>ok</title>")
+
+
+def test_validation_drops_discover_category_slugs(db):
+    """Discover is an SPA, so bare category slugs are dropped by path, not body;
+    only /products/<slug> listings are kept."""
+    session = StubSession({
+        "startups": StubResp(200, "<title>ok</title>"),
+        "products/saasrise": StubResp(200, "<title>ok</title>"),
+    })
+    result = persist_finds(
+        db,
+        [
+            rc("startups", 60, url="https://discover.circle.so/startups"),
+            rc("saasrise", 60, url="https://discover.circle.so/products/saasrise"),
+        ],
+        min_score=25, validate=True, session=session,
+    )
+    slugs = {c.slug for c in result.new}
+    assert "saasrise" in slugs
+    assert "startups" not in slugs
+
+
+def test_validation_keeps_live_subdomains(db):
+    session = StubSession({
+        "startupandangels": StubResp(200, "<title>Startup&Angels community</title>"),
+    })
+    result = persist_finds(
+        db, [rc("startupandangels", 30, url="https://startupandangels.circle.so")],
+        min_score=25, validate=True, session=session,
+    )
+    assert result.new_count == 1

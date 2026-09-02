@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from sqlalchemy import select
 
 from circle_leads.discovery.finder import RankedCommunity
+from circle_leads.discovery.validate_finds import is_subdomain_community, validate_url
 from circle_leads.storage.activity import log_activity
 from circle_leads.storage.database import Database
 from circle_leads.storage.models import AccessState, Community, PermissionStatus
@@ -47,6 +48,8 @@ def persist_finds(
     niche: str | None = None,
     min_score: int = 0,
     source: str = "search",
+    validate: bool = True,
+    session=None,
 ) -> PersistResult:
     """Store finds; return which slugs are new since the last run.
 
@@ -55,11 +58,34 @@ def persist_finds(
     """
     result = PersistResult()
 
-    with db.session() as s:
-        for rc in ranked:
-            if rc.score < min_score:
+    # Validate URLs (drop soft-404 Discover pages, confirm subdomains are live)
+    # and mark the real <slug>.circle.so communities, which are the joinable
+    # ones. Discover /products pages are kept only if they load a real page.
+    import requests
+    http = session or requests.Session()
+    validated: list[RankedCommunity] = []
+    for rc in ranked:
+        if rc.score < min_score:
+            continue
+        if validate:
+            v = validate_url(rc.join_url, session=http)
+            if not v.ok:
+                logger.info("Dropping dead find %s (%s)", rc.slug, v.reason)
                 continue
+            if v.is_free is not None:
+                rc.is_free = v.is_free
+            if v.title and (not rc.name or rc.name == rc.slug):
+                rc.name = v.title.split("|")[0].strip()[:80] or rc.name
+        # A real community subdomain is worth more than a Discover listing.
+        # Idempotent: only boost once, tracked by the reason tag, so a re-run
+        # does not keep inflating the score.
+        if is_subdomain_community(rc.join_url) and "community_subdomain" not in rc.reasons:
+            rc.score = min(100, rc.score + 15)
+            rc.reasons = list(rc.reasons) + ["community_subdomain"]
+        validated.append(rc)
 
+    with db.session() as s:
+        for rc in validated:
             existing = s.scalar(select(Community).where(Community.slug == rc.slug))
             if existing is None:
                 community = Community(
