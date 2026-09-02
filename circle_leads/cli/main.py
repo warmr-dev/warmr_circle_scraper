@@ -15,6 +15,9 @@ from circle_leads.config.settings import (
 from circle_leads.discovery.finder import rank_extracted, rank_from_html
 from circle_leads.discovery.web_search import discover_by_search
 from circle_leads.discovery.persist import new_since, persist_finds
+from circle_leads.scraper.member_feed import (
+    MemberFeedClient, SessionExpired, fetch_space_posts,
+)
 from circle_leads.discovery.discover_communities import (
     dedupe,
     extract_from_text,
@@ -293,6 +296,78 @@ def new_communities_cmd(ctx, limit):
         click.echo(f"       join: {r['join_url']}")
     click.echo("-" * 60)
     click.echo(f"\n{len(rows)} unvisited. Join the good ones, then `triage` their posts.")
+
+
+
+@cli.command("read-feed")
+@click.argument("community_host")
+@click.option("--space-id", "space_ids", multiple=True, required=True,
+              help="A space id to read. Repeatable. Find the id in DevTools; see docs/member_feed.md.")
+@click.option("--cookie-env", default="CIRCLE_SESSION_COOKIE", show_default=True,
+              help="Env var holding your browser Cookie header for this community.")
+@click.option("--community", default=None, help="Slug to record leads under (default: host).")
+@click.option("--max-pages", type=int, default=10, show_default=True)
+@click.option("--use-llm", is_flag=True)
+@click.pass_context
+def read_feed_cmd(ctx, community_host, space_ids, cookie_env, community, max_pages, use_llm):
+    """Read spaces you're a member of, via Circle's internal feed endpoints.
+
+    For communities where you are a genuine, logged-in member. It calls the same
+    /internal_api/ endpoints your browser calls, authenticated by your session
+    cookie (from the environment -- see docs/member_feed.md). Read-only; stops
+    on a 401/403; polite request rate.
+
+    \b
+      export CIRCLE_SESSION_COOKIE='<your Cookie header>'
+      circle-leads read-feed startupandangels.circle.so --space-id 1595123
+    """
+    from circle_leads.triage.pipeline import triage_text
+
+    try:
+        client = MemberFeedClient.from_env(community_host, cookie_env)
+    except SessionExpired as exc:
+        raise click.ClickException(str(exc))
+
+    slug = community or community_host.split(".")[0]
+    community_url = f"https://{client.community_host}"
+    reqs = ctx.obj["requirements"]
+
+    all_records = []
+    try:
+        for space_id in space_ids:
+            click.echo(f"Reading space {space_id}...", err=True)
+            recs = fetch_space_posts(
+                client, space_id, community_url=community_url,
+                excluded_content=reqs.excluded_content, max_pages=max_pages,
+            )
+            click.echo(f"  {len(recs)} post(s)", err=True)
+            all_records.extend(recs)
+    except SessionExpired as exc:
+        raise click.ClickException(str(exc))
+
+    if not all_records:
+        click.echo("No posts read. Check the space id and that your cookie is fresh.")
+        return
+
+    # Feed records already carry structure, so classify them directly by
+    # reusing the triage pipeline on their joined text.
+    text = "\n\n---\n\n".join(
+        (r["title"] + "\n" + r["content"]) if r.get("title") else r["content"]
+        for r in all_records
+    )
+    result = triage_text(
+        ctx.obj["db"], text, reqs, community=slug,
+        source_url=community_url, use_llm=use_llm,
+        your_name=None,
+    )
+    click.echo(
+        f"\nRead {result.total_posts} post(s): {len(result.leads)} lead(s), "
+        f"{result.not_leads} not-lead, {result.already_seen} seen before."
+    )
+    for lead in result.leads:
+        click.echo(f"  {lead['lead_score']:>3} {lead['priority']:<7} "
+                   f"{lead.get('job_title') or lead.get('hire_target') or '-'}")
+    click.echo("\nReview them in the dashboard, or `circle-leads search`.")
 
 
 

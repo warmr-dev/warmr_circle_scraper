@@ -298,3 +298,35 @@ def test_need_and_referral_phrasings_are_leads(text, reqs):
 def test_referral_pattern_does_not_catch_questions_about_things(text, reqs):
     """Asking about a tutorial or a bug is not asking for a person to hire."""
     assert classify(text, reqs).classification == "NOT_LEAD"
+
+
+# --- Real phrasings from live community feeds -------------------------------
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Could you assist me finding engineers, website developers for our startup?",
+        "We're finding a backend developer for our team",
+        "Looking to bring on a developer for our product",
+        "We want to bring on board a designer",
+        "Recruiting a senior engineer for our startup",
+        "Need help sourcing a mobile developer",
+    ],
+)
+def test_finding_and_bring_on_phrasings_are_leads(text, reqs):
+    """"finding engineers" and "bring on a developer" are real hiring phrasings
+    seen in a live job-posts feed that were previously missed."""
+    assert classify(text, reqs).classification == "LEAD"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Finding good documentation for React has been hard",
+        "I'm finding it difficult to learn Flutter",
+        "Bring on the weekend, I need a break",
+    ],
+)
+def test_finding_non_role_objects_are_not_leads(text, reqs):
+    assert classify(text, reqs).classification == "NOT_LEAD"

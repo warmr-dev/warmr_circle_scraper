@@ -66,6 +66,20 @@ HIRING_PATTERNS: list[tuple[str, str, int]] = [
         35,
     ),
     (
+        # "finding engineers", "need help finding a developer"
+        "finding_a_role",
+        rf"\b(?:find|finding|source|sourcing|recruit|recruiting)\s+"
+        rf"(?:\w+[\s,]+){{0,4}}?{ROLE_NOUNS}s?\b",
+        35,
+    ),
+    (
+        # "bring on a developer", "onboard a dev", "take on a designer"
+        "bring_on_a_role",
+        rf"\b(?:bring\s+on(?:\s+board)?|onboard|take\s+on)\s+"
+        rf"(?:\w+[\s,]+){{0,4}}?{ROLE_NOUNS}s?\b",
+        35,
+    ),
+    (
         "seeking_someone_to",
         r"\b(?:look(?:ing)?\s+for|need|needs|needed|want(?:ing)?|seek(?:ing)?|hir(?:e|ing)|after)\s+"
         r"(?:someone|somebody|a\s+team|a\s+person|a\s+dev|help)\s+"
