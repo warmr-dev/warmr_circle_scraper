@@ -22,6 +22,7 @@ from circle_leads.classifier.ai_classifier import AnthropicBackend, LlmBackend
 from circle_leads.classifier.lead_classifier import classify, meets_requirements
 from circle_leads.config.settings import Requirements
 from circle_leads.scoring.lead_scoring import score_lead
+from circle_leads.storage.activity import log_activity
 from circle_leads.storage.database import (
     Database,
     content_hash,
@@ -239,10 +240,57 @@ def triage_text(
                 "is_duplicate": duplicate_lead_id is not None,
             }
 
+        with db.session() as s:
+            log_activity(
+                s,
+                kind="classify",
+                level="success",
+                community=community,
+                space=space,
+                summary=(
+                    f"LEAD ({score}, {priority}): "
+                    f"{payload.get('job_title') or payload.get('hire_target') or 'unspecified role'}"
+                ),
+                detail={
+                    "author": raw.author,
+                    "confidence": payload["confidence"],
+                    "evidence": payload.get("evidence_quote"),
+                    "reason": payload.get("reason"),
+                    "skills": ", ".join(payload.get("skills") or []),
+                    "budget": payload.get("budget"),
+                },
+                items_seen=1,
+                leads_found=1,
+                decided_by=payload.get("decided_by"),
+            )
+
         draft = draft_reply(payload, your_name=your_name)
         payload["reply_draft"] = draft.text
         payload["reply_notes"] = draft.notes
         result.leads.append(payload)
 
     result.leads.sort(key=lambda x: x["lead_score"], reverse=True)
+
+    with db.session() as s:
+        log_activity(
+            s,
+            kind="triage",
+            level="success" if result.leads else "info",
+            community=community,
+            space=space,
+            summary=(
+                f"Triaged {result.total_posts} post(s): {len(result.leads)} lead(s), "
+                f"{result.not_leads} not-lead, {result.filtered} filtered, "
+                f"{result.already_seen} seen before"
+            ),
+            detail={
+                "source_url": source_url,
+                "llm": "on" if llm is not None else "off",
+                "duplicates": result.duplicates,
+            },
+            items_seen=result.total_posts,
+            leads_found=len(result.leads),
+            decided_by="llm" if llm is not None else "rules",
+        )
+
     return result

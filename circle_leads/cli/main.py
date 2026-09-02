@@ -440,6 +440,22 @@ def stats_cmd(ctx):
     click.echo(f"Leads:         {leads} ({high} high priority)")
 
 
+@cli.command("dashboard")
+@click.option("--host", default="127.0.0.1", show_default=True,
+              help="Bind address. Keep it local unless you know what you're exposing.")
+@click.option("--port", type=int, default=8000, show_default=True)
+@click.pass_context
+def dashboard_cmd(ctx, host, port):
+    """Open the web dashboard: leads, triage, activity and stats.
+
+    Requires DASHBOARD_PASSWORD in your environment (put it in .env).
+    """
+    from circle_leads.web.app import run
+
+    run(host=host, port=port, db_url=ctx.obj["db"].url)
+
+
+
 def main() -> None:
     cli(obj={})
 

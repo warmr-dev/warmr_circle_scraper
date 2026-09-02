@@ -229,6 +229,35 @@ class Lead(Base):
     post: Mapped[Post] = relationship(back_populates="lead")
 
 
+class ActivityLog(Base):
+    """Append-only record of what the system did and why.
+
+    Feeds the dashboard's activity view: which community was triaged, how many
+    posts were read, what the classifier decided and on what basis. Never
+    stores credentials -- only what was examined and what was concluded.
+    """
+
+    __tablename__ = "activity_log"
+    __table_args__ = (Index("ix_activity_created_at", "created_at"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+
+    # triage | ingest | classify | discover | export | purge | auth
+    kind: Mapped[str] = mapped_column(String(32), index=True)
+    # info | success | warning | error
+    level: Mapped[str] = mapped_column(String(16), default="info", index=True)
+
+    community: Mapped[str | None] = mapped_column(String(255), index=True)
+    space: Mapped[str | None] = mapped_column(String(255))
+    summary: Mapped[str] = mapped_column(Text)
+    detail: Mapped[dict | None] = mapped_column(JSON, default=dict)
+
+    items_seen: Mapped[int] = mapped_column(Integer, default=0)
+    leads_found: Mapped[int] = mapped_column(Integer, default=0)
+    decided_by: Mapped[str | None] = mapped_column(String(32))
+
+
 class ScrapeRun(Base):
     __tablename__ = "scrape_runs"
 

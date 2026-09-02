@@ -159,11 +159,15 @@ DELIVERABLE_PATTERN = (
 )
 
 BUDGET_PATTERN = (
-    r"(?:\$\s?[\d,]+(?:\s?[-–—to]+\s?\$?[\d,]+)?(?:\s?[kK])?"
-    r"|\b(?:usd|eur|gbp)\s?[\d,]+"
-    r"|\b[\d,]+\s?(?:usd|eur|gbp)\b"
-    r"|\bbudget\s+(?:of|is|around|approx\.?|~)?\s*\$?[\d,]+"
-    r"|\b(?:\d+\s?[kK])\s+budget\b)"
+    # A trailing k/K and a rate suffix are part of the figure: "$30k" and
+    # "$50/hr" must not be reported as "$30" and "$50".
+    r"(?:\$\s?[\d,]+(?:\.\d+)?(?:\s?[kKmM])?"
+    r"(?:\s?(?:-|–|—|to)\s?\$?[\d,]+(?:\.\d+)?(?:\s?[kKmM])?)?"
+    r"(?:\s?(?:/|per\s?)(?:hr|hour|day|week|month|year|yr))?"
+    r"|\b(?:usd|eur|gbp)\s?[\d,]+(?:\s?[kKmM])?"
+    r"|\b[\d,]+(?:\s?[kKmM])?\s?(?:usd|eur|gbp)\b"
+    r"|\bbudget\s+(?:of|is|around|approx\.?|~)?\s*\$?[\d,]+(?:\s?[kKmM])?"
+    r"|\b(?:\d+\s?[kKmM])\s+budget\b)"
 )
 
 TIMELINE_PATTERN = (

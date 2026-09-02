@@ -556,6 +556,86 @@ that happens to mention you can help beats a pitch every time.
 
 ---
 
+# Part 3c — The web dashboard
+
+Everything the CLI does, in a browser: triage, review, activity and stats.
+
+## Start it
+
+```bash
+pip install -e '.[web]'
+echo 'DASHBOARD_PASSWORD=pick-a-real-password' >> .env
+set -a && source .env && set +a
+
+circle-leads dashboard          # → http://127.0.0.1:8000
+```
+
+It binds to `127.0.0.1` and **refuses to start without a password**. The
+database holds other people's posts, so the default posture is closed rather
+than open.
+
+## The tabs
+
+**Leads** — every lead ranked by score, with the extracted role, skills, budget
+and urgency, the draft reply, and a copy button. Filter by role, skills,
+priority or review status.
+
+**Triage** — paste community text straight into the browser and watch the leads
+appear. Same engine as `circle-leads triage`.
+
+**Activity** — what the system did and why:
+
+```
+13:26  triage    mobile-founders  Triaged 2 post(s): 1 lead(s), 1 not-lead     rules
+13:26  classify  mobile-founders  LEAD (93, HIGH): React Native Developer      rules
+                                  "We are looking for a React Native developer…"
+13:25  review    —                Lead 2 marked contacted
+13:25  classify  flutter-devs     LEAD (82, HIGH): Flutter Dev                 rules
+```
+
+Each classifier decision carries the evidence quote it was based on, so you can
+see *why* something was called a lead — and filter to just classifier decisions,
+triage runs, or review actions.
+
+**Stats** — leads per day, and breakdowns by priority, community, most-requested
+skill, and whether the rules or the AI decided.
+
+**Communities** — every community with its access and permission status, so it
+stays obvious which ones are operator-approved for API ingestion and which you
+are only reading yourself.
+
+## Review workflow
+
+Each lead has: `pending review · contacted · replied · won · rejected`. The
+state persists in the database and is recorded in the activity log, so you can
+filter to "pending" and work through the queue.
+
+## Environment variables
+
+```bash
+DASHBOARD_PASSWORD=      # required, min 8 chars
+DASHBOARD_SECRET_KEY=    # optional; set so sessions survive a restart
+DASHBOARD_YOUR_NAME=     # optional; signs the reply drafts
+DASHBOARD_HTTPS=true     # only when actually serving over HTTPS
+```
+
+## Before you deploy it
+
+`--host 0.0.0.0` prints a warning, and it means it. Two things to settle first:
+
+1. **SQLite does not persist on serverless hosts** (Vercel, Netlify). The
+   filesystem is ephemeral, so your leads vanish on redeploy. Point
+   `CIRCLE_LEADS_DB` at a hosted Postgres — the storage layer is SQLAlchemy, so
+   only the URL changes.
+2. **One shared password is fine for one person, not for a team.** There are no
+   user accounts, so everyone shares a login and the activity log cannot tell
+   who did what.
+
+For remote access by yourself, a tunnel to the local server (Tailscale,
+`ssh -L`, `cloudflared`) is simpler and safer than a public deployment.
+
+---
+
 # Part 4 — Tuning
 
 Everything lives in `circle_leads/config/requirements.yaml`. No code changes.

@@ -1,0 +1,419 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Circle Leads</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #fff; --ink: #16181d; --muted: #6b7280;
+    --line: #e4e7ec; --accent: #2c5fd6; --soft: #eef1f6;
+    --high: #067647; --medium: #b54708; --low: #6b7280; --danger: #b42318;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115; --panel: #171a21; --ink: #e8eaed; --muted: #9aa1ad;
+      --line: #262a33; --accent: #6f9bff; --soft: #1e222b;
+      --high: #4ade80; --medium: #fbbf24; --low: #9aa1ad; --danger: #ff7b72;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 14px/1.55 ui-sans-serif, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  header {
+    display: flex; align-items: center; gap: 16px; padding: 12px 20px;
+    background: var(--panel); border-bottom: 1px solid var(--line);
+    position: sticky; top: 0; z-index: 10; flex-wrap: wrap;
+  }
+  header h1 { margin: 0; font-size: 16px; letter-spacing: -.01em; }
+  nav { display: flex; gap: 4px; margin-left: auto; flex-wrap: wrap; }
+  nav button {
+    padding: 6px 13px; font: inherit; border-radius: 7px; cursor: pointer;
+    background: transparent; color: var(--muted); border: 1px solid transparent;
+  }
+  nav button:hover { background: var(--soft); }
+  nav button[aria-selected="true"] {
+    background: var(--soft); color: var(--ink); font-weight: 600;
+    border-color: var(--line);
+  }
+  main { padding: 20px; max-width: 1180px; margin: 0 auto; }
+  .panel {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 16px; margin-bottom: 14px;
+  }
+  h2 { margin: 0 0 12px; font-size: 14px; letter-spacing: -.01em; }
+  .muted { color: var(--muted); }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  input, select, textarea {
+    padding: 8px 10px; font: inherit; color: var(--ink); background: var(--bg);
+    border: 1px solid var(--line); border-radius: 7px;
+  }
+  input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+  textarea { width: 100%; min-height: 190px; font-family: ui-monospace, Menlo, monospace; font-size: 13px; resize: vertical; }
+  button.action {
+    padding: 8px 14px; font: inherit; font-weight: 600; color: #fff;
+    background: var(--accent); border: 0; border-radius: 7px; cursor: pointer;
+  }
+  button.action:hover { filter: brightness(1.07); }
+  button.action:disabled { opacity: .55; cursor: default; }
+  button.ghost {
+    padding: 5px 10px; font: inherit; font-size: 12px; color: var(--muted);
+    background: transparent; border: 1px solid var(--line); border-radius: 6px;
+    cursor: pointer;
+  }
+  button.ghost:hover { background: var(--soft); color: var(--ink); }
+  button.ghost[aria-pressed="true"] { background: var(--accent); color: #fff; border-color: var(--accent); }
+
+  .lead { border: 1px solid var(--line); border-radius: 9px; padding: 14px; margin-bottom: 10px; background: var(--panel); }
+  .lead-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .score { font-size: 20px; font-weight: 700; letter-spacing: -.02em; }
+  .pill { font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 99px; text-transform: uppercase; letter-spacing: .04em; }
+  .pill.HIGH { color: var(--high); background: color-mix(in srgb, var(--high) 14%, transparent); }
+  .pill.MEDIUM { color: var(--medium); background: color-mix(in srgb, var(--medium) 14%, transparent); }
+  .pill.LOW { color: var(--low); background: color-mix(in srgb, var(--low) 14%, transparent); }
+  .meta { font-size: 12.5px; color: var(--muted); }
+  .post { margin: 9px 0; padding: 9px 11px; background: var(--soft); border-radius: 7px; font-size: 13.5px; white-space: pre-wrap; }
+  .tags { display: flex; gap: 5px; flex-wrap: wrap; margin: 7px 0; }
+  .tag { font-size: 11.5px; padding: 2px 7px; border-radius: 5px; background: var(--soft); color: var(--muted); }
+  .draft { margin-top: 9px; padding: 10px 11px; border: 1px dashed var(--line); border-radius: 7px; font-size: 13px; white-space: pre-wrap; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 9px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-size: 11.5px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); font-weight: 600; }
+  .level-success { color: var(--high); } .level-warning { color: var(--medium); }
+  .level-error { color: var(--danger); } .level-info { color: var(--muted); }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+  .stat { background: var(--panel); border: 1px solid var(--line); border-radius: 9px; padding: 13px; }
+  .stat .n { font-size: 25px; font-weight: 700; letter-spacing: -.02em; }
+  .stat .k { font-size: 12px; color: var(--muted); }
+  .bar { display: flex; align-items: center; gap: 8px; margin: 5px 0; font-size: 13px; }
+  .bar .track { flex: 1; display: block; height: 8px; background: var(--soft); border-radius: 99px; overflow: hidden; }
+  .bar .fill { display: block; height: 8px; background: var(--accent); border-radius: 99px; min-width: 3px; }
+  .bar .label { min-width: 108px; } .bar .val { min-width: 30px; text-align: right; color: var(--muted); }
+  .spark { display: flex; align-items: flex-end; gap: 3px; height: 54px; margin-top: 8px; }
+  .spark div { flex: 1; background: var(--accent); border-radius: 2px 2px 0 0; min-height: 2px; }
+  [hidden] { display: none !important; }
+  .empty { padding: 26px; text-align: center; color: var(--muted); }
+  .toast {
+    position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
+    background: var(--ink); color: var(--bg); padding: 9px 15px; border-radius: 8px;
+    font-size: 13px; z-index: 50;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Circle Leads</h1>
+  <nav>
+    <button data-view="leads" aria-selected="true">Leads</button>
+    <button data-view="triage" aria-selected="false">Triage</button>
+    <button data-view="activity" aria-selected="false">Activity</button>
+    <button data-view="stats" aria-selected="false">Stats</button>
+    <button data-view="communities" aria-selected="false">Communities</button>
+    <button id="logout">Sign out</button>
+  </nav>
+</header>
+
+<main>
+  <!-- LEADS -->
+  <section id="view-leads">
+    <div class="panel">
+      <div class="row">
+        <input id="f-role" placeholder="Role, e.g. Flutter Developer" style="flex:1;min-width:180px">
+        <input id="f-skills" placeholder="Skills, comma separated" style="flex:1;min-width:160px">
+        <select id="f-priority">
+          <option value="">Any priority</option>
+          <option>HIGH</option><option>MEDIUM</option><option>LOW</option>
+        </select>
+        <select id="f-status">
+          <option value="">Any status</option>
+          <option value="pending_review">Pending</option>
+          <option value="contacted">Contacted</option>
+          <option value="replied">Replied</option>
+          <option value="won">Won</option>
+          <option value="rejected">Rejected</option>
+        </select>
+        <button class="action" id="f-apply">Filter</button>
+      </div>
+    </div>
+    <div id="leads-list"><div class="empty">Loading…</div></div>
+  </section>
+
+  <!-- TRIAGE -->
+  <section id="view-triage" hidden>
+    <div class="panel">
+      <h2>Paste community text</h2>
+      <p class="muted" style="margin-top:-6px">
+        Open a community you've joined, copy the posts on screen, and paste them here.
+      </p>
+      <div class="row" style="margin-bottom:8px">
+        <input id="t-community" placeholder="Community slug" value="manual" style="flex:1;min-width:150px">
+        <input id="t-space" placeholder="Space (optional)" style="flex:1;min-width:140px">
+        <input id="t-url" placeholder="Thread URL (optional)" style="flex:2;min-width:180px">
+      </div>
+      <textarea id="t-text" placeholder="Dana Ops · 2h ago&#10;We need someone to build our app…"></textarea>
+      <div class="row" style="margin-top:9px">
+        <button class="action" id="t-run">Find leads</button>
+        <label class="muted" style="display:flex;gap:6px;align-items:center">
+          <input type="checkbox" id="t-llm" style="width:auto"> Use AI for ambiguous posts
+        </label>
+      </div>
+    </div>
+    <div id="triage-out"></div>
+  </section>
+
+  <!-- ACTIVITY -->
+  <section id="view-activity" hidden>
+    <div class="panel">
+      <div class="row" style="margin-bottom:10px">
+        <h2 style="margin:0">Activity</h2>
+        <select id="a-kind" style="margin-left:auto">
+          <option value="">All events</option>
+          <option value="triage">Triage runs</option>
+          <option value="classify">Classifier decisions</option>
+          <option value="review">Review actions</option>
+          <option value="ingest">API ingestion</option>
+        </select>
+        <button class="ghost" id="a-refresh">Refresh</button>
+      </div>
+      <div id="activity-table"><div class="empty">Loading…</div></div>
+    </div>
+  </section>
+
+  <!-- STATS -->
+  <section id="view-stats" hidden>
+    <div class="grid" id="stat-cards"></div>
+    <div class="panel"><h2>Leads per day (14 days)</h2><div class="spark" id="spark"></div></div>
+    <div class="panel"><h2>By priority</h2><div id="by-priority"></div></div>
+    <div class="panel"><h2>By community</h2><div id="by-community"></div></div>
+    <div class="panel"><h2>Most requested skills</h2><div id="by-skill"></div></div>
+    <div class="panel"><h2>Decided by</h2><div id="by-decided"></div></div>
+  </section>
+
+  <!-- COMMUNITIES -->
+  <section id="view-communities" hidden>
+    <div class="panel"><div id="communities-table"><div class="empty">Loading…</div></div></div>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => (
+  { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+));
+
+function toast(message) {
+  const el = document.createElement('div');
+  el.className = 'toast';
+  el.textContent = message;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 2100);
+}
+
+async function api(path, options) {
+  const response = await fetch(path, options);
+  if (response.status === 401) { window.location = '/login'; return null; }
+  if (!response.ok) throw new Error(await response.text());
+  return response.json();
+}
+
+// --- Navigation -------------------------------------------------------
+const views = ['leads', 'triage', 'activity', 'stats', 'communities'];
+const loaders = {
+  leads: loadLeads, activity: loadActivity, stats: loadStats,
+  communities: loadCommunities, triage: () => {},
+};
+
+document.querySelectorAll('nav button[data-view]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const target = btn.dataset.view;
+    views.forEach(v => { $(`view-${v}`).hidden = v !== target; });
+    document.querySelectorAll('nav button[data-view]').forEach(b =>
+      b.setAttribute('aria-selected', String(b === btn)));
+    loaders[target]();
+  });
+});
+
+$('logout').addEventListener('click', async () => {
+  await fetch('/logout', { method: 'POST' });
+  window.location = '/login';
+});
+
+// --- Leads ------------------------------------------------------------
+function leadCard(lead) {
+  const tags = [
+    lead.job_title && `<span class="tag">${esc(lead.job_title)}</span>`,
+    ...(lead.skills || []).map(s => `<span class="tag">${esc(s)}</span>`),
+    lead.budget && `<span class="tag">${esc(lead.budget)}</span>`,
+    lead.urgency && `<span class="tag">${esc(lead.urgency)} urgency</span>`,
+    lead.hire_target && `<span class="tag">${esc(lead.hire_target)}</span>`,
+  ].filter(Boolean).join('');
+
+  const statuses = ['pending_review', 'contacted', 'replied', 'won', 'rejected'];
+  const buttons = lead.id ? statuses.map(s =>
+    `<button class="ghost" data-status="${s}" data-id="${lead.id}"
+       aria-pressed="${lead.review_status === s}">${s.replace('_', ' ')}</button>`
+  ).join('') : '';
+
+  return `<div class="lead">
+    <div class="lead-head">
+      <span class="score">${lead.lead_score}</span>
+      <span class="pill ${esc(lead.priority)}">${esc(lead.priority)}</span>
+      <span class="meta">${esc(lead.community)}${lead.author ? ' · ' + esc(lead.author) : ''}
+        ${lead.published_at ? ' · ' + esc(lead.published_at.slice(0, 10)) : ''}
+        · ${esc(lead.decided_by)} · confidence ${lead.confidence}</span>
+    </div>
+    <div class="tags">${tags}</div>
+    <div class="post">${esc(lead.content)}</div>
+    ${lead.url ? `<div class="meta"><a href="${esc(lead.url)}" target="_blank" rel="noopener">Open thread ↗</a></div>` : ''}
+    ${lead.reply_draft ? `<div class="draft">${esc(lead.reply_draft)}</div>
+      <div class="row" style="margin-top:7px">
+        <button class="ghost copy" data-text="${esc(lead.reply_draft)}">Copy reply</button>
+        ${buttons}
+      </div>` : `<div class="row" style="margin-top:7px">${buttons}</div>`}
+  </div>`;
+}
+
+async function loadLeads() {
+  const params = new URLSearchParams();
+  if ($('f-role').value) params.set('role', $('f-role').value);
+  if ($('f-skills').value) params.set('skills', $('f-skills').value);
+  if ($('f-priority').value) params.set('priority', $('f-priority').value);
+  if ($('f-status').value) params.set('status', $('f-status').value);
+
+  const data = await api('/api/leads?' + params);
+  if (!data) return;
+  $('leads-list').innerHTML = data.leads.length
+    ? data.leads.map(leadCard).join('')
+    : '<div class="empty">No leads match. Try the Triage tab to add some.</div>';
+}
+
+$('f-apply').addEventListener('click', loadLeads);
+
+document.addEventListener('click', async (event) => {
+  const copy = event.target.closest('.copy');
+  if (copy) {
+    await navigator.clipboard.writeText(copy.dataset.text);
+    toast('Reply copied');
+    return;
+  }
+  const status = event.target.closest('[data-status]');
+  if (status) {
+    await api(`/api/leads/${status.dataset.id}/status`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: status.dataset.status }),
+    });
+    toast('Marked ' + status.dataset.status.replace('_', ' '));
+    loadLeads();
+  }
+});
+
+// --- Triage -----------------------------------------------------------
+$('t-run').addEventListener('click', async () => {
+  const text = $('t-text').value;
+  if (!text.trim()) { toast('Paste some text first'); return; }
+
+  $('t-run').disabled = true;
+  $('t-run').textContent = 'Reading…';
+  try {
+    const data = await api('/api/triage', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text,
+        community: $('t-community').value || 'manual',
+        space: $('t-space').value,
+        url: $('t-url').value,
+        use_llm: $('t-llm').checked,
+      }),
+    });
+    if (!data) return;
+    const summary = `<div class="panel"><strong>Read ${data.total_posts} post(s)</strong>
+      <span class="muted"> — ${data.leads.length} lead(s), ${data.not_leads} not-lead,
+      ${data.filtered} filtered, ${data.already_seen} seen before</span></div>`;
+    $('triage-out').innerHTML = summary + (data.leads.length
+      ? data.leads.map(leadCard).join('')
+      : '<div class="empty">Nothing worth replying to in this batch.</div>');
+  } catch (err) {
+    $('triage-out').innerHTML = `<div class="panel level-error">${esc(err.message)}</div>`;
+  } finally {
+    $('t-run').disabled = false;
+    $('t-run').textContent = 'Find leads';
+  }
+});
+
+// --- Activity ---------------------------------------------------------
+async function loadActivity() {
+  const kind = $('a-kind').value;
+  const data = await api('/api/activity?limit=200' + (kind ? `&kind=${kind}` : ''));
+  if (!data) return;
+
+  $('activity-table').innerHTML = data.activity.length ? `<table>
+    <thead><tr><th>When</th><th>Event</th><th>Community</th><th>What happened</th><th>By</th></tr></thead>
+    <tbody>${data.activity.map(a => `<tr>
+      <td class="muted">${esc((a.created_at || '').replace('T', ' ').slice(0, 16))}</td>
+      <td class="level-${esc(a.level)}">${esc(a.kind)}</td>
+      <td>${esc(a.community || '—')}</td>
+      <td>${esc(a.summary)}${a.detail && a.detail.evidence
+        ? `<div class="muted" style="font-size:12px">“${esc(a.detail.evidence)}”</div>` : ''}</td>
+      <td class="muted">${esc(a.decided_by || '—')}</td>
+    </tr>`).join('')}</tbody></table>`
+    : '<div class="empty">No activity yet.</div>';
+}
+$('a-refresh').addEventListener('click', loadActivity);
+$('a-kind').addEventListener('change', loadActivity);
+
+// --- Stats ------------------------------------------------------------
+function bars(target, entries) {
+  const items = Object.entries(entries || {}).filter(([, v]) => v);
+  if (!items.length) { $(target).innerHTML = '<div class="muted">No data yet.</div>'; return; }
+  const max = Math.max(...items.map(([, v]) => v));
+  $(target).innerHTML = items.sort((a, b) => b[1] - a[1]).map(([k, v]) => `
+    <div class="bar"><span class="label">${esc(k)}</span>
+      <span class="track"><span class="fill" style="width:${(v / max) * 100}%"></span></span>
+      <span class="val">${v}</span></div>`).join('');
+}
+
+async function loadStats() {
+  const data = await api('/api/stats');
+  if (!data) return;
+
+  $('stat-cards').innerHTML = [
+    ['Leads', data.leads], ['Posts read', data.posts],
+    ['Communities', data.communities], ['High priority', data.by_priority.HIGH || 0],
+  ].map(([k, n]) => `<div class="stat"><div class="n">${n}</div><div class="k">${k}</div></div>`).join('');
+
+  const max = Math.max(1, ...data.timeline.map(p => p.count));
+  $('spark').innerHTML = data.timeline.map(p =>
+    `<div style="height:${(p.count / max) * 100}%" title="${p.date}: ${p.count}"></div>`).join('');
+
+  bars('by-priority', data.by_priority);
+  bars('by-community', data.by_community);
+  bars('by-skill', Object.fromEntries(data.top_skills || []));
+  bars('by-decided', data.decided_by);
+}
+
+// --- Communities ------------------------------------------------------
+async function loadCommunities() {
+  const data = await api('/api/communities');
+  if (!data) return;
+  $('communities-table').innerHTML = data.communities.length ? `<table>
+    <thead><tr><th>Community</th><th>Relevance</th><th>Access</th><th>Permission</th><th>Last synced</th></tr></thead>
+    <tbody>${data.communities.map(c => `<tr>
+      <td>${esc(c.slug)}</td>
+      <td>${Math.round(c.relevance_score)}</td>
+      <td class="muted">${esc(c.access_status)}</td>
+      <td>${esc(c.permission_status)}</td>
+      <td class="muted">${esc((c.last_synced_at || '—').slice(0, 10))}</td>
+    </tr>`).join('')}</tbody></table>`
+    : '<div class="empty">No communities yet.</div>';
+}
+
+loadLeads();
+</script>
+</body>
+</html>
