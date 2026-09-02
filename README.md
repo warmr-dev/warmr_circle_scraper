@@ -87,6 +87,9 @@ circle-leads export --format csv --priority HIGH -o exports/leads.csv
 Every command accepts `--db` and `--config`. Run `circle-leads -h` for the full
 list.
 
+**New here? Read [docs/HOWTO.md](docs/HOWTO.md)** — how each stage works, plus
+setup, daily use, tuning, and troubleshooting.
+
 ---
 
 ## Architecture
