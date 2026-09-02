@@ -438,6 +438,49 @@ list, and enumerating `*.circle.so` subdomains would be a scan against their
 infrastructure — it gets IPs blocked and returns mostly dead or private hosts.
 Topic search finds the ones that are real, relevant, and join-able.
 
+
+## Automating the search (cron or a worker)
+
+`search-watch` runs one or more niches, saves the finds, and flags which are
+new since last time. It runs one-shot (for cron) or loops (for a worker).
+
+```bash
+# one-shot: search, save new finds, exit
+circle-leads search-watch "flutter developer" "startup founders" --min-score 25
+
+# see what turned up that you haven't visited
+circle-leads new-communities
+```
+
+New finds also appear in the dashboard's Communities tab. A re-run only flags
+communities not seen before, so you review fresh candidates, not the whole list.
+
+### Local — cron / launchd
+
+```cron
+# every morning at 8am (edit the paths)
+0 8 * * *  cd /path/to/circle-scraper && ./.venv/bin/circle-leads \
+  --db "$CIRCLE_LEADS_DB" search-watch "flutter developer" "startup founders" \
+  --min-score 25 --quiet >> /tmp/circle-search.log 2>&1
+```
+
+See `deploy/search-watch.cron.example`.
+
+### Cloud — Railway / Out Plane
+
+Same command, as a background worker on an interval:
+
+```bash
+circle-leads --db "$CIRCLE_LEADS_DB" search-watch "flutter developer" --interval 86400 --min-score 25
+```
+
+Two services share one Postgres DB — the dashboard (web) and this worker
+(background). Full setup in `deploy/railway.md`, with a `deploy/Dockerfile`.
+Set `BRAVE_API_KEY` in the cloud: the keyless fallback rate-limits under a
+server's shared IP.
+
+Nothing is ever auto-joined — the worker only fills your shortlist.
+
 ---
 
 # Part 3 — Daily use

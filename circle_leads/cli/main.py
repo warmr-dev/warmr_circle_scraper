@@ -14,6 +14,7 @@ from circle_leads.config.settings import (
 )
 from circle_leads.discovery.finder import rank_extracted, rank_from_html
 from circle_leads.discovery.web_search import discover_by_search
+from circle_leads.discovery.persist import new_since, persist_finds
 from circle_leads.discovery.discover_communities import (
     dedupe,
     extract_from_text,
@@ -203,6 +204,95 @@ def search_web_cmd(ctx, niche, free_only, min_score, limit, no_fetch, no_directo
         f"\n{len(ranked)} candidate(s). Open the join URLs, join the ones that "
         "fit -- as yourself, one click each."
     )
+
+
+
+@cli.command("search-watch")
+@click.argument("niches", nargs=-1)
+@click.option("--interval", type=int, default=0,
+              help="Seconds between runs. 0 = run once and exit (for cron).")
+@click.option("--min-score", type=int, default=25, show_default=True,
+              help="Only save finds at or above this score.")
+@click.option("--free-only", is_flag=True, help="Only save communities marked free.")
+@click.option("--quiet", is_flag=True, help="Only print when new communities appear.")
+@click.pass_context
+def search_watch_cmd(ctx, niches, interval, min_score, free_only, quiet):
+    """Search niches on a schedule, save finds, and flag the new ones.
+
+    Run once from cron, or loop as a long-running worker. Either way, new
+    communities land in the database and show up in the dashboard's
+    Communities tab; a re-run only flags ones not seen before.
+
+    \b
+      # one-shot (put this line in cron / a Railway cron service):
+      circle-leads search-watch "flutter developer" "startup founders" --min-score 25
+
+      # long-running worker (Railway/Out Plane background service):
+      circle-leads search-watch "flutter developer" --interval 86400
+    """
+    if not niches:
+        # Fall back to niches in the config if none given on the CLI.
+        niches = tuple(getattr(ctx.obj["requirements"], "target_roles", []) or [])
+        niches = tuple(dict.fromkeys(n.split()[0] + " developer" for n in niches))[:3]
+    if not niches:
+        raise click.UsageError("Give at least one niche, e.g. \"flutter developer\".")
+
+    def one_pass() -> int:
+        total_new = 0
+        for niche in niches:
+            if not quiet:
+                click.echo(f"Searching '{niche}'...", err=True)
+            disc = discover_by_search(niche)
+            ranked = [c for c in disc.ranked if not free_only or c.is_free]
+            res = persist_finds(
+                ctx.obj["db"], ranked, niche=niche, min_score=min_score, source="search-watch",
+            )
+            total_new += res.new_count
+            if res.new or not quiet:
+                click.echo(
+                    f"  '{niche}': {res.new_count} NEW, {len(res.updated)} updated "
+                    f"(backend={disc.backend})"
+                )
+                for rc in res.new:
+                    click.echo(f"    + {rc.score:>3} {rc.tier:<13} {rc.name or rc.slug}")
+                    click.echo(f"          join: {rc.join_url}")
+        return total_new
+
+    if interval <= 0:
+        n = one_pass()
+        click.echo(f"\nDone. {n} new community/communities. "
+                   f"See them with `circle-leads communities` or the dashboard.")
+        return
+
+    import time as _time
+    click.echo(f"Watching {len(niches)} niche(s) every {interval}s. Ctrl-C to stop.", err=True)
+    while True:
+        try:
+            n = one_pass()
+            click.echo(f"[{_time.strftime('%Y-%m-%d %H:%M')}] {n} new.", err=True)
+            _time.sleep(interval)
+        except KeyboardInterrupt:
+            click.echo("\nStopped.", err=True)
+            return
+
+
+@cli.command("new-communities")
+@click.option("--limit", type=int, default=50, show_default=True)
+@click.pass_context
+def new_communities_cmd(ctx, limit):
+    """List discovered communities you haven't visited yet, best first."""
+    rows = new_since(ctx.obj["db"], limit=limit)
+    if not rows:
+        click.echo("Nothing new. Run `circle-leads search-watch \"<niche>\"` first.")
+        return
+    click.echo(f"\n{'SCORE':>5}  COMMUNITY")
+    click.echo("-" * 60)
+    for r in rows:
+        free = " (free)" if (r.get("price_label") or "").lower().startswith("free") else ""
+        click.echo(f"{int(r['score']):>5}  {(r['name'] or r['slug'])[:34]}{free}")
+        click.echo(f"       join: {r['join_url']}")
+    click.echo("-" * 60)
+    click.echo(f"\n{len(rows)} unvisited. Join the good ones, then `triage` their posts.")
 
 
 

@@ -1,0 +1,139 @@
+"""Persist ranked community finds and flag which are new.
+
+A search is only useful automatically if a re-run tells you what changed. This
+stores each find in the ``communities`` table and reports which slugs were seen
+for the first time on this run, so a scheduled search surfaces fresh candidates
+rather than the same list every day.
+
+Storing a find records *that the community exists and how it scored* -- nothing
+about joining it. `permission_status` stays `candidate`; a find never implies
+access or approval.
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass, field
+
+from sqlalchemy import select
+
+from circle_leads.discovery.finder import RankedCommunity
+from circle_leads.storage.activity import log_activity
+from circle_leads.storage.database import Database
+from circle_leads.storage.models import AccessState, Community, PermissionStatus
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class PersistResult:
+    new: list[RankedCommunity] = field(default_factory=list)
+    updated: list[RankedCommunity] = field(default_factory=list)
+    unchanged: int = 0
+
+    @property
+    def new_count(self) -> int:
+        return len(self.new)
+
+
+def _looks_like_circle_subdomain(rc: RankedCommunity) -> bool:
+    return ".circle.so" in (rc.join_url or "")
+
+
+def persist_finds(
+    db: Database,
+    ranked: list[RankedCommunity],
+    *,
+    niche: str | None = None,
+    min_score: int = 0,
+    source: str = "search",
+) -> PersistResult:
+    """Store finds; return which slugs are new since the last run.
+
+    A find already in the DB updates its score and reasons (a re-search may see
+    it differently) but is never re-flagged as new.
+    """
+    result = PersistResult()
+
+    with db.session() as s:
+        for rc in ranked:
+            if rc.score < min_score:
+                continue
+
+            existing = s.scalar(select(Community).where(Community.slug == rc.slug))
+            if existing is None:
+                community = Community(
+                    slug=rc.slug,
+                    name=rc.name,
+                    url=rc.join_url,
+                    discovery_source=f"{source}:{niche}" if niche else source,
+                    access_status=AccessState.NOT_VISITED.value,
+                    permission_status=PermissionStatus.CANDIDATE.value,
+                    relevance_score=rc.score,
+                    relevance_reasons=rc.reasons,
+                    relevant=rc.score >= 30,
+                    price_label=rc.price_label,
+                    description=rc.description,
+                )
+                s.add(community)
+                result.new.append(rc)
+            else:
+                changed = False
+                if rc.score > (existing.relevance_score or 0):
+                    existing.relevance_score = rc.score
+                    existing.relevance_reasons = rc.reasons
+                    existing.relevant = rc.score >= 30
+                    changed = True
+                if rc.name and not existing.name:
+                    existing.name = rc.name
+                    changed = True
+                if rc.price_label and not existing.price_label:
+                    existing.price_label = rc.price_label
+                    changed = True
+                if changed:
+                    result.updated.append(rc)
+                else:
+                    result.unchanged += 1
+
+        log_activity(
+            s,
+            kind="discover",
+            level="success" if result.new else "info",
+            summary=(
+                f"Search '{niche}': {result.new_count} new, "
+                f"{len(result.updated)} updated, {result.unchanged} unchanged"
+            ),
+            detail={
+                "niche": niche,
+                "source": source,
+                "new_slugs": ", ".join(c.slug for c in result.new[:20]),
+            },
+            items_seen=len(ranked),
+            leads_found=result.new_count,
+        )
+
+    return result
+
+
+def new_since(db: Database, *, limit: int = 50) -> list[dict]:
+    """Communities discovered but not yet visited, best score first."""
+    with db.session() as s:
+        rows = s.scalars(
+            select(Community)
+            .where(Community.access_status == AccessState.NOT_VISITED.value)
+            .order_by(Community.relevance_score.desc())
+            .limit(limit)
+        ).all()
+        return [
+            {
+                "slug": c.slug,
+                "name": c.name,
+                "join_url": c.url,
+                "score": c.relevance_score,
+                "reasons": c.relevance_reasons or [],
+                "price_label": c.price_label,
+                "discovered_at": c.discovered_at.isoformat() if c.discovered_at else None,
+                "source": c.discovery_source,
+            }
+            for c in rows
+        ]

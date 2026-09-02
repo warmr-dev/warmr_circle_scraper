@@ -20,3 +20,4 @@ data/
 *.db
 *.sqlite3
 exports/
+circle-search.log

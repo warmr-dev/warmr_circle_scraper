@@ -285,6 +285,11 @@ def create_app(db_url: str | None = None, config_path: str | None = None) -> Fas
                 ]
             }
 
+    @app.get("/api/new-communities")
+    def api_new_communities(limit: int = 50, _: None = Depends(require_auth)) -> dict[str, Any]:
+        from circle_leads.discovery.persist import new_since
+        return {"communities": new_since(db, limit=limit)}
+
     @app.get("/api/config")
     def api_config(_: None = Depends(require_auth)) -> dict[str, Any]:
         return {

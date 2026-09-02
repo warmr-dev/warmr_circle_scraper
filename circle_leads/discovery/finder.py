@@ -102,6 +102,20 @@ def is_free(price_label: str | None) -> bool:
     return "free" in price_label.lower()
 
 
+
+def _clean_name(text: str) -> str:
+    """Turn messy link text into a readable community name."""
+    # Repair common UTF-8-as-latin1 mojibake ("Â·" -> "·").
+    try:
+        text = text.encode("latin-1").decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        pass
+    text = re.sub(r"\s+", " ", text).strip()
+    # Names precede the first separator, date, or byline marker.
+    text = re.split(r"\s+[—\-|:·•]\s+|\d{1,2}/\d{1,2}/\d{2,4}", text)[0].strip()
+    return text[:60].strip(" -–—·•")
+
+
 def rank_discover_listings(listings: list[dict]) -> list[RankedCommunity]:
     """Rank structured Discover listings.
 
@@ -175,7 +189,7 @@ def rank_from_html(html: str, *, source: str = "html") -> list[RankedCommunity]:
         seen.add(slug)
         # The visible link text carries the name and often a description; a
         # "Free" label in it is real signal too.
-        name = re.split(r"[—\-|:]", text, maxsplit=1)[0].strip() or slug.replace("-", " ").title()
+        name = _clean_name(text) or slug.replace("-", " ").title()
         score, reasons = _score_listing(text, None, text)
         ranked.append(
             RankedCommunity(
