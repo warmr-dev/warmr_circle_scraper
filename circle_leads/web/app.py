@@ -160,6 +160,19 @@ def create_app(db_url: str | None = None, config_path: str | None = None) -> Fas
             )
         return {"ok": True, "status": new_status}
 
+    @app.post("/api/communities/{slug}/visited")
+    def mark_visited(slug: str, payload: dict, _: None = Depends(require_auth)) -> dict[str, Any]:
+        from circle_leads.storage.models import AccessState
+        new_state = payload.get("state", AccessState.JOINED.value)
+        with db.session() as s:
+            c = s.scalar(select(Community).where(Community.slug == slug))
+            if c is None:
+                raise HTTPException(404, "Community not found")
+            c.access_status = new_state
+            log_activity(s, kind="review", community=slug,
+                         summary=f"Community {slug} marked {new_state}")
+        return {"ok": True, "state": new_state}
+
     # --- Triage -----------------------------------------------------------
 
     @app.post("/api/triage")
@@ -272,8 +285,11 @@ def create_app(db_url: str | None = None, config_path: str | None = None) -> Fas
                 "communities": [
                     {
                         "slug": c.slug,
+                        "name": c.name,
                         "url": c.url,
+                        "price_label": c.price_label,
                         "relevance_score": c.relevance_score,
+                        "relevance_reasons": c.relevance_reasons or [],
                         "relevant": c.relevant,
                         "access_status": c.access_status,
                         "permission_status": c.permission_status,
