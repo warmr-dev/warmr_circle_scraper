@@ -12,6 +12,7 @@ from circle_leads.config.settings import (
     load_community_permissions,
     load_requirements,
 )
+from circle_leads.discovery.finder import rank_extracted, rank_from_html
 from circle_leads.discovery.discover_communities import (
     dedupe,
     extract_from_text,
@@ -84,6 +85,61 @@ def discover_cmd(ctx, from_file, from_html, urls, no_validate):
         "ingestion.\nObtain operator approval, then create a permission file "
         f"in {DEFAULT_PERMISSIONS_DIR}/."
     )
+
+
+@cli.command("find")
+@click.option("--from-html", "from_html", type=click.Path(exists=True),
+              help="A saved public page (Circle Discover, a directory, search results).")
+@click.option("--url", "urls", multiple=True, help="A community URL to score. Repeatable.")
+@click.option("--free-only", is_flag=True, help="Only show communities marked free.")
+@click.option("--min-score", type=int, default=0, show_default=True)
+@click.option("--limit", type=int, default=30, show_default=True)
+@click.pass_context
+def find_cmd(ctx, from_html, urls, free_only, min_score, limit):
+    """Rank candidate communities to join, by likely hiring activity.
+
+    Reads public listing pages only. It never joins anything -- the output is a
+    shortlist with a join URL and a reason for each, so you click Join on the
+    good ones yourself.
+    """
+    ranked = []
+    if from_html:
+        ranked += rank_from_html(
+            Path(from_html).read_text(encoding="utf-8", errors="ignore"),
+            source=Path(from_html).name,
+        )
+    if urls:
+        ranked += rank_extracted(extract_from_text("\n".join(urls), source="cli"))
+
+    if not ranked:
+        raise click.UsageError(
+            "Nothing to rank. Save a public page and pass --from-html, or pass --url.\n"
+            "Circle's directory is at https://discover.circle.so/ -- save it from your browser."
+        )
+
+    if free_only:
+        ranked = [c for c in ranked if c.is_free]
+    ranked = [c for c in ranked if c.score >= min_score][:limit]
+
+    if not ranked:
+        click.echo("No communities matched. Try without --free-only or a lower --min-score.")
+        return
+
+    click.echo(f"\n{'TIER':<14}{'SCORE':>5}  {'FREE':<5} COMMUNITY")
+    click.echo("-" * 72)
+    for c in ranked:
+        click.echo(f"{c.tier:<14}{c.score:>5}  {'yes' if c.is_free else 'no':<5} {(c.name or c.slug)[:34]}")
+        pos = [r for r in c.reasons[:5] if not r.startswith("not:")]
+        if pos:
+            click.echo(f"{'':19}why: {', '.join(pos)}")
+        click.echo(f"{'':19}join: {c.join_url}")
+    click.echo("-" * 72)
+    click.echo(
+        f"\n{len(ranked)} candidate(s). Open the join URLs and join the ones that "
+        "fit -- as yourself, one click each.\nThen read them and paste posts into "
+        "`circle-leads triage`."
+    )
+
 
 
 @cli.command("communities")

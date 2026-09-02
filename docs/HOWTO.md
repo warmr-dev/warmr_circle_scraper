@@ -357,6 +357,60 @@ file, the database, an export, or a log. `.env` is gitignored.
 
 ---
 
+# Part 2b — Finding communities to join
+
+You do the joining (one click each, as yourself). This finds and ranks the
+candidates so you're clicking Join on a shortlist, not hunting blind.
+
+## How
+
+1. Open Circle's directory: https://discover.circle.so/ — or any public page
+   that lists communities (a directory, a "best Circle communities" post, your
+   own search results).
+2. Save it from your browser (⌘S / Ctrl-S → "Web page, HTML only").
+3. Rank it:
+
+```bash
+circle-leads find --from-html discover.html --free-only
+```
+
+```
+TIER          SCORE  FREE  COMMUNITY
+------------------------------------------------------------------------
+STRONG           85  no    SaaS Founders
+                   why: founder, founders, saas
+                   join: https://saas-founders.circle.so
+WORTH A LOOK     41  no    The Entreprenista League
+                   why: entrepreneurs
+                   join: https://discover.circle.so/products/the-entreprenista-league
+```
+
+Each row is a candidate with its join URL and *why* it ranked. Open the
+STRONG and WORTH A LOOK ones, join the ones that fit — one click each — then
+read them and paste posts into `circle-leads triage`.
+
+You can also score URLs you already have:
+
+```bash
+circle-leads find --url https://saas-founders.circle.so --url https://indie.circle.so
+```
+
+## How it ranks
+
+Buyer signals lift a community (founder, startup, SaaS, agency, indie hacker,
+hiring, MVP); hobby/wellness signals sink it (yoga, bible, running, life coach).
+`STRONG ≥55 · WORTH A LOOK 30–54 · PROBABLY NOT <54`.
+
+## An honest limit
+
+Circle Discover's front page is mostly creator and wellness communities — the
+dense software-hiring communities are found by *searching* Discover and the web
+for your niche ("Flutter", "startup founders", "SaaS", "no-code"), then saving
+those result pages. The finder ranks whatever you feed it; it's only as good as
+the pages you point it at. It never joins anything and never uses your account.
+
+---
+
 # Part 3 — Daily use
 
 ## The whole thing
