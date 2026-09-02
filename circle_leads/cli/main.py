@@ -21,6 +21,7 @@ from circle_leads.export.exporters import query_leads, to_csv, to_json
 from circle_leads.pipeline import classify_pending, discover, ingest_community
 from circle_leads.storage.database import Database, purge_community, purge_expired
 from circle_leads.storage.models import Community, Lead, Post
+from circle_leads.triage.pipeline import triage_text
 
 DEFAULT_PERMISSIONS_DIR = "circle_leads/config/communities"
 
@@ -277,6 +278,103 @@ def export_cmd(ctx, fmt, output, min_score, priority, community, extended):
     path = Path(output) if output else Path("exports") / f"leads.{fmt}"
     written = to_csv(rows, path, extended=extended) if fmt == "csv" else to_json(rows, path)
     click.echo(f"Exported {len(rows)} lead(s) to {written}")
+
+
+# --- Manual triage ----------------------------------------------------------
+
+
+@cli.command("triage")
+@click.option("--file", "path", type=click.Path(exists=True),
+              help="File of pasted community text.")
+@click.option("--community", default="manual", show_default=True,
+              help="Which community this text came from.")
+@click.option("--space", default=None, help="Which space, for your own notes.")
+@click.option("--url", "source_url", default=None,
+              help="Link back to the thread, so you can return to it.")
+@click.option("--use-llm", is_flag=True, help="Escalate ambiguous posts to an LLM.")
+@click.option("--name", "your_name", default=None, help="Sign reply drafts with this name.")
+@click.option("--min-score", type=int, default=0, show_default=True)
+@click.option("--show-replies/--no-replies", default=True, show_default=True,
+              help="Show a draft opening reply for each lead.")
+@click.pass_context
+def triage_cmd(ctx, path, community, space, source_url, use_llm, your_name,
+               min_score, show_replies):
+    """Find leads in community text you paste in.
+
+    For communities you have joined as an ordinary member: read the pages you
+    are entitled to read, copy what is on screen, and this ranks the people
+    worth replying to.
+
+    \b
+      circle-leads triage --file posts.txt --community flutter-devs
+      pbpaste | circle-leads triage --community flutter-devs
+    """
+    if path:
+        text = Path(path).read_text(encoding="utf-8", errors="ignore")
+    else:
+        if sys.stdin.isatty():
+            click.echo(
+                "Paste the community text, then press Ctrl-D (Ctrl-Z on Windows):\n",
+                err=True,
+            )
+        text = sys.stdin.read()
+
+    if not text.strip():
+        raise click.UsageError("No text supplied. Use --file or pipe text in.")
+
+    result = triage_text(
+        ctx.obj["db"], text, ctx.obj["requirements"],
+        community=community, space=space, source_url=source_url,
+        use_llm=use_llm, your_name=your_name,
+    )
+
+    shown = [x for x in result.leads if x["lead_score"] >= min_score]
+    click.echo(
+        f"\nRead {result.total_posts} post(s): {len(result.leads)} lead(s), "
+        f"{result.not_leads} not-lead, {result.filtered} filtered, "
+        f"{result.duplicates} duplicate(s), {result.already_seen} seen before."
+    )
+
+    if not shown:
+        click.echo("\nNothing worth replying to in this batch.")
+        return
+
+    for lead in shown:
+        click.echo("\n" + "=" * 68)
+        head = f"{lead['lead_score']}  {lead['priority']}"
+        if lead.get("is_duplicate"):
+            head += "  (duplicate)"
+        click.echo(head)
+        if lead.get("author"):
+            click.echo(f"From:      {lead['author']}"
+                       + (f"  ({lead['posted_label']})" if lead.get("posted_label") else ""))
+        if lead.get("job_title"):
+            click.echo(f"Needs:     {lead['job_title']}")
+        elif lead.get("hire_target"):
+            click.echo(f"Needs:     {lead['hire_target']}")
+        if lead.get("skills"):
+            click.echo(f"Skills:    {', '.join(lead['skills'])}")
+        if lead.get("budget"):
+            click.echo(f"Budget:    {lead['budget']}")
+        if lead.get("urgency"):
+            click.echo(f"Urgency:   {lead['urgency']}")
+        body = " ".join((lead.get("content") or "").split())
+        click.echo(f"Post:      \"{body[:200]}{'...' if len(body) > 200 else ''}\"")
+        if lead.get("url"):
+            click.echo(f"URL:       {lead['url']}")
+
+        if show_replies:
+            click.echo("\n  Draft reply:")
+            for line in lead["reply_draft"].split("\n"):
+                click.echo(f"    {line}")
+            for note in lead.get("reply_notes") or []:
+                click.echo(f"    ! {note}")
+
+    click.echo("\n" + "=" * 68)
+    click.echo(
+        f"{len(shown)} lead(s). Read the original thread before replying, and "
+        "follow the community's rules on promotion."
+    )
 
 
 # --- Config and retention ---------------------------------------------------

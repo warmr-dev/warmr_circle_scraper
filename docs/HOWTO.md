@@ -454,6 +454,108 @@ operator, not housekeeping.
 
 ---
 
+# Part 3b — Finding leads in communities you've joined
+
+You don't need to be an admin, and you don't need anyone's API token. If you've
+joined a free community as an ordinary member, you can read it in your browser
+like any member — and `triage` does the hard part on what you read.
+
+## The workflow
+
+1. Open a community you've joined. Go to the space where people post requests
+   — jobs, marketplace, general, introductions.
+2. Select the posts on screen and copy them.
+3. Paste them in:
+
+```bash
+pbpaste | circle-leads triage --community flutter-devs --name "Your Name"
+```
+
+or save to a file first:
+
+```bash
+circle-leads triage --file posts.txt --community flutter-devs --name "Your Name"
+```
+
+## What you get
+
+```
+Read 5 post(s): 3 lead(s), 2 not-lead, 0 filtered, 0 duplicate(s), 0 seen before.
+
+====================================================================
+82  HIGH
+From:      Priya N  (yesterday)
+Needs:     Flutter Dev
+Skills:    Flutter
+Post:      "Anyone know a good Flutter dev? We're rebuilding our booking app
+            and our current contractor just dropped out."
+
+  Draft reply:
+    Hi Priya — saw you're looking for a flutter dev.
+    I work with Flutter and have built and shipped this kind of thing before.
+    What does the scope look like, and do you have a budget range?
+
+    — Your Name
+
+====================================================================
+74  MEDIUM
+From:      Dana Ops  (2h ago)
+Skills:    Flutter
+Budget:    $20k
+Urgency:   High
+Post:      "We need someone to build our iOS and Android app. Budget around
+            $20k for the first milestone, start ASAP. Flutter preferred."
+
+  Draft reply:
+    Hi Dana — saw you're looking for Flutter work.
+    I work with Flutter and have built and shipped this kind of thing before.
+    How soon do you need someone starting?
+
+    — Your Name
+    ! Marked urgent — reply soon or the moment passes.
+```
+
+The job seeker ("I'm a Flutter developer looking for work") and the release-note
+post were dropped automatically. That filtering is the point: you skim three
+ranked leads instead of fifty posts.
+
+## What it handles for you
+
+- **Splits pasted text into posts** using Circle's `Name · 2h ago` bylines,
+  explicit `---` separators, or blank lines.
+- **Strips UI chrome** — "12 likes  4 comments", "Reply", "Share".
+- **Reads relative timestamps** so recency scoring works ("2h ago" → today).
+- **Remembers what you've seen.** Paste the same screen twice and it reports
+  `5 seen before` rather than duplicating leads. Safe to re-paste a page you
+  scrolled further down.
+- **Drafts an opening reply** naming what they asked for and asking one real
+  question. Edit before sending — it's a starting point, not a send button.
+- **Feeds the same database**, so `search`, `export`, `stats` all work on
+  triaged leads.
+
+## Useful flags
+
+```bash
+--community <slug>     which community this came from (keeps leads separate)
+--space <name>         which space, for your own notes
+--url <link>           link back to the thread so you can return to it
+--name "Your Name"     signs the reply drafts
+--min-score 50         only show leads worth your time
+--no-replies           just the list, no drafts
+--use-llm              escalate ambiguous posts to the model
+```
+
+## Two honest limits
+
+**It only sees what you paste.** There is no background collection — this is a
+tool for reading faster, not a crawler.
+
+**Reply like a member, not a marketer.** Most communities allow helpful replies
+in-thread and dislike cold DMs. Read the room's rules first; a useful answer
+that happens to mention you can help beats a pitch every time.
+
+---
+
 # Part 4 — Tuning
 
 Everything lives in `circle_leads/config/requirements.yaml`. No code changes.
