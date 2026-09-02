@@ -222,21 +222,35 @@ def find_near_duplicate(
     """Find an earlier post whose content is near-identical to this one."""
     if not post.simhash:
         return None
+    # Scoped to one community: each community's data is consented to
+    # separately, so a duplicate link must never cross that boundary.
     exact = session.scalar(
-        select(Post).where(
-            Post.dedup_hash == post.dedup_hash, Post.id != post.id
-        ).order_by(Post.id)
+        select(Post)
+        .where(
+            Post.community_id == post.community_id,
+            Post.dedup_hash == post.dedup_hash,
+            Post.id != post.id,
+        )
+        .order_by(Post.id)
     )
     if exact:
         return exact
+
     if threshold is None:
         threshold = near_duplicate_threshold(post.content)
-    candidates = session.scalars(
-        select(Post).where(Post.id != post.id, Post.simhash.is_not(None))
+
+    # Select ids and hashes only -- hydrating every row as an ORM entity made
+    # classification quadratic in table size.
+    rows = session.execute(
+        select(Post.id, Post.simhash).where(
+            Post.community_id == post.community_id,
+            Post.id != post.id,
+            Post.simhash.is_not(None),
+        )
     ).all()
-    for c in candidates:
-        if hamming_distance(post.simhash, c.simhash) <= threshold:
-            return c
+    for other_id, other_simhash in rows:
+        if hamming_distance(post.simhash, other_simhash) <= threshold:
+            return session.get(Post, other_id)
     return None
 
 
@@ -280,4 +294,7 @@ def purge_community(session: Session, slug: str) -> int:
     ).all():
         r.community_id = None
     c.permission_status = "revoked"
+    # Clear the watermark: after a purge, a later re-approval must re-collect
+    # from scratch rather than silently skipping the deleted window.
+    c.last_synced_at = None
     return removed

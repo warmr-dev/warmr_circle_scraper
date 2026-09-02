@@ -15,7 +15,20 @@ from typing import Any
 _TAG = re.compile(r"<[^>]+>")
 _WS = re.compile(r"\s+")
 _EMAIL = re.compile(r"\b[\w.%+-]+@[\w.-]+\.[A-Za-z]{2,}\b")
-_PHONE = re.compile(r"\b(?:\+?\d{1,3}[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?)\d{3}[\s.-]?\d{4}\b")
+# A bare "NNN NNN NNNN" digit run also describes budgets and salaries, so a
+# match needs positive phone evidence: an E.164 "+", parenthesized area code,
+# a separator-joined national form, or a nearby phone cue. Anything else is
+# left alone rather than shredding the budget figures the scorer depends on.
+_PHONE = re.compile(
+    r"""(?<![\w.])(?:
+        \+\d{1,3}[\s.-]?\(?\d{1,4}\)?(?:[\s.-]?\d{2,4}){1,4}   # +44 20 7946 0958
+      | \(\d{3}\)[\s.-]?\d{3}[\s.-]?\d{4}                       # (555) 123-4567
+      | \d{3}[.-]\d{3}[.-]\d{4}                                   # 555-123-4567
+      | (?:tel|phone|call|text|whatsapp|mobile|cell)\W{0,3}
+        \+?[\d][\d\s.()-]{6,18}\d                                 # cue-prefixed
+    )(?![\d])""",
+    re.I | re.X,
+)
 
 
 def strip_html(value: str | None) -> str:

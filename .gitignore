@@ -12,6 +12,7 @@ htmlcov/
 *.secret
 secrets.yaml
 **/config/communities/*.yaml
+**/config/communities/*.yml
 !**/config/communities/*.yaml.template
 
 # Local data

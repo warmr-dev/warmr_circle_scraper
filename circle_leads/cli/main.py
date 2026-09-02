@@ -291,6 +291,9 @@ def config_cmd(ctx):
     click.echo(f"Target skills:       {', '.join(r.target_skills) or '(any)'}")
     click.echo(f"Exclude job seekers: {r.exclude_job_seekers}")
     click.echo(f"Minimum confidence:  {r.minimum_confidence}")
+    click.echo(f"LLM escalation at:   rule score < {r.llm_escalation_threshold}")
+    click.echo(f"Include keywords:    {', '.join(r.keywords.include) or '(none)'}")
+    click.echo(f"Exclude keywords:    {', '.join(r.keywords.exclude) or '(none)'}")
     click.echo(f"Priority: HIGH>={r.priority_thresholds.high}  "
                f"MEDIUM>={r.priority_thresholds.medium}")
     click.echo(f"Retention days:      {r.retention_days}")

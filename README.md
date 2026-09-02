@@ -205,6 +205,15 @@ environment variables that hold the tokens.
   allowance as low as 5,000 on Business plans, and counts 429s against it. The
   client uses a token bucket, exponential backoff with jitter, a 60-second
   cooldown on 429, and an optional `--request-budget` hard stop.
+- **PII.** Emails and phone numbers are stripped at ingestion on every path.
+  Phone matching requires positive evidence (an E.164 `+`, parenthesized area
+  code, separator-joined national form, or a `phone`/`call`/`whatsapp` cue) so
+  it does not shred the budget figures the scorer depends on.
+- **Exports are formula-escaped.** Author names and post bodies are written by
+  community members; a cell starting `=`, `+`, `-`, `@`, tab, or CR is quoted so
+  a spreadsheet cannot execute it.
+- **Deduplication is scoped per community**, so separately consented datasets
+  are never linked.
 - **Retention and kill switch.** `circle-leads purge --expired` drops content
   past the configured window; `purge --community <slug>` deletes a community's
   stored content and marks it revoked.
@@ -220,7 +229,7 @@ commercial replies.
 ## Tests
 
 ```bash
-pytest -q      # 130 tests
+pytest -q      # 166 tests
 ```
 
 Covers every LEAD/NOT_LEAD example in the specification, the authorization

@@ -111,8 +111,19 @@ def classify(
         )
         return result
 
+    # Config-driven keyword lists act as an extra, user-controlled signal on
+    # top of the pattern rules.
+    if requirements.keywords.exclude and keyword_rules.matched_keywords(
+        text, requirements.keywords.exclude
+    ):
+        matched = keyword_rules.matched_keywords(text, requirements.keywords.exclude)
+        result.seeker_matches.append(f"config_exclude:{matched[0]}")
+        result.rule_score -= 30
+        rules.score -= 30
+
+    lead_cutoff = min(RULE_CONFIDENT_LEAD, requirements.llm_escalation_threshold)
     needs_llm = not (
-        rules.score >= RULE_CONFIDENT_LEAD or rules.score <= RULE_CONFIDENT_NOT_LEAD
+        rules.score >= lead_cutoff or rules.score <= RULE_CONFIDENT_NOT_LEAD
     )
 
     if needs_llm and llm is not None:
@@ -122,7 +133,7 @@ def classify(
         logger.debug("LLM inconclusive; falling back to rules")
 
     # Rule-only verdict.
-    result.classification = "LEAD" if rules.score >= RULE_CONFIDENT_LEAD else "NOT_LEAD"
+    result.classification = "LEAD" if rules.score >= lead_cutoff else "NOT_LEAD"
     result.confidence = _rule_confidence(rules.score)
     result.decided_by = "rules"
     result.classifier_version = RULES_VERSION

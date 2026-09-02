@@ -107,6 +107,8 @@ class CircleClient:
         while True:
             self.limiter.acquire()
             headers = self._headers_provider()
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug("%s %s headers=%s", method, path, redact(headers))
             try:
                 resp = self.session.request(
                     method, url, headers=headers, timeout=self.timeout, **kwargs

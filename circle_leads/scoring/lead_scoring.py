@@ -62,7 +62,7 @@ def score_lead(
 
     # Confidence scales the result rather than adding to it, so a shaky
     # classification cannot reach HIGH priority on signal count alone.
-    if result.confidence:
+    if result.confidence is not None:
         scaled = int(round(total * min(1.0, 0.6 + 0.4 * result.confidence)))
         if scaled != total:
             breakdown["confidence_scaling"] = scaled - total

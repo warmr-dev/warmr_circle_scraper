@@ -36,15 +36,20 @@ def list_spaces_member(client: CircleClient) -> list[dict]:
 
 def is_direct_message_room(room: dict[str, Any]) -> bool:
     """True when a chat room is (or may be) a direct message."""
-    kind = str(room.get("chat_room_kind") or room.get("kind") or "").lower().strip()
-    if kind in DIRECT_MESSAGE_KINDS:
+    kinds = {
+        str(room.get(field) or "").lower().strip()
+        for field in ("chat_room_kind", "kind")
+        if room.get(field)
+    }
+    # Either field naming a DM excludes the room; one must not mask the other.
+    if kinds & DIRECT_MESSAGE_KINDS:
         return True
     uuid = str(room.get("uuid") or room.get("id") or "").lower()
     if uuid.startswith("direct-"):
         return True
     # Fail closed: anything not positively identified as an allowed kind is
     # treated as a DM.
-    return kind not in ALLOWED_CHAT_ROOM_KINDS
+    return not kinds or not kinds <= ALLOWED_CHAT_ROOM_KINDS
 
 
 def list_group_chat_rooms(

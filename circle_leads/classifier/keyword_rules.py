@@ -210,6 +210,16 @@ _BUYER = re.compile(BUYER_CAPACITY_PATTERN)
 _HIRE_KW = re.compile(_HIRE_KEYWORD, re.I)
 
 
+_FIRST_PERSON_EMPLOYMENT = re.compile(
+    rf"\b{FIRST_PERSON}\b[^.!?]{{0,40}}?\b{SEEK_VERB}\s+for\s+{EMPLOYMENT_OBJECT}\b",
+    re.I,
+)
+_ROLE_SEEKING_EMPLOYMENT = re.compile(
+    rf"\b{ROLE_NOUNS}\b[^.!?]{{0,30}}?\b{SEEK_VERB}\s+for\s+{EMPLOYMENT_OBJECT}\b",
+    re.I,
+)
+
+
 def _first_person_seeking_employment(text: str) -> bool:
     """Detect the decisive job-seeker shape: a person wanting employment.
 
@@ -217,18 +227,10 @@ def _first_person_seeking_employment(text: str) -> bool:
     "looking for a job as a software engineer" (seeking) -- the object of the
     search is employment, not a person.
     """
-    rx = re.compile(
-        rf"\b{FIRST_PERSON}\b[^.!?]{{0,40}}?\b{SEEK_VERB}\s+for\s+{EMPLOYMENT_OBJECT}\b",
-        re.I,
-    )
-    if rx.search(text):
+    if _FIRST_PERSON_EMPLOYMENT.search(text):
         return True
     # "<role> looking for work" with no organizational subject
-    rx2 = re.compile(
-        rf"\b{ROLE_NOUNS}\b[^.!?]{{0,30}}?\b{SEEK_VERB}\s+for\s+{EMPLOYMENT_OBJECT}\b",
-        re.I,
-    )
-    return bool(rx2.search(text))
+    return bool(_ROLE_SEEKING_EMPLOYMENT.search(text))
 
 
 # Hiring intent, when present, appears early. Truncating bounds the work done

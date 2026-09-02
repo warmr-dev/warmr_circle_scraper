@@ -129,6 +129,16 @@ def query_leads(
     return rows
 
 
+# Excel and Sheets execute a cell beginning with any of these. Author names and
+# post bodies are written by community members, so they are untrusted here.
+_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _escape_formula(text: str) -> str:
+    """Neutralize spreadsheet formula injection without altering the reading."""
+    return "'" + text if text.startswith(_FORMULA_PREFIXES) else text
+
+
 def _serialize(value: Any) -> str:
     if value is None:
         return ""
@@ -141,6 +151,10 @@ def _serialize(value: Any) -> str:
     return str(value)
 
 
+def _csv_cell(value: Any) -> str:
+    return _escape_formula(_serialize(value))
+
+
 def to_csv(
     rows: Iterable[dict[str, Any]], path: str | Path, *, extended: bool = False
 ) -> Path:
@@ -151,7 +165,7 @@ def to_csv(
         writer = csv.DictWriter(fh, fieldnames=columns, extrasaction="ignore")
         writer.writeheader()
         for row in rows:
-            writer.writerow({c: _serialize(row.get(c)) for c in columns})
+            writer.writerow({c: _csv_cell(row.get(c)) for c in columns})
     return out
 
 

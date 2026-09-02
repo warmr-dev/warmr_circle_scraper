@@ -200,7 +200,11 @@ def ingest_community(
         s.flush()
         run_pk = run.id
 
-    excluded = perm.excluded_content or requirements.excluded_content
+    # Union, not precedence: a permission file listing fewer exclusions must
+    # never widen what requirements.yaml forbids, and vice versa.
+    excluded = sorted(
+        set(perm.excluded_content or []) | set(requirements.excluded_content or [])
+    )
 
     try:
         _collect(
@@ -217,20 +221,29 @@ def ingest_community(
     except ApiError as exc:
         summary.state = RunState.FAILED.value
         summary.errors.append(str(exc))
-
-    with db.session() as s:
-        run = s.get(ScrapeRun, run_pk)
-        if run:
-            run.state = summary.state
-            run.finished_at = utcnow()
-            run.items_seen = summary.items_seen
-            run.items_new = summary.items_new
-            run.items_updated = summary.items_updated
-            run.error = "; ".join(summary.errors) or None
-        if summary.state == RunState.COMPLETE.value:
-            community = s.get(Community, community_pk)
-            if community:
-                community.last_synced_at = utcnow()
+    except NotAuthorizedError as exc:
+        # Approval can be withdrawn mid-run: the member JWT is re-minted when
+        # it expires, and that re-mint fails once the operator revokes.
+        summary.state = RunState.FAILED.value
+        summary.errors.append(f"Authorization withdrawn during run: {exc}")
+    except Exception as exc:  # noqa: BLE001 - the run row must never be orphaned
+        summary.state = RunState.FAILED.value
+        summary.errors.append(f"{exc.__class__.__name__}: {exc}")
+        logger.exception("Unexpected failure ingesting '%s'", perm.community_id)
+    finally:
+        with db.session() as s:
+            run = s.get(ScrapeRun, run_pk)
+            if run:
+                run.state = summary.state
+                run.finished_at = utcnow()
+                run.items_seen = summary.items_seen
+                run.items_new = summary.items_new
+                run.items_updated = summary.items_updated
+                run.error = "; ".join(summary.errors) or None
+            if summary.state == RunState.COMPLETE.value:
+                community = s.get(Community, community_pk)
+                if community:
+                    community.last_synced_at = utcnow()
 
     return summary
 
@@ -388,10 +401,16 @@ def classify_pending(
                     s.delete(existing)
                 continue
 
-            if requirements.exclude_job_seekers and not meets_requirements(
-                result, requirements
-            ):
+            # The confidence floor and role/skill filters always apply.
+            # `exclude_job_seekers` governs job-seeker handling, not whether
+            # requirements are enforced at all.
+            if not meets_requirements(result, requirements):
                 stats["filtered"] += 1
+                # Drop any prior lead: after an edit the stored score, evidence
+                # quote, and extracted fields describe text that is now gone.
+                stale = s.scalar(select(Lead).where(Lead.post_id == post.id))
+                if stale:
+                    s.delete(stale)
                 continue
 
             score, priority, breakdown = score_lead(

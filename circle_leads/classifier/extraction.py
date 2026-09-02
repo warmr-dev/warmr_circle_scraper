@@ -41,9 +41,12 @@ LOCATION_PATTERNS = [
     ("On-site", r"\bon[\s-]?site\b|\bin[\s-]?office\b|\bin[\s-]?person\b"),
 ]
 
+# Each optional qualifier owns its own trailing space, so no two quantifiers
+# compete for the same whitespace run. The earlier `...?\s*...?\s*` chain was
+# quadratic on long runs.
 _ROLE_RX = re.compile(
-    r"\b((?:senior|junior|mid[\s-]?level|lead|principal|staff|entry[\s-]?level)?\s*"
-    r"(?:back[\s-]?end|front[\s-]?end|full[\s-]?stack|mobile|web|cloud|data|ml|ai|devops|qa|site\s+reliability)?\s*"
+    r"\b((?:(?:senior|junior|mid[\s-]?level|lead|principal|staff|entry[\s-]?level)\s+)?"
+    r"(?:(?:back[\s-]?end|front[\s-]?end|full[\s-]?stack|mobile|web|cloud|data|ml|ai|devops|qa|site\s+reliability)\s+)?"
     r"(?:developer|engineer|programmer|architect|designer|scientist))\b",
     re.I,
 )
@@ -106,6 +109,8 @@ def titles_match(extracted: str, configured: str) -> bool:
 
 def extract_job_title(text: str) -> str | None:
     """Prefer a technology-qualified title ("Flutter Developer") when present."""
+    # Normalize here too rather than relying on the caller having done it.
+    text = re.sub(r"\s+", " ", text or "")
     named = _NAMED_ROLE_RX.search(text)
     if named:
         return " ".join(named.group(1).split()).title()

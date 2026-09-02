@@ -11,6 +11,15 @@ from pydantic import BaseModel, Field, field_validator
 
 DEFAULT_CONFIG_PATH = Path(__file__).parent / "requirements.yaml"
 
+# Content the system never collects, whatever a token would permit. Kept in one
+# place so a permission file and requirements.yaml cannot drift apart.
+DEFAULT_EXCLUDED_CONTENT = (
+    "direct_messages",
+    "member_bios",
+    "email_addresses",
+    "phone_numbers",
+)
+
 
 class ScoringWeights(BaseModel):
     hiring_intent: int = 40
@@ -50,9 +59,7 @@ class Requirements(BaseModel):
     keywords: Keywords = Field(default_factory=Keywords)
     scoring: ScoringWeights = Field(default_factory=ScoringWeights)
     priority_thresholds: PriorityThresholds = Field(default_factory=PriorityThresholds)
-    excluded_content: list[str] = Field(
-        default_factory=lambda: ["direct_messages", "member_bios", "email_addresses"]
-    )
+    excluded_content: list[str] = Field(default_factory=lambda: list(DEFAULT_EXCLUDED_CONTENT))
     retention_days: int = 30
     rate_limit: RateLimitConfig = Field(default_factory=RateLimitConfig)
 
@@ -102,9 +109,7 @@ class CommunityPermission(BaseModel):
     ingestion_route: str = "admin_api_v2"
     allowed_space_ids: list[str] = Field(default_factory=list)
     allowed_chat_room_uuids: list[str] = Field(default_factory=list)
-    excluded_content: list[str] = Field(
-        default_factory=lambda: ["direct_messages", "member_bios", "email_addresses"]
-    )
+    excluded_content: list[str] = Field(default_factory=lambda: list(DEFAULT_EXCLUDED_CONTENT))
     retention_days: int = 30
     outreach_mode: str = "reply_in_original_thread"
     operator_contact: str | None = None
