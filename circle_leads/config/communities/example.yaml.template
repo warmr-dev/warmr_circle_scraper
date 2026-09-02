@@ -1,0 +1,28 @@
+# Copy to <community>.yaml and fill in after the operator approves.
+# Never put tokens in this file — only the NAMES of environment variables.
+community_id: "acme-founders"
+community_url: "https://acme-founders.circle.so"
+
+# candidate | contacted | approved | denied | revoked
+# Ingestion runs ONLY when this reads exactly: approved
+permission_status: "candidate"
+
+approved_purpose: "Detect posts explicitly requesting software-development help"
+
+# admin_api_v2 | headless_member | data_api
+ingestion_route: "admin_api_v2"
+
+# Only these are read. An empty list means nothing is collected.
+allowed_space_ids: []
+allowed_chat_room_uuids: []
+
+excluded_content: [direct_messages, member_bios, email_addresses, phone_numbers]
+retention_days: 30
+outreach_mode: "reply_in_original_thread"
+operator_contact: "operator@example.com"
+approval_reference: "Email thread 2026-09-01, subject: Read-only lead detection"
+
+# Env var names holding the operator-issued secrets.
+admin_token_env: "CIRCLE_ADMIN_TOKEN__acme_founders"
+headless_auth_token_env: "CIRCLE_HEADLESS_AUTH_TOKEN__acme_founders"
+member_id_env: "CIRCLE_MEMBER_ID__acme_founders"

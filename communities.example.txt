@@ -1,0 +1,4 @@
+# One Circle community URL per line. Lines starting with # are ignored.
+# These are placeholders -- replace with communities you actually belong to.
+https://startup-founders.circle.so
+https://saas-builders.circle.so

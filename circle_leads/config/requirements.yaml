@@ -1,0 +1,98 @@
+# Lead requirements. Everything here is editable without touching source code.
+# Reload at runtime with:  circle-leads config show / --config <path>
+
+target_roles:
+  - Backend Developer
+  - Frontend Developer
+  - Full Stack Developer
+  - Flutter Developer
+  - React Developer
+  - Mobile Developer
+  - Software Engineer
+  - DevOps Engineer
+  - Data Engineer
+  - Machine Learning Engineer
+  - Technical Cofounder
+  - CTO
+
+target_skills:
+  - Python
+  - Java
+  - C++
+  - Go
+  - Rust
+  - Flutter
+  - Dart
+  - React
+  - React Native
+  - Vue
+  - Angular
+  - Node.js
+  - TypeScript
+  - Django
+  - FastAPI
+  - Rails
+  - Laravel
+  - PostgreSQL
+  - MySQL
+  - MongoDB
+  - AWS
+  - GCP
+  - Azure
+  - Kubernetes
+  - Docker
+  - Terraform
+  - Swift
+  - Kotlin
+  - Supabase
+  - Firebase
+
+exclude_job_seekers: true
+minimum_confidence: 0.80
+
+# Posts scoring at or above this go to the LLM; below it, rules decide alone.
+llm_escalation_threshold: 55
+
+keywords:
+  include:
+    - hiring
+    - looking for
+    - need a developer
+    - need an engineer
+    - looking to hire
+    - developer wanted
+    - contractor needed
+    - agency needed
+  exclude:
+    - looking for a job
+    - open to work
+    - seeking employment
+    - available for hire
+
+scoring:
+  hiring_intent: 40
+  target_role_match: 20
+  target_skill_match: 15
+  budget_mentioned: 10
+  company_identified: 5
+  recent_post: 10
+  recency_days: 7
+
+priority_thresholds:
+  high: 80
+  medium: 50
+
+# Content the system will never collect, regardless of token capability.
+excluded_content:
+  - direct_messages
+  - member_bios
+  - email_addresses
+  - phone_numbers
+
+retention_days: 30
+
+rate_limit:
+  requests_per_minute: 60
+  max_retries: 5
+  backoff_base_seconds: 2.0
+  max_backoff_seconds: 60.0

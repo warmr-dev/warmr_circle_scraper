@@ -1,0 +1,27 @@
+[project]
+name = "circle-leads"
+version = "0.1.0"
+description = "Consent-first hiring-lead discovery across authorized Circle.so communities"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.7",
+    "sqlalchemy>=2.0",
+    "requests>=2.32",
+    "pyyaml>=6.0",
+    "click>=8.1",
+    "tenacity>=8.3",
+]
+
+[project.optional-dependencies]
+llm = ["anthropic>=0.40"]
+dev = ["pytest>=8.0", "pytest-cov>=5.0"]
+
+[project.scripts]
+circle-leads = "circle_leads.cli.main:cli"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
