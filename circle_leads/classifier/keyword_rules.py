@@ -66,8 +66,11 @@ HIRING_PATTERNS: list[tuple[str, str, int]] = [
         35,
     ),
     (
-        "looking_for_someone_to",
-        r"\blook(?:ing)?\s+for\s+(?:someone|somebody|a\s+team|a\s+person)\s+(?:who|to|that)\b",
+        "seeking_someone_to",
+        r"\b(?:look(?:ing)?\s+for|need|needs|needed|want(?:ing)?|seek(?:ing)?|hir(?:e|ing)|after)\s+"
+        r"(?:someone|somebody|a\s+team|a\s+person|a\s+dev|help)\s+"
+        # 'to explain'/'to clarify' is a question, not a commission.
+        r"(?:who|that|with|to\s+(?!explain|clarify|confirm|tell|answer|remind|check\s+if)\w+)\b",
         38,
     ),
     (
@@ -82,6 +85,22 @@ HIRING_PATTERNS: list[tuple[str, str, int]] = [
         30,
     ),
     ("recommend_a_role", rf"\b(?:recommend|referral|refer\s+me)\b[^.!?]{{0,50}}?{ROLE_NOUNS}\b", 25),
+    (
+        # "anyone know a good Flutter dev?" -- asking the room for a name is
+        # how hiring usually starts in a community, and it names no vacancy.
+        "anyone_know_a_role",
+        rf"\b(?:any(?:one|body)|somebody|someone)\s+(?:here\s+)?(?:know|knows|worked\s+with|used|recommend)\b"
+        rf"(?:\s+(?:a|an|any|some|of\s+a))?(?:\s+[a-z]+){{0,3}}?\s+{ROLE_NOUNS}\b",
+        30,
+    ),
+    (
+        # "we're rebuilding our app in Flutter" alongside a referral ask.
+        "rebuilding_our_thing",
+        r"\b(?:rebuild(?:ing)?|revamp(?:ing)?|redesign(?:ing)?|migrat(?:e|ing))\s+"
+        r"(?:our|my|the)\s+"
+        r"(?:app|application|website|platform|product|mvp|site|system|store)\b",
+        25,
+    ),
     ("anyone_available", rf"\bany(?:one|body)\b[^.!?]{{0,30}}?\bavailable\b", 22),
     ("open_role", r"\b(?:open\s+(?:role|position|req)|job\s+opening|we\s+have\s+an?\s+opening)\b", 35),
     ("join_our_team", r"\bjoin\s+(?:our|my|the)\s+(?:team|company|startup)\b", 30),
@@ -157,7 +176,9 @@ TIMELINE_PATTERN = (
 REFERRAL_PATTERN = (
     r"\b(?:recommend(?:ations?)?|referrals?|suggestions?|proposals?|estimates?|"
     r"quotes?|who\s+(?:should|can)\s+i\s+(?:talk|speak|reach)\s+to|"
-    r"know\s+(?:anyone|someone|a\s+good))\b"
+    # "know a good/solid/reliable dev" -- the adjective varies, so accept
+    # any short qualifier rather than hardcoding one.
+    r"know\s+(?:anyone|someone|(?:of\s+)?an?(?:\s+[\w.+#-]+){0,3}?\s+(?:dev|developer|engineer|agency|freelancer|contractor|designer)))\b"
 )
 
 BUYER_CAPACITY_PATTERN = (

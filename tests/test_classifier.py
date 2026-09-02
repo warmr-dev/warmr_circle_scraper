@@ -262,3 +262,39 @@ def test_long_realistic_post_is_fast(reqs):
     result = classify(text, reqs)
     assert time.perf_counter() - start < 2.0
     assert result.classification == "LEAD"
+
+
+# --- Hiring phrased as a need or a referral ask -----------------------------
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "We need someone to build our iOS and Android app. Budget $20k, ASAP.",
+        "We want someone to help with our app redesign.",
+        "Anyone know a good Flutter dev?",
+        "Anyone know a good mobile developer? We are rebuilding our app in Flutter.",
+        "Does anybody here know a solid React Native developer?",
+        "We're after someone to build our MVP.",
+    ],
+)
+def test_need_and_referral_phrasings_are_leads(text, reqs):
+    """Hiring often starts as "we need someone to..." or "anyone know a good...".
+
+    Neither names a vacancy, and both were previously missed.
+    """
+    assert classify(text, reqs).classification == "LEAD"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Anyone know a good tutorial for Flutter?",
+        "Does anyone know how to fix this Flutter build error?",
+        "Anyone know a good podcast about startups?",
+        "We need someone to explain how this API works.",
+    ],
+)
+def test_referral_pattern_does_not_catch_questions_about_things(text, reqs):
+    """Asking about a tutorial or a bug is not asking for a person to hire."""
+    assert classify(text, reqs).classification == "NOT_LEAD"
