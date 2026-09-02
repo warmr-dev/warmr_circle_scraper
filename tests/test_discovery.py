@@ -86,3 +86,36 @@ def test_hiring_space_boosts_relevance():
 
 def test_empty_metadata_scores_zero():
     assert assess_relevance(None, None).score == 0
+
+
+# --- Bare hostnames without a scheme ---------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("visit foo.circle.so", ["foo"]),
+        ("baz.circle.so/c/jobs", ["baz"]),
+        ("Join qux.circle.so!", ["qux"]),
+        ("(quux.circle.so)", ["quux"]),
+        ("Community: my-startup.circle.so.", ["my-startup"]),
+        ("http://legacy.circle.so", ["legacy"]),
+    ],
+)
+def test_extracts_bare_hostnames_without_a_scheme(text, expected):
+    """People write "foo.circle.so" in prose far more often than a full URL."""
+    assert [c.slug for c in extract_from_text(text)] == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "dana@app.circle.so",       # email domain, not a link
+        "sub.domain.circle.so",     # deeper hostname, not a community slug
+        "discover.circle.so",       # directory, reserved
+        "notcircle.so",
+        "xcircle.so",
+    ],
+)
+def test_bare_hostname_matching_does_not_over_capture(text):
+    assert extract_from_text(text) == []

@@ -20,8 +20,13 @@ from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
+# The scheme is optional: people write "foo.circle.so" in prose, bios and
+# forum posts far more often than the full URL. A preceding word character,
+# "@" or "." is excluded so email domains and deeper hostnames
+# (a.b.circle.so) are not mistaken for a community slug.
 CIRCLE_HOST_RX = re.compile(
-    r"https?://([a-z0-9][a-z0-9-]{0,62})\.circle\.so(?:/[^\s\"'<>)]*)?", re.I
+    r"(?<![\w@.])(?:https?://)?([a-z0-9][a-z0-9-]{0,62})\.circle\.so(?:/[^\s\"'<>)]*)?",
+    re.I,
 )
 # Circle's own hosts are infrastructure, not member communities.
 RESERVED_SLUGS = {
