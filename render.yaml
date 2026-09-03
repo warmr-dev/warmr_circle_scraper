@@ -1,0 +1,48 @@
+# Render blueprint: deploy the whole repo as two services sharing one Postgres.
+# In Render: New > Blueprint, point at this repo. Set the secret env vars in the
+# dashboard (marked sync:false below) after the first deploy.
+databases:
+  - name: circle-leads-db
+    plan: free
+
+services:
+  # The dashboard you open in a browser.
+  - type: web
+    name: circle-leads-web
+    runtime: docker
+    dockerfilePath: ./deploy/Dockerfile
+    plan: free
+    healthCheckPath: /login
+    envVars:
+      - key: CIRCLE_LEADS_DB
+        fromDatabase:
+          name: circle-leads-db
+          property: connectionString
+      - key: DASHBOARD_PASSWORD
+        sync: false          # set a strong password in the Render dashboard
+      - key: DASHBOARD_SECRET_KEY
+        generateValue: true  # so sessions survive redeploys
+      - key: DASHBOARD_HTTPS
+        value: "true"
+      - key: EXA_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+
+  # The scheduled harvest. Render "cron" runs it once per schedule, then exits.
+  - type: cron
+    name: circle-leads-harvest
+    runtime: docker
+    dockerfilePath: ./deploy/Dockerfile
+    plan: free
+    schedule: "0 8,20 * * *"    # 8am and 8pm UTC
+    dockerCommand: circle-leads --db "$CIRCLE_LEADS_DB" harvest --use-llm --verbose-log
+    envVars:
+      - key: CIRCLE_LEADS_DB
+        fromDatabase:
+          name: circle-leads-db
+          property: connectionString
+      - key: EXA_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false

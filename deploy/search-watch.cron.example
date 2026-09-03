@@ -1,8 +1,0 @@
-# Run the community search every morning at 8am and save new finds.
-# Install with:  crontab -e   (then paste, editing the paths)
-#
-# minute hour day month weekday  command
-0 8 * * *  cd /path/to/circle-scraper && ./.venv/bin/circle-leads --db "$CIRCLE_LEADS_DB" search-watch "flutter developer" "startup founders" "react native" --min-score 25 --quiet >> /tmp/circle-search.log 2>&1
-#
-# Then review with:  circle-leads new-communities
-# or open the dashboard's Communities tab.
