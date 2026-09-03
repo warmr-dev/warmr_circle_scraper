@@ -47,6 +47,8 @@ target_skills:
 - Firebase
 exclude_job_seekers: true
 minimum_confidence: 0.8
+harvest_recency_days: 30
+harvest_all_spaces: false
 llm_escalation_threshold: 55
 keywords:
   include:

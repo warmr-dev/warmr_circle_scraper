@@ -55,6 +55,11 @@ class Requirements(BaseModel):
     target_skills: list[str] = Field(default_factory=list)
     exclude_job_seekers: bool = True
     minimum_confidence: float = 0.80
+    # How many days back the harvest reads a community's posts (read window),
+    # distinct from scoring.recency_days (the "recent post" score bonus).
+    harvest_recency_days: int = 30
+    # Read every public space, not only hiring-named ones.
+    harvest_all_spaces: bool = False
     llm_escalation_threshold: int = 55
     keywords: Keywords = Field(default_factory=Keywords)
     scoring: ScoringWeights = Field(default_factory=ScoringWeights)
@@ -102,6 +107,8 @@ def requirements_to_dict(req: "Requirements") -> dict:
         "target_skills": list(req.target_skills),
         "exclude_job_seekers": req.exclude_job_seekers,
         "minimum_confidence": req.minimum_confidence,
+        "harvest_recency_days": req.harvest_recency_days,
+        "harvest_all_spaces": req.harvest_all_spaces,
         "llm_escalation_threshold": req.llm_escalation_threshold,
         "keywords": {
             "include": list(req.keywords.include),

@@ -322,3 +322,23 @@ def test_config_save_locks_excluded_content(auth_client):
 def test_config_requires_auth(client):
     assert client.get("/api/config").status_code == 401
     assert client.post("/api/config", json={}).status_code == 401
+
+
+def test_config_includes_harvest_settings(auth_client):
+    c = auth_client.get("/api/config").json()
+    assert "harvest_recency_days" in c
+    assert "harvest_all_spaces" in c
+
+
+def test_config_save_harvest_recency(auth_client, tmp_path, monkeypatch):
+    from circle_leads.config.settings import load_requirements, requirements_to_dict, save_requirements
+    cfg = tmp_path / "req.yaml"
+    save_requirements(requirements_to_dict(load_requirements()), cfg)
+    monkeypatch.setattr("circle_leads.config.settings.DEFAULT_CONFIG_PATH", cfg)
+    body = auth_client.get("/api/config").json()
+    body["harvest_recency_days"] = 7
+    body["harvest_all_spaces"] = True
+    assert auth_client.post("/api/config", json=body).status_code == 200
+    got = auth_client.get("/api/config").json()
+    assert got["harvest_recency_days"] == 7
+    assert got["harvest_all_spaces"] is True

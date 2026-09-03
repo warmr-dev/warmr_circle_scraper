@@ -573,8 +573,9 @@ def read_public_cmd(ctx, community_host, space_ids, list_spaces, all_spaces, com
 @click.option("--comments", is_flag=True, help="Also read and classify comments (more requests).")
 @click.option("--recency-days", type=int, default=30, show_default=True,
               help="Only read posts newer than this many days.")
+@click.option("--all-spaces", is_flag=True, help="Read every public space, not just hiring-related ones.")
 @click.pass_context
-def harvest_cmd(ctx, niches, no_search, only_new, max_communities, use_llm, verbose_log, comments, recency_days):
+def harvest_cmd(ctx, niches, no_search, only_new, max_communities, use_llm, verbose_log, comments, recency_days, all_spaces):
     """Discover public communities and read them for leads -- fully automatic.
 
     Chains it all: search niches (Exa), save new communities, then read every
@@ -594,7 +595,7 @@ def harvest_cmd(ctx, niches, no_search, only_new, max_communities, use_llm, verb
         niches=list(niches) or None,
         search=not no_search, only_new=only_new,
         max_communities=max_communities, use_llm=use_llm, verbose_log=verbose_log,
-        include_comments=comments, recency_days=recency_days,
+        include_comments=comments, recency_days=recency_days, all_spaces=all_spaces,
     )
     click.echo(
         f"\nDiscovered {res.new_communities} new community/communities.\n"

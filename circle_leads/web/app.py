@@ -294,6 +294,8 @@ def create_app(db_url: str | None = None, config_path: str | None = None) -> Fas
 
         use_llm = bool(payload.get("use_llm", False))
         include_comments = bool(payload.get("include_comments", False))
+        recency_days = int(payload.get("recency_days", requirements().harvest_recency_days))
+        all_spaces = bool(payload.get("all_spaces", requirements().harvest_all_spaces))
 
         def run(job):
             from circle_leads.harvest import harvest
@@ -302,7 +304,8 @@ def create_app(db_url: str | None = None, config_path: str | None = None) -> Fas
             res = harvest(
                 db, requirements(), niches=niches, search=not no_search,
                 only_new=only_new, verbose_log=True, use_llm=use_llm,
-                include_comments=include_comments,
+                include_comments=include_comments, recency_days=recency_days,
+                all_spaces=all_spaces,
             )
             job.result = {
                 "new_communities": res.new_communities,

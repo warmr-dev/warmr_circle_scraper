@@ -88,6 +88,7 @@ def harvest(
     verbose_log: bool = False,
     include_comments: bool = False,
     recency_days: int = 30,
+    all_spaces: bool = False,
 ) -> HarvestResult:
     """Discover public communities and read their public spaces for leads.
 
@@ -154,7 +155,7 @@ def harvest(
         # Read each public lead-space, logging what is checked and read.
         records = []
         public_count = 0
-        for sp in _lead_spaces(spaces):
+        for sp in (spaces if all_spaces else _lead_spaces(spaces)):
             was_public, raw = reader.read_space(sp.id, max_pages=max_pages, since=since)
             sp.is_public = was_public
             if not was_public:
