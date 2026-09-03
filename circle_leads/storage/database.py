@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Iterator
 
 from sqlalchemy import create_engine, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from circle_leads.storage.models import (
@@ -206,7 +207,23 @@ def upsert_post(session: Session, *, community_id: int, record: dict) -> tuple[P
         permission_reference=record.get("permission_reference"),
     )
     session.add(post)
-    session.flush()
+    try:
+        session.flush()
+    except IntegrityError:
+        # Another process (e.g. the harvest worker while the dashboard button
+        # also runs) inserted this exact post first. Roll back to it -- the
+        # unique key guarantees no duplicate -- and report it as already seen.
+        session.rollback()
+        existing = session.scalar(
+            select(Post).where(
+                Post.community_id == community_id,
+                Post.source_content_id == source_id,
+                Post.content_type == ctype,
+            )
+        )
+        if existing is not None:
+            return existing, "unchanged"
+        raise  # a different integrity problem; don't swallow it
     return post, "new"
 
 

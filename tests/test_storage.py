@@ -104,3 +104,33 @@ def test_purge_community_is_a_kill_switch(db):
 
         assert s.scalars(select(Post)).all() == []
         assert s.scalar(select(Community).where(Community.slug == "acme")).permission_status == "revoked"
+
+
+def test_concurrent_duplicate_insert_is_race_safe(db):
+    """Two processes inserting the same post (dashboard + worker) must not crash."""
+    import threading
+
+    with db.session() as s:
+        c = get_or_create_community(s, slug="x", url="https://x.circle.so")
+        cid = c.id
+    record = {"source_content_id": "p1", "content": "We are hiring a Flutter developer"}
+    results = []
+
+    def insert():
+        with db.session() as s:
+            _, outcome = upsert_post(s, community_id=cid, record=record)
+            results.append(outcome)
+
+    threads = [threading.Thread(target=insert) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    # No exception; exactly one 'new', the other resolves to unchanged.
+    assert "new" in results
+    assert all(r in ("new", "unchanged") for r in results)
+    from sqlalchemy import func, select
+    from circle_leads.storage.models import Post
+    with db.session() as s:
+        assert s.scalar(select(func.count()).select_from(Post)) == 1
