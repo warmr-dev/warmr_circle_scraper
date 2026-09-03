@@ -206,3 +206,46 @@ def test_communities_endpoint_shows_permission_state(auth_client):
     assert rows
     # Triage must never imply an operator approved ingestion.
     assert all(c["permission_status"] != "approved" for c in rows)
+
+
+# --- Triggered jobs ---------------------------------------------------------
+
+
+def test_search_job_requires_niche(auth_client):
+    assert auth_client.post("/api/jobs/search", json={}).status_code == 400
+
+
+def test_read_job_requires_host_and_space(auth_client):
+    assert auth_client.post("/api/jobs/read", json={"host": "x.circle.so"}).status_code == 400
+
+
+def test_jobs_require_auth(client):
+    assert client.get("/api/jobs").status_code == 401
+    assert client.post("/api/jobs/search", json={"niche": "x"}).status_code == 401
+
+
+def test_job_status_404_for_unknown(auth_client):
+    assert auth_client.get("/api/jobs/nope").status_code == 404
+
+
+def test_search_job_starts_and_is_listed(auth_client, monkeypatch):
+    # Stub the search so no network call happens.
+    import circle_leads.discovery.web_search as ws
+
+    class FakeDisc:
+        backend = "stub"
+        ranked = []
+
+    monkeypatch.setattr(ws, "discover_by_search", lambda *a, **k: FakeDisc())
+    resp = auth_client.post("/api/jobs/search", json={"niche": "test"})
+    assert resp.status_code == 200
+    job_id = resp.json()["job"]["id"]
+
+    import time
+    for _ in range(20):
+        j = auth_client.get(f"/api/jobs/{job_id}").json()["job"]
+        if j["state"] != "running":
+            break
+        time.sleep(0.1)
+    assert j["state"] in ("done", "error")
+    assert any(x["id"] == job_id for x in auth_client.get("/api/jobs").json()["jobs"])

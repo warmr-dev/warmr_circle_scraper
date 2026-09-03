@@ -195,6 +195,14 @@
 
   <!-- COMMUNITIES -->
   <section id="view-communities" hidden>
+    <div class="panel">
+      <h2 style="margin-bottom:8px">Find more communities</h2>
+      <div class="row">
+        <input id="c-niche" placeholder="e.g. AI startup founders, flutter developer" style="flex:1;min-width:220px">
+        <button class="action" id="c-search">Search the web</button>
+      </div>
+      <div id="jobs-strip" class="muted" style="margin-top:8px;font-size:13px"></div>
+    </div>
     <div class="panel"><div id="communities-table"><div class="empty">Loading…</div></div></div>
   </section>
 </main>
@@ -439,12 +447,73 @@ async function loadCommunities() {
           <button class="ghost mark-joined" data-slug="${esc(c.slug)}"
              data-state="${joined ? 'not_visited' : 'joined'}"
              aria-pressed="${joined}">${joined ? 'Undo' : 'Mark joined'}</button>
+          ${(c.url && c.url.includes('.circle.so') && !c.url.includes('discover'))
+            ? `<button class="ghost read-feed" data-host="${esc(c.url.replace('https://','').replace(/\/.*/,''))}"
+                 data-slug="${esc(c.slug)}" title="Read this community's feed (must be signed in)">Read feed</button>`
+            : ''}
         </td>
       </tr>`;
     }).join('')}</tbody></table>`;
 }
 
+// --- Triggered jobs (search / read) ----------------------------------
+let jobPollTimer = null;
+
+async function pollJobs() {
+  const data = await api('/api/jobs');
+  if (!data) return;
+  const running = data.jobs.filter(j => j.state === 'running');
+  const strip = $('jobs-strip');
+  if (strip) {
+    if (running.length) {
+      strip.innerHTML = running.map(j =>
+        `⏳ ${esc(j.label)} — ${esc(j.detail || 'working…')}`).join('<br>');
+    } else {
+      const recent = data.jobs.slice(0, 2).map(j => {
+        const icon = j.state === 'error' ? '⚠️' : '✓';
+        return `${icon} ${esc(j.label)} — ${esc(j.detail || j.state)}`;
+      }).join('<br>');
+      strip.innerHTML = recent;
+    }
+  }
+  if (running.length) {
+    if (!jobPollTimer) jobPollTimer = setInterval(pollJobs, 3000);
+  } else if (jobPollTimer) {
+    clearInterval(jobPollTimer); jobPollTimer = null;
+    loadCommunities();  // refresh the table when jobs settle
+    if (!$('view-leads').hidden) loadLeads();
+  }
+}
+
+$('c-search').addEventListener('click', async () => {
+  const niche = $('c-niche').value.trim();
+  if (!niche) { toast('Enter a niche to search'); return; }
+  $('c-search').disabled = true;
+  try {
+    const data = await api('/api/jobs/search', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ niche }),
+    });
+    if (data) { toast('Search started'); pollJobs(); if (!jobPollTimer) jobPollTimer = setInterval(pollJobs, 3000); }
+  } finally { $('c-search').disabled = false; }
+});
+
+document.addEventListener('click', async (event) => {
+  const rf = event.target.closest('.read-feed');
+  if (!rf) return;
+  const host = rf.dataset.host, slug = rf.dataset.slug;
+  const raw = prompt(`Read feed for ${host}\n\nEnter space id(s), comma-separated (find them in DevTools -> Network -> internal_api/spaces/<ID>/posts):`);
+  if (!raw) return;
+  const space_ids = raw.split(',').map(s => s.trim()).filter(Boolean);
+  const data = await api('/api/jobs/read', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ host, slug, space_ids }),
+  });
+  if (data) { toast('Reading feed…'); pollJobs(); if (!jobPollTimer) jobPollTimer = setInterval(pollJobs, 3000); }
+});
+
 loadLeads();
+pollJobs();
 </script>
 </body>
 </html>

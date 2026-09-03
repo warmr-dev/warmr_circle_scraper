@@ -24,6 +24,7 @@ from circle_leads.storage.database import Database
 from circle_leads.storage.models import Community, Lead, Post
 from circle_leads.triage.pipeline import triage_text
 from circle_leads.triage.reply import draft_reply
+from circle_leads.web.jobs import JobRegistry
 from circle_leads.web.auth import (
     COOKIE_NAME,
     SESSION_MAX_AGE,
@@ -45,6 +46,7 @@ def create_app(db_url: str | None = None, config_path: str | None = None) -> Fas
     db = Database(db_url or os.environ.get("CIRCLE_LEADS_DB") or None)
     requirements = load_requirements(config_path)
     sessions = SessionManager()
+    jobs = JobRegistry()
 
     def require_auth(request: Request) -> None:
         if not sessions.valid(request.cookies.get(COOKIE_NAME)):
@@ -196,6 +198,96 @@ def create_app(db_url: str | None = None, config_path: str | None = None) -> Fas
             "duplicates": result.duplicates,
             "already_seen": result.already_seen,
         }
+
+    # --- Triggered jobs (search / read) -----------------------------------
+
+    @app.post("/api/jobs/search")
+    def start_search(payload: dict, _: None = Depends(require_auth)) -> dict[str, Any]:
+        niche = str(payload.get("niche") or "").strip()
+        if not niche:
+            raise HTTPException(400, "Give a niche to search for.")
+        min_score = int(payload.get("min_score", 15))
+
+        def run(job):
+            from circle_leads.discovery.web_search import discover_by_search
+            from circle_leads.discovery.persist import persist_finds
+
+            job.detail = f"Searching '{niche}'..."
+            disc = discover_by_search(niche)
+            res = persist_finds(
+                db, disc.ranked, niche=niche, min_score=min_score, source="dashboard",
+            )
+            job.result = {
+                "new": res.new_count, "updated": len(res.updated),
+                "backend": disc.backend,
+                "new_names": [c.name or c.slug for c in res.new[:10]],
+            }
+            job.detail = f"{res.new_count} new community/communities found."
+
+        job = jobs.start("search", f"Search: {niche}", run)
+        return {"job": job.as_dict()}
+
+    @app.post("/api/jobs/read")
+    def start_read(payload: dict, _: None = Depends(require_auth)) -> dict[str, Any]:
+        host = str(payload.get("host") or "").strip()
+        space_ids = payload.get("space_ids") or []
+        slug = str(payload.get("slug") or (host.split(".")[0] if host else "")).strip()
+        if not host or not space_ids:
+            raise HTTPException(400, "Give a community host and at least one space id.")
+
+        def run(job):
+            from circle_leads.scraper.browser_reader import (
+                BrowserFeedReader, NotLoggedIn, fetch_space_posts,
+            )
+            from circle_leads.triage.pipeline import triage_text
+
+            reader = BrowserFeedReader(host)
+            if not reader.status():
+                job.state = "error"
+                job.detail = (
+                    f"Not signed into {host}. In a terminal run: "
+                    f"circle-leads read-feed {host} --login"
+                )
+                return
+            records = []
+            for sid in space_ids:
+                try:
+                    records.extend(
+                        fetch_space_posts(reader, sid,
+                                          excluded_content=requirements.excluded_content)
+                    )
+                except NotLoggedIn:
+                    job.state = "error"
+                    job.detail = "Session expired mid-read; re-run --login."
+                    return
+            if not records:
+                job.detail = "No posts read."
+                return
+            text = "\n\n---\n\n".join(
+                (r["title"] + "\n" + r["content"]) if r.get("title") else r["content"]
+                for r in records
+            )
+            result = triage_text(
+                db, text, requirements, community=slug, source_url=reader.base,
+            )
+            job.result = {"leads": len(result.leads), "posts": result.total_posts,
+                          "seen": result.already_seen}
+            job.detail = f"{len(result.leads)} lead(s) from {result.total_posts} post(s)."
+
+        job = jobs.start("read", f"Read: {host}", run)
+        return {"job": job.as_dict()}
+
+    @app.get("/api/jobs")
+    def list_jobs(_: None = Depends(require_auth)) -> dict[str, Any]:
+        return {"jobs": jobs.list(), "search_running": jobs.active("search"),
+                "read_running": jobs.active("read")}
+
+    @app.get("/api/jobs/{job_id}")
+    def job_status(job_id: str, _: None = Depends(require_auth)) -> dict[str, Any]:
+        job = jobs.get(job_id)
+        if job is None:
+            raise HTTPException(404, "Job not found")
+        return {"job": job.as_dict()}
 
     # --- Stats and activity ----------------------------------------------
 
