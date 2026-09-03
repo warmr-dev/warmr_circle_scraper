@@ -568,8 +568,10 @@ def read_public_cmd(ctx, community_host, space_ids, list_spaces, all_spaces, com
 @click.option("--only-new", is_flag=True, help="Only read communities not read before.")
 @click.option("--max-communities", type=int, default=40, show_default=True)
 @click.option("--use-llm", is_flag=True)
+@click.option("--verbose-log", is_flag=True,
+              help="Log every post's classify decision (which layer, why) to the activity feed.")
 @click.pass_context
-def harvest_cmd(ctx, niches, no_search, only_new, max_communities, use_llm):
+def harvest_cmd(ctx, niches, no_search, only_new, max_communities, use_llm, verbose_log):
     """Discover public communities and read them for leads -- fully automatic.
 
     Chains it all: search niches (Exa), save new communities, then read every
@@ -588,7 +590,7 @@ def harvest_cmd(ctx, niches, no_search, only_new, max_communities, use_llm):
         ctx.obj["db"], ctx.obj["requirements"],
         niches=list(niches) or None,
         search=not no_search, only_new=only_new,
-        max_communities=max_communities, use_llm=use_llm,
+        max_communities=max_communities, use_llm=use_llm, verbose_log=verbose_log,
     )
     click.echo(
         f"\nDiscovered {res.new_communities} new community/communities.\n"

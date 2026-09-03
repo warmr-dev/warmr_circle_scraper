@@ -377,8 +377,12 @@ async function loadActivity() {
       <td class="muted">${esc((a.created_at || '').replace('T', ' ').slice(0, 16))}</td>
       <td class="level-${esc(a.level)}">${esc(a.kind)}</td>
       <td>${esc(a.community || '—')}</td>
-      <td>${esc(a.summary)}${a.detail && a.detail.evidence
-        ? `<div class="muted" style="font-size:12px">“${esc(a.detail.evidence)}”</div>` : ''}</td>
+      <td>${esc(a.summary)}${a.detail && (a.detail.hiring_patterns || a.detail.evidence || a.detail.rule_score !== undefined)
+        ? `<div class="muted" style="font-size:12px">${
+            a.detail.rule_score !== undefined ? `score ${esc(a.detail.rule_score)}` : ''
+          }${a.detail.confidence !== undefined ? ` · conf ${esc(a.detail.confidence)}` : ''
+          }${a.detail.hiring_patterns && a.detail.hiring_patterns !== 'none' ? ` · matched: ${esc(a.detail.hiring_patterns)}` : ''
+          }${a.detail.evidence ? ` · “${esc(a.detail.evidence)}”` : ''}</div>` : ''}</td>
       <td class="muted">${esc(a.decided_by || '—')}</td>
     </tr>`).join('')}</tbody></table>`
     : '<div class="empty">No activity yet.</div>';

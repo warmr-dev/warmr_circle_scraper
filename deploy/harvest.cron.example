@@ -5,4 +5,4 @@
 # Install:  crontab -e   (edit the path)
 #
 # 8:00am and 8:00pm every day
-0 8,20 * * *  cd /path/to/circle-scraper && ./.venv/bin/circle-leads harvest --use-llm >> ~/.circle-leads/harvest.log 2>&1
+0 8,20 * * *  cd /path/to/circle-scraper && ./.venv/bin/circle-leads harvest --use-llm --verbose-log >> ~/.circle-leads/harvest.log 2>&1

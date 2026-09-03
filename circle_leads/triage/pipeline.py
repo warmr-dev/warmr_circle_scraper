@@ -102,6 +102,7 @@ def triage_records(
     source_url: str | None = None,
     use_llm: bool = False,
     your_name: str | None = None,
+    verbose_log: bool = False,
 ) -> TriageResult:
     """Classify already-structured post records (one per post, no splitting).
 
@@ -130,7 +131,7 @@ def triage_records(
     return _triage_posts(
         db, posts, requirements, community=community, space=space,
         source_url=source_url, use_llm=use_llm, your_name=your_name,
-        published_override=published_map,
+        published_override=published_map, verbose_log=verbose_log,
     )
 
 
@@ -164,6 +165,7 @@ def _triage_posts(
     use_llm: bool = False,
     your_name: str | None = None,
     published_override: dict | None = None,
+    verbose_log: bool = False,
 ) -> TriageResult:
     """Shared classify/score/store loop for split or structured posts."""
     result = TriageResult(total_posts=len(posts))
@@ -230,6 +232,32 @@ def _triage_posts(
                 post.content, requirements, llm=llm, model_name=model_name
             )
             post.classified = True
+
+            if verbose_log:
+                # Per-post decision trail: which layer decided, and why.
+                preview = " ".join(post.content.split())[:70]
+                matched = ", ".join(
+                    (classification.hiring_matches or [])[:3]
+                ) or "none"
+                log_activity(
+                    s,
+                    kind="classify",
+                    level="success" if classification.is_lead else "info",
+                    community=community,
+                    space=space,
+                    summary=(
+                        f"{classification.classification} "
+                        f"(via {classification.decided_by}): {preview}"
+                    ),
+                    detail={
+                        "decided_by": classification.decided_by,
+                        "rule_score": classification.rule_score,
+                        "confidence": round(classification.confidence, 2),
+                        "hiring_patterns": matched,
+                        "reason": (classification.reason or "")[:120],
+                    },
+                    decided_by=classification.decided_by,
+                )
 
             if not classification.is_lead:
                 result.not_leads += 1

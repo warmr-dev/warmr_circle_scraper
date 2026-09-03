@@ -86,6 +86,7 @@ def harvest(
     max_pages: int = 5,
     use_llm: bool = False,
     min_score: int = 20,
+    verbose_log: bool = False,
 ) -> HarvestResult:
     """Discover public communities and read their public spaces for leads."""
     niches = niches or DEFAULT_NICHES
@@ -107,31 +108,64 @@ def harvest(
     # --- 2. Read every readable community's public spaces ----------------
     hosts = _community_hosts(db, only_new=only_new, limit=max_communities)
     for host, slug in hosts:
+        with db.session() as s:
+            log_activity(s, kind="read", community=slug,
+                         summary=f"Checking community {host} for public spaces")
         try:
             reader = PublicReader(host)
-            spaces, records = discover_and_read_public(
-                reader,
-                only_lead_spaces=True,
-                excluded_content=requirements.excluded_content,
-                max_pages=max_pages,
-            )
+            spaces = reader.list_spaces()
         except Exception as exc:  # noqa: BLE001
             result.errors.append(f"read '{host}': {exc.__class__.__name__}")
+            with db.session() as s:
+                log_activity(s, kind="read", level="error", community=slug,
+                             summary=f"Failed to reach {host}: {exc.__class__.__name__}")
             continue
 
-        public = [sp for sp in spaces if sp.is_public]
-        if not public:
-            _mark_synced(db, slug)  # checked, nothing public -- don't recheck constantly
+        if not spaces:
+            with db.session() as s:
+                log_activity(s, kind="read", community=slug,
+                             summary=f"{host}: no public space list (fully private)")
+            _mark_synced(db, slug)
+            continue
+
+        # Read each public lead-space, logging what is checked and read.
+        records = []
+        public_count = 0
+        for sp in _lead_spaces(spaces):
+            was_public, raw = reader.read_space(sp.id, max_pages=max_pages)
+            sp.is_public = was_public
+            if not was_public:
+                with db.session() as s:
+                    log_activity(s, kind="read", community=slug, space=sp.name,
+                                 summary=f"{host} / {sp.name}: private, skipped")
+                continue
+            public_count += 1
+            from circle_leads.scraper.public_reader import normalize_public_post
+            space_recs = [
+                r for r in (
+                    normalize_public_post(x, community_url=reader.base,
+                                          excluded_content=requirements.excluded_content)
+                    for x in raw
+                ) if r
+            ]
+            records.extend(space_recs)
+            with db.session() as s:
+                log_activity(s, kind="read", level="success", community=slug, space=sp.name,
+                             summary=f"{host} / {sp.name}: read {len(space_recs)} public post(s)",
+                             items_seen=len(space_recs))
+
+        if not public_count:
+            _mark_synced(db, slug)
             continue
 
         result.communities_read += 1
-        result.public_spaces += len(public)
+        result.public_spaces += public_count
         result.posts_read += len(records)
 
         if records:
             triage_res = triage_records(
                 db, records, requirements, community=slug,
-                source_url=reader.base, use_llm=use_llm,
+                source_url=reader.base, use_llm=use_llm, verbose_log=verbose_log,
             )
             result.leads_found += len(triage_res.leads)
         _mark_synced(db, slug)
@@ -159,3 +193,12 @@ def _mark_synced(db: Database, slug: str) -> None:
         c = s.scalar(select(Community).where(Community.slug == slug))
         if c is not None:
             c.last_synced_at = datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _lead_spaces(spaces):
+    """Spaces whose name/slug suggests hiring or project requests, else all."""
+    hints = ("consultant", "project", "job", "hir", "need", "opportunit",
+             "collab", "client", "gig", "freelance", "request")
+    lead = [s for s in spaces
+            if any(h in (s.slug + " " + s.name).lower() for h in hints)]
+    return lead or spaces
