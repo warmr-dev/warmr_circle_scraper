@@ -1,0 +1,8 @@
+# Discover public communities and read them for leads, twice a day.
+# Runs entirely on public data -- no login needed. Set EXA_API_KEY in .env for
+# good discovery. Leads land in the dashboard (Leads tab).
+#
+# Install:  crontab -e   (edit the path)
+#
+# 8:00am and 8:00pm every day
+0 8,20 * * *  cd /path/to/circle-scraper && ./.venv/bin/circle-leads harvest --use-llm >> ~/.circle-leads/harvest.log 2>&1

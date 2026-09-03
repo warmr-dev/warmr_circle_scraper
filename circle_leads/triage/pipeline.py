@@ -113,8 +113,10 @@ def triage_records(
     posts = [
         RawPost(
             content=(
-                (r.get("title", "") + "\n" + r["content"])
-                if r.get("title") else r["content"]
+                # Don't double the title if content already starts with it.
+                r["content"]
+                if not r.get("title") or r["content"].lstrip().startswith(r["title"])
+                else r["title"] + "\n" + r["content"]
             ),
             author=(r.get("author") or {}).get("display_name"),
             index=i,

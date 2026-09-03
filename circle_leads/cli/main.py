@@ -562,6 +562,46 @@ def read_public_cmd(ctx, community_host, space_ids, list_spaces, all_spaces, com
 
 
 
+@cli.command("harvest")
+@click.argument("niches", nargs=-1)
+@click.option("--no-search", is_flag=True, help="Skip discovery; only re-read known communities.")
+@click.option("--only-new", is_flag=True, help="Only read communities not read before.")
+@click.option("--max-communities", type=int, default=40, show_default=True)
+@click.option("--use-llm", is_flag=True)
+@click.pass_context
+def harvest_cmd(ctx, niches, no_search, only_new, max_communities, use_llm):
+    """Discover public communities and read them for leads -- fully automatic.
+
+    Chains it all: search niches (Exa), save new communities, then read every
+    readable community's PUBLIC spaces, classify, and file leads. No login --
+    only public spaces are read. Built to run on a schedule (twice a day).
+
+    \b
+      circle-leads harvest                              # default niches
+      circle-leads harvest "AI founders" "fintech"      # custom niches
+      circle-leads harvest --only-new                   # skip already-read ones
+    """
+    from circle_leads.harvest import harvest
+
+    click.echo("Harvesting: searching + reading public communities...", err=True)
+    res = harvest(
+        ctx.obj["db"], ctx.obj["requirements"],
+        niches=list(niches) or None,
+        search=not no_search, only_new=only_new,
+        max_communities=max_communities, use_llm=use_llm,
+    )
+    click.echo(
+        f"\nDiscovered {res.new_communities} new community/communities.\n"
+        f"Read {res.communities_read} community/communities "
+        f"({res.public_spaces} public spaces, {res.posts_read} posts).\n"
+        f"Found {res.leads_found} lead(s)."
+    )
+    for err in res.errors[:8]:
+        click.echo(f"  ! {err}", err=True)
+    click.echo("\nReview leads in the dashboard, or `circle-leads search`.")
+
+
+
 @cli.command("communities")
 @click.option("--relevant-only", is_flag=True, help="Only communities scored relevant.")
 @click.pass_context
