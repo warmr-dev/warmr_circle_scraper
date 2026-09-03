@@ -134,3 +134,51 @@ def test_harvest_skips_non_subdomain_communities(db, reqs, monkeypatch):
     monkeypatch.setattr(h, "PublicReader", RecordingReader)
     harvest(db, reqs, search=False)
     assert "discover.circle.so" not in " ".join(read)
+
+
+def test_harvest_rereads_known_communities(db, reqs, monkeypatch):
+    """A previously-read community is re-read for new posts, not skipped."""
+    import circle_leads.harvest as h
+    from datetime import datetime, timedelta
+
+    # Mark the seeded community as read a week ago.
+    from sqlalchemy import select
+    from circle_leads.storage.models import Community
+    with db.session() as s:
+        c = s.scalar(select(Community).where(Community.slug == "pub"))
+        c.last_synced_at = datetime.utcnow() - timedelta(days=7)
+
+    read_calls = []
+    class Reader:
+        def __init__(self, host, **kw):
+            self.community_host = host; self.base = f"https://{host}"
+        def list_spaces(self):
+            from circle_leads.scraper.public_reader import PublicSpace
+            return [PublicSpace("1", "job-posts", "Job Posts")]
+        def read_space(self, sid, since=None, **kw):
+            read_calls.append(since)  # records the watermark used
+            return True, []
+    monkeypatch.setattr(h, "PublicReader", Reader)
+
+    h.harvest(db, reqs, search=False)  # not only_new -> should re-read
+    assert read_calls  # the known community WAS read
+    assert read_calls[0] is not None  # with a since watermark
+
+
+def test_only_new_skips_known_communities(db, reqs, monkeypatch):
+    import circle_leads.harvest as h
+    from datetime import datetime
+    from sqlalchemy import select
+    from circle_leads.storage.models import Community
+    with db.session() as s:
+        s.scalar(select(Community).where(Community.slug == "pub")).last_synced_at = datetime.utcnow()
+
+    read = []
+    class Reader:
+        def __init__(self, host, **kw):
+            self.community_host = host; self.base = f"https://{host}"
+        def list_spaces(self): read.append(host := host if False else 1); return []
+        def read_space(self, sid, **kw): return False, []
+    monkeypatch.setattr(h, "PublicReader", Reader)
+    h.harvest(db, reqs, search=False, only_new=True)  # skip the already-read one
+    assert read == []

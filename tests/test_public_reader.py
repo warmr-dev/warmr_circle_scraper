@@ -157,3 +157,52 @@ def test_read_comments_uses_correct_endpoint():
     comments = r.read_comments(42)
     assert "/internal_api/posts/42/comments" in called["url"]
     assert len(comments) == 1
+
+
+# --- Recency / incremental cutoff -------------------------------------------
+
+def test_read_space_stops_at_recency_cutoff():
+    from datetime import datetime, timedelta
+    from circle_leads.scraper.public_reader import PublicReader
+
+    now = datetime(2026, 9, 1)
+    page = {
+        "records": [
+            {"id": 1, "name": "new", "truncated_content": "recent",
+             "created_at": "2026-08-30T10:00:00Z"},   # inside window
+            {"id": 2, "name": "old", "truncated_content": "stale",
+             "created_at": "2026-01-01T10:00:00Z"},   # outside window -> stop
+            {"id": 3, "name": "older", "truncated_content": "x",
+             "created_at": "2025-06-01T10:00:00Z"},
+        ],
+        "has_next_page": True,
+    }
+
+    class Sess:
+        def get(self, url, **kw):
+            class R:
+                status_code = 200
+                def json(self): return page
+            return R()
+
+    r = PublicReader("x.circle.so", session=Sess(), requests_per_minute=100000)
+    ok, recs = r.read_space(1, since=now - timedelta(days=30))
+    ids = [x["id"] for x in recs]
+    assert ids == [1]  # stopped at the first post older than the cutoff
+
+
+def test_read_space_no_cutoff_reads_all():
+    from circle_leads.scraper.public_reader import PublicReader
+    page = {"records": [{"id": 1, "created_at": "2020-01-01T00:00:00Z"}],
+            "has_next_page": False}
+
+    class Sess:
+        def get(self, url, **kw):
+            class R:
+                status_code = 200
+                def json(self): return page
+            return R()
+
+    r = PublicReader("x.circle.so", session=Sess(), requests_per_minute=100000)
+    ok, recs = r.read_space(1)  # no since -> old post still read
+    assert len(recs) == 1

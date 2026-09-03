@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 
@@ -53,11 +53,12 @@ class HarvestResult:
     errors: list[str] = field(default_factory=list)
 
 
-def _community_hosts(db: Database, *, only_new: bool, limit: int) -> list[tuple[str, str]]:
-    """Return (host, slug) for community subdomains worth reading.
+def _community_hosts(db: Database, *, limit: int) -> list[tuple[str, str, object]]:
+    """Return (host, slug, last_synced_at) for readable community subdomains.
 
-    When ``only_new`` is set, restrict to communities not yet read (no
-    ``last_synced_at``), so a scheduled run focuses on fresh finds.
+    Every known community is returned -- both freshly discovered ones and ones
+    read before. The last-synced time is the incremental watermark: a
+    previously-read community is only re-read for posts newer than that.
     """
     with db.session() as s:
         stmt = select(Community).order_by(Community.relevance_score.desc())
@@ -66,10 +67,8 @@ def _community_hosts(db: Database, *, only_new: bool, limit: int) -> list[tuple[
         for c in rows:
             if not is_subdomain_community(c.url):
                 continue  # Discover listings can't be read; only subdomains
-            if only_new and c.last_synced_at is not None:
-                continue
             host = c.url.replace("https://", "").replace("http://", "").strip("/")
-            out.append((host, c.slug))
+            out.append((host, c.slug, c.last_synced_at))
             if len(out) >= limit:
                 break
         return out
@@ -88,8 +87,20 @@ def harvest(
     min_score: int = 20,
     verbose_log: bool = False,
     include_comments: bool = False,
+    recency_days: int = 30,
 ) -> HarvestResult:
-    """Discover public communities and read their public spaces for leads."""
+    """Discover public communities and read their public spaces for leads.
+
+    Behaviour:
+    - ``search`` (default True) discovers new communities; set False to only
+      re-read known ones.
+    - Known communities are re-read every run for *new* posts. Each community's
+      watermark is the later of its last-read time and the ``recency_days``
+      window, so old history is not re-fetched.
+    - ``only_new`` (default False) reads only communities never read before --
+      use it to focus a run purely on fresh discoveries.
+    - ``recency_days`` bounds how far back to look for a never-read community.
+    """
     niches = niches or DEFAULT_NICHES
     result = HarvestResult(niches=niches)
 
@@ -107,8 +118,19 @@ def harvest(
                 result.errors.append(f"search '{niche}': {exc.__class__.__name__}")
 
     # --- 2. Read every readable community's public spaces ----------------
-    hosts = _community_hosts(db, only_new=only_new, limit=max_communities)
-    for host, slug in hosts:
+    recency_cutoff = (
+        datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=recency_days)
+    )
+    hosts = _community_hosts(db, limit=max_communities)
+    for host, slug, last_synced in hosts:
+        if only_new and last_synced is not None:
+            continue  # caller asked to read only never-seen communities
+        # Only fetch posts newer than the recency window, and newer than the
+        # last time this community was read (whichever is later). A never-read
+        # community uses the recency window alone.
+        since = recency_cutoff
+        if last_synced is not None and last_synced > recency_cutoff:
+            since = last_synced
         with db.session() as s:
             log_activity(s, kind="read", community=slug,
                          summary=f"Checking community {host} for public spaces")
@@ -133,7 +155,7 @@ def harvest(
         records = []
         public_count = 0
         for sp in _lead_spaces(spaces):
-            was_public, raw = reader.read_space(sp.id, max_pages=max_pages)
+            was_public, raw = reader.read_space(sp.id, max_pages=max_pages, since=since)
             sp.is_public = was_public
             if not was_public:
                 with db.session() as s:

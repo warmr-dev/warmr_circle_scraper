@@ -105,9 +105,17 @@ class PublicReader:
         return (payload.get("records") if isinstance(payload, dict) else payload) or []
 
     def read_space(
-        self, space_id: str | int, *, per_page: int = 20, max_pages: int = 10
+        self, space_id: str | int, *, per_page: int = 20, max_pages: int = 10,
+        since=None,
     ) -> tuple[bool, list[dict]]:
-        """Read a space's posts if public. Returns (was_public, records)."""
+        """Read a space's posts if public. Returns (was_public, records).
+
+        Posts come back newest-first. When ``since`` (a datetime) is given, we
+        stop as soon as we reach a post older than it -- so a recency window or
+        an incremental re-read only fetches fresh posts, not the whole history.
+        """
+        from circle_leads.scraper.normalize import parse_timestamp
+
         records: list[dict] = []
         for page in range(1, max_pages + 1):
             status, payload = self._get(
@@ -123,7 +131,22 @@ class PublicReader:
             ) or []
             if not batch:
                 break
-            records.extend(batch)
+
+            if since is not None:
+                fresh = []
+                hit_old = False
+                for post in batch:
+                    ts = parse_timestamp(post.get("created_at") or post.get("published_at"))
+                    if ts is not None and ts <= since:
+                        hit_old = True
+                        break
+                    fresh.append(post)
+                records.extend(fresh)
+                if hit_old:
+                    break  # everything after this is older; stop paging
+            else:
+                records.extend(batch)
+
             if isinstance(payload, dict) and not payload.get("has_next_page"):
                 break
         return True, records
