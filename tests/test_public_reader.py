@@ -122,3 +122,38 @@ def test_no_public_space_list_returns_empty():
     assert r.list_spaces() == []
     spaces, records = discover_and_read_public(r)
     assert spaces == [] and records == []
+
+
+# --- Comment reading and tiptap extraction ---------------------------------
+
+def test_tiptap_body_is_flattened():
+    """Comments store text in tiptap_body (nested under 'body'), not truncated_content."""
+    from circle_leads.scraper.public_reader import _extract_text
+    record = {
+        "id": 1,
+        "tiptap_body": {"body": {"type": "doc", "content": [
+            {"type": "paragraph", "content": [
+                {"type": "text", "text": "We need a backend engineer for this"},
+            ]},
+        ]}},
+    }
+    _, body = _extract_text(record)
+    assert "backend engineer" in body
+
+
+def test_read_comments_uses_correct_endpoint():
+    from circle_leads.scraper.public_reader import PublicReader
+
+    called = {}
+    class Sess:
+        def get(self, url, **kw):
+            called["url"] = url
+            class R:
+                status_code = 200
+                def json(self): return {"records": [{"id": 9}]}
+            return R()
+
+    r = PublicReader("x.circle.so", session=Sess(), requests_per_minute=100000)
+    comments = r.read_comments(42)
+    assert "/internal_api/posts/42/comments" in called["url"]
+    assert len(comments) == 1

@@ -570,8 +570,9 @@ def read_public_cmd(ctx, community_host, space_ids, list_spaces, all_spaces, com
 @click.option("--use-llm", is_flag=True)
 @click.option("--verbose-log", is_flag=True,
               help="Log every post's classify decision (which layer, why) to the activity feed.")
+@click.option("--comments", is_flag=True, help="Also read and classify comments (more requests).")
 @click.pass_context
-def harvest_cmd(ctx, niches, no_search, only_new, max_communities, use_llm, verbose_log):
+def harvest_cmd(ctx, niches, no_search, only_new, max_communities, use_llm, verbose_log, comments):
     """Discover public communities and read them for leads -- fully automatic.
 
     Chains it all: search niches (Exa), save new communities, then read every
@@ -591,6 +592,7 @@ def harvest_cmd(ctx, niches, no_search, only_new, max_communities, use_llm, verb
         niches=list(niches) or None,
         search=not no_search, only_new=only_new,
         max_communities=max_communities, use_llm=use_llm, verbose_log=verbose_log,
+        include_comments=comments,
     )
     click.echo(
         f"\nDiscovered {res.new_communities} new community/communities.\n"

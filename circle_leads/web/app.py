@@ -293,13 +293,17 @@ def create_app(db_url: str | None = None, config_path: str | None = None) -> Fas
         only_new = bool(payload.get("only_new", True))
         no_search = bool(payload.get("no_search", False))
 
+        use_llm = bool(payload.get("use_llm", False))
+        include_comments = bool(payload.get("include_comments", False))
+
         def run(job):
             from circle_leads.harvest import harvest
 
             job.detail = "Discovering + reading public communities..."
             res = harvest(
                 db, requirements(), niches=niches, search=not no_search,
-                only_new=only_new, verbose_log=True,
+                only_new=only_new, verbose_log=True, use_llm=use_llm,
+                include_comments=include_comments,
             )
             job.result = {
                 "new_communities": res.new_communities,

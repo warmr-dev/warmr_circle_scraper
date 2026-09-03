@@ -87,6 +87,7 @@ def harvest(
     use_llm: bool = False,
     min_score: int = 20,
     verbose_log: bool = False,
+    include_comments: bool = False,
 ) -> HarvestResult:
     """Discover public communities and read their public spaces for leads."""
     niches = niches or DEFAULT_NICHES
@@ -148,10 +149,21 @@ def harvest(
                     for x in raw
                 ) if r
             ]
+            # Optionally read comments too (a hiring ask can be a reply).
+            if include_comments:
+                for raw_post in raw:
+                    if raw_post.get("comments_count"):
+                        for c in reader.read_comments(raw_post.get("id")):
+                            crec = normalize_public_post(
+                                c, community_url=reader.base,
+                                excluded_content=requirements.excluded_content)
+                            if crec:
+                                crec["content_type"] = "comment"
+                                space_recs.append(crec)
             records.extend(space_recs)
             with db.session() as s:
                 log_activity(s, kind="read", level="success", community=slug, space=sp.name,
-                             summary=f"{host} / {sp.name}: read {len(space_recs)} public post(s)",
+                             summary=f"{host} / {sp.name}: read {len(space_recs)} public item(s)",
                              items_seen=len(space_recs))
 
         if not public_count:

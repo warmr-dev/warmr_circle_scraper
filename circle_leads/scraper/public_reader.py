@@ -97,6 +97,13 @@ class PublicReader:
             )
         return out
 
+    def read_comments(self, post_id: str | int) -> list[dict]:
+        """Read a post's public comments (hiring asks often appear as replies)."""
+        status, payload = self._get(f"/internal_api/posts/{post_id}/comments")
+        if status != 200 or not payload:
+            return []
+        return (payload.get("records") if isinstance(payload, dict) else payload) or []
+
     def read_space(
         self, space_id: str | int, *, per_page: int = 20, max_pages: int = 10
     ) -> tuple[bool, list[dict]]:
@@ -122,6 +129,17 @@ class PublicReader:
         return True, records
 
 
+def _tiptap_text(node) -> str:
+    """Flatten Circle's TipTap rich-text JSON (used by comments) to plain text."""
+    out = []
+    if isinstance(node, dict):
+        if node.get("type") == "text" and node.get("text"):
+            out.append(node["text"])
+        for child in node.get("content", []) or []:
+            out.append(_tiptap_text(child))
+    return " ".join(filter(None, out))
+
+
 def _extract_text(record: dict) -> tuple[str, str]:
     title = strip_html(record.get("name") or record.get("title") or "")
     body = strip_html(record.get("truncated_content") or "")
@@ -130,6 +148,12 @@ def _extract_text(record: dict) -> tuple[str, str]:
             if record.get(key):
                 body = strip_html(str(record[key]))
                 break
+    # Comments carry their text in tiptap_body rather than truncated_content.
+    if not body and isinstance(record.get("tiptap_body"), dict):
+        tb = record["tiptap_body"]
+        # The doc may be nested under a "body" key.
+        node = tb.get("body") if isinstance(tb.get("body"), dict) else tb
+        body = strip_html(_tiptap_text(node))
     return title, body
 
 
@@ -174,6 +198,7 @@ def discover_and_read_public(
     only_lead_spaces: bool = False,
     excluded_content: list[str] | None = None,
     max_pages: int = 5,
+    include_comments: bool = False,
 ) -> tuple[list[PublicSpace], list[dict]]:
     """Enumerate a community's public spaces and read the readable ones.
 
@@ -209,4 +234,14 @@ def discover_and_read_public(
             )
             if rec:
                 records.append(rec)
+            # A hiring request is often a comment on someone else's post.
+            if include_comments and r.get("comments_count"):
+                for c in reader.read_comments(r.get("id")):
+                    crec = normalize_public_post(
+                        c, community_url=reader.base, excluded_content=excluded_content
+                    )
+                    if crec:
+                        crec["content_type"] = "comment"
+                        crec["thread_id"] = str(r.get("id"))
+                        records.append(crec)
     return spaces, records

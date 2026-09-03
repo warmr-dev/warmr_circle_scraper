@@ -236,6 +236,7 @@
     <div class="panel">
       <div class="row">
         <button class="action" id="cfg-save">Save &amp; re-classify</button>
+        <button class="ghost" id="cfg-save-harvest">Save &amp; run full harvest</button>
         <span id="cfg-status" class="muted" style="font-size:13px"></span>
       </div>
       <p class="muted" style="font-size:12px;margin-top:8px">
@@ -247,12 +248,20 @@
   <!-- COMMUNITIES -->
   <section id="view-communities" hidden>
     <div class="panel">
-      <div class="row" style="margin-bottom:10px">
+      <div class="row" style="margin-bottom:6px">
         <div style="flex:1">
           <h2 style="margin:0 0 2px">Harvest leads automatically</h2>
           <span class="muted" style="font-size:13px">Discover public communities and read their public spaces — no login.</span>
         </div>
         <button class="action" id="c-harvest">Harvest now</button>
+      </div>
+      <div class="row" style="gap:14px;font-size:13px;margin-bottom:6px">
+        <label class="muted" style="display:flex;gap:6px;align-items:center">
+          <input type="checkbox" id="h-fullsearch" style="width:auto"> Fresh search (all niches, not just new)</label>
+        <label class="muted" style="display:flex;gap:6px;align-items:center">
+          <input type="checkbox" id="h-llm" style="width:auto"> Use AI for ambiguous posts</label>
+        <label class="muted" style="display:flex;gap:6px;align-items:center">
+          <input type="checkbox" id="h-comments" style="width:auto"> Read comments too</label>
       </div>
       <h2 style="margin:14px 0 8px;font-size:13px">Or search a specific niche</h2>
       <div class="row">
@@ -553,7 +562,12 @@ $('c-harvest').addEventListener('click', async () => {
   try {
     const data = await api('/api/jobs/harvest', {
       method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ only_new: true }),
+      body: JSON.stringify({
+        only_new: !($('h-fullsearch') && $('h-fullsearch').checked),
+        no_search: false,
+        use_llm: !!($('h-llm') && $('h-llm').checked),
+        include_comments: !!($('h-comments') && $('h-comments').checked),
+      }),
     });
     if (data) { toast('Harvest started'); pollJobs(); if (!jobPollTimer) jobPollTimer = setInterval(pollJobs, 3000); }
   } finally {
@@ -643,6 +657,45 @@ $('cfg-save').addEventListener('click', async () => {
     pollJobs(); if (!jobPollTimer) jobPollTimer = setInterval(pollJobs, 3000);
   } finally { $('cfg-save').disabled = false; }
 });
+
+// Save config, then run a full harvest with the new rules.
+$('cfg-save-harvest').addEventListener('click', async () => {
+  const btn = $('cfg-save-harvest');
+  btn.disabled = true;
+  $('cfg-status').textContent = 'Saving config…';
+  try {
+    // reuse the save body-builder by clicking Save first
+    const saved = await saveConfigOnly();
+    if (!saved) { $('cfg-status').textContent = 'Fix the config first.'; return; }
+    $('cfg-status').textContent = 'Saved. Starting full harvest…';
+    await api('/api/jobs/harvest', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ only_new: false, no_search: false, use_llm: false }),
+    });
+    toast('Full harvest started with new rules');
+    pollJobs(); if (!jobPollTimer) jobPollTimer = setInterval(pollJobs, 3000);
+  } finally { btn.disabled = false; }
+});
+
+async function saveConfigOnly() {
+  const body = {
+    target_roles: parseCsv($('cfg-roles').value),
+    target_skills: parseCsv($('cfg-skills').value),
+    exclude_job_seekers: $('cfg-exclude-seekers').checked,
+    minimum_confidence: parseFloat($('cfg-conf').value),
+    llm_escalation_threshold: parseInt($('cfg-llm').value),
+    keywords: { include: parseCsv($('cfg-kw-include').value), exclude: parseCsv($('cfg-kw-exclude').value) },
+    priority_thresholds: { high: parseInt($('cfg-high').value), medium: parseInt($('cfg-med').value) },
+    scoring: {
+      hiring_intent: parseInt($('sc-hiring').value), target_role_match: parseInt($('sc-role').value),
+      target_skill_match: parseInt($('sc-skill').value), budget_mentioned: parseInt($('sc-budget').value),
+      company_identified: parseInt($('sc-company').value), recent_post: parseInt($('sc-recent').value),
+    },
+  };
+  const resp = await fetch('/api/config', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+  if (resp.status === 401) { window.location='/login'; return false; }
+  return resp.ok;
+}
 
 loadLeads();
 pollJobs();
