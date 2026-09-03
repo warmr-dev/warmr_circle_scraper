@@ -116,3 +116,63 @@ def test_llm_failure_falls_back_to_rules():
     result = classify("Anyone know a good dev?", reqs, llm=backend)
     assert result.classification in ("LEAD", "NOT_LEAD")
     assert result.decided_by == "rules"
+
+
+# --- Backend selection (OpenAI / Anthropic) ---------------------------------
+
+
+def test_make_backend_prefers_openai(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.delenv("CIRCLE_LEADS_LLM", raising=False)
+    from circle_leads.classifier.ai_classifier import make_backend
+    b = make_backend()
+    assert b is not None
+    assert b.name == "openai" if hasattr(b, "name") else b.__class__.__name__ == "OpenAIBackend"
+
+
+def test_make_backend_none_without_keys(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("CIRCLE_LEADS_LLM", raising=False)
+    from circle_leads.classifier.ai_classifier import make_backend
+    assert make_backend() is None
+
+
+def test_forced_openai_selects_openai(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("CIRCLE_LEADS_LLM", "openai")
+    from circle_leads.classifier.ai_classifier import make_backend
+    b = make_backend()
+    assert b.__class__.__name__ == "OpenAIBackend"
+
+
+def test_missing_provider_package_falls_through(monkeypatch):
+    """Forcing a provider whose package/key is missing returns None, not a crash."""
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("CIRCLE_LEADS_LLM", "anthropic")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    from circle_leads.classifier.ai_classifier import make_backend
+    assert make_backend() is None
+
+
+def test_openai_backend_parses_chat_completion(monkeypatch):
+    """OpenAIBackend.complete returns the message content from a chat completion."""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    from circle_leads.classifier.ai_classifier import OpenAIBackend
+
+    class FakeChoice:
+        class message:
+            content = '{"classification":"LEAD"}'
+    class FakeResp:
+        choices = [FakeChoice()]
+    class FakeCompletions:
+        def create(self, **kw): return FakeResp()
+    class FakeChat:
+        completions = FakeCompletions()
+    class FakeClient:
+        chat = FakeChat()
+
+    b = OpenAIBackend()
+    b._client = FakeClient()
+    out = b.complete("sys", "user")
+    assert "LEAD" in out

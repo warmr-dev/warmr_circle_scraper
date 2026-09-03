@@ -18,7 +18,7 @@ from typing import Any
 
 from sqlalchemy import select
 
-from circle_leads.classifier.ai_classifier import AnthropicBackend, LlmBackend
+from circle_leads.classifier.ai_classifier import LlmBackend, make_backend
 from circle_leads.classifier.lead_classifier import classify, meets_requirements
 from circle_leads.config.settings import Requirements
 from circle_leads.scoring.lead_scoring import score_lead
@@ -175,11 +175,11 @@ def _triage_posts(
     llm: LlmBackend | None = None
     model_name = None
     if use_llm:
-        try:
-            backend = AnthropicBackend()
-            llm, model_name = backend, backend.model
-        except RuntimeError as exc:
-            logger.warning("Semantic classification unavailable: %s", exc)
+        backend = make_backend()
+        if backend is not None:
+            llm, model_name = backend, getattr(backend, "model", "llm")
+        else:
+            logger.warning("Semantic classification requested but no LLM key is set.")
 
     with db.session() as s:
         comm = get_or_create_community(

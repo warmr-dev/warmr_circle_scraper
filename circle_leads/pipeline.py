@@ -24,7 +24,7 @@ from circle_leads.authentication.browser_session import (
     mint_member_session,
     resolve_admin_credentials,
 )
-from circle_leads.classifier.ai_classifier import AnthropicBackend, LlmBackend
+from circle_leads.classifier.ai_classifier import LlmBackend, make_backend
 from circle_leads.classifier.lead_classifier import classify, meets_requirements
 from circle_leads.config.settings import CommunityPermission, Requirements
 from circle_leads.discovery.discover_communities import DiscoveredCommunity
@@ -366,11 +366,11 @@ def classify_pending(
     llm: LlmBackend | None = None
     model_name = None
     if use_llm:
-        try:
-            backend = AnthropicBackend()
-            llm, model_name = backend, backend.model
-        except RuntimeError as exc:
-            logger.warning("Semantic classification unavailable: %s", exc)
+        backend = make_backend()
+        if backend is not None:
+            llm, model_name = backend, getattr(backend, "model", "llm")
+        else:
+            logger.warning("Semantic classification requested but no LLM key is set.")
 
     stats = {"classified": 0, "leads": 0, "not_leads": 0, "duplicates": 0, "filtered": 0}
 

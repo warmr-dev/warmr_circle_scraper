@@ -463,7 +463,13 @@ def create_app(db_url: str | None = None, config_path: str | None = None) -> Fas
     @app.get("/api/config")
     def api_config(_: None = Depends(require_auth)) -> dict[str, Any]:
         data = requirements_to_dict(requirements())
-        data["llm_available"] = bool(os.environ.get("ANTHROPIC_API_KEY"))
+        data["llm_available"] = bool(
+            os.environ.get("OPENAI_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
+        )
+        data["llm_provider"] = (
+            "OpenAI" if os.environ.get("OPENAI_API_KEY")
+            else "Anthropic" if os.environ.get("ANTHROPIC_API_KEY") else None
+        )
         return data
 
     @app.post("/api/config")

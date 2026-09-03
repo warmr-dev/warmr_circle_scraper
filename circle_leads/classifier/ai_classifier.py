@@ -122,6 +122,59 @@ class AnthropicBackend:
         )
 
 
+class OpenAIBackend:
+    """OpenAI (ChatGPT) backend. Requires OPENAI_API_KEY and the `openai` package.
+
+    Defaults to a cheap, capable model. The classification task is small
+    (one short JSON reply per ambiguous post), so a mini model is plenty.
+    """
+
+    def __init__(self, model: str | None = None, max_tokens: int = 600):
+        try:
+            import openai
+        except ImportError as exc:  # pragma: no cover
+            raise RuntimeError(
+                "Install openai to use the ChatGPT backend: pip install openai"
+            ) from exc
+        if not os.environ.get("OPENAI_API_KEY"):
+            raise RuntimeError("OPENAI_API_KEY is not set.")
+        self._client = openai.OpenAI()
+        self.model = model or os.environ.get("CIRCLE_LEADS_OPENAI_MODEL", "gpt-4o-mini")
+        self.max_tokens = max_tokens
+
+    def complete(self, system: str, user: str) -> str:
+        resp = self._client.chat.completions.create(
+            model=self.model,
+            max_tokens=self.max_tokens,
+            temperature=0,  # deterministic classification
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+        )
+        return resp.choices[0].message.content or ""
+
+
+def make_backend() -> "LlmBackend | None":
+    """Pick an available LLM backend, or None if no key is configured.
+
+    Preference: OpenAI (OPENAI_API_KEY) then Anthropic (ANTHROPIC_API_KEY).
+    Override the provider with CIRCLE_LEADS_LLM=openai|anthropic.
+    """
+    forced = os.environ.get("CIRCLE_LEADS_LLM", "").lower().strip()
+    if forced == "openai" or (not forced and os.environ.get("OPENAI_API_KEY")):
+        try:
+            return OpenAIBackend()
+        except RuntimeError:
+            pass
+    if forced == "anthropic" or os.environ.get("ANTHROPIC_API_KEY"):
+        try:
+            return AnthropicBackend()
+        except RuntimeError:
+            pass
+    return None
+
+
 def _normalize(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "")).strip().lower()
 
