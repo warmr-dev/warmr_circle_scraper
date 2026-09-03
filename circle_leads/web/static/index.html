@@ -257,25 +257,20 @@
   <!-- COMMUNITIES -->
   <section id="view-communities" hidden>
     <div class="panel">
-      <div class="row" style="margin-bottom:6px">
-        <div style="flex:1">
-          <h2 style="margin:0 0 2px">Harvest leads automatically</h2>
-          <span class="muted" style="font-size:13px">Discover public communities and read their public spaces — no login.</span>
-        </div>
-        <button class="action" id="c-harvest">Harvest now</button>
+      <h2 style="margin:0 0 2px">Find leads</h2>
+      <span class="muted" style="font-size:13px">Discover public communities and read their public spaces for hiring posts — no login.</span>
+      <div class="row" style="margin-top:10px">
+        <input id="c-niche" placeholder="Niche (optional) — e.g. AI startup founders. Blank = your default niches"
+               style="flex:1;min-width:260px">
+        <button class="action" id="c-harvest">Find leads</button>
       </div>
-      <div class="row" style="gap:14px;font-size:13px;margin-bottom:6px">
+      <div class="row" style="gap:14px;font-size:13px;margin-top:8px">
         <label class="muted" style="display:flex;gap:6px;align-items:center">
-          <input type="checkbox" id="h-fullsearch" style="width:auto"> Fresh search (all niches, not just new)</label>
+          <input type="checkbox" id="h-fullsearch" style="width:auto"> Re-check communities already read</label>
         <label class="muted" style="display:flex;gap:6px;align-items:center">
           <input type="checkbox" id="h-llm" style="width:auto"> Use AI for ambiguous posts</label>
         <label class="muted" style="display:flex;gap:6px;align-items:center">
           <input type="checkbox" id="h-comments" style="width:auto"> Read comments too</label>
-      </div>
-      <h2 style="margin:14px 0 8px;font-size:13px">Or search a specific niche</h2>
-      <div class="row">
-        <input id="c-niche" placeholder="e.g. AI startup founders, flutter developer" style="flex:1;min-width:220px">
-        <button class="action" id="c-search">Search the web</button>
       </div>
       <div id="jobs-strip" class="muted" style="margin-top:10px;font-size:13px"></div>
     </div>
@@ -506,7 +501,7 @@ async function loadCommunities() {
     return;
   }
   $('communities-table').innerHTML = `<table>
-    <thead><tr><th>Community</th><th>Score</th><th>Why</th><th>Status</th><th></th></tr></thead>
+    <thead><tr><th>Community</th><th>Score</th><th>Found</th><th>Why</th><th>Status</th><th></th></tr></thead>
     <tbody>${data.communities.map(c => {
       const joined = c.access_status !== 'not_visited';
       const price = c.price_label || '';
@@ -519,6 +514,7 @@ async function loadCommunities() {
       return `<tr>
         <td><a href="${esc(c.url)}" target="_blank" rel="noopener">${esc(c.name || c.slug)} ↗</a>${badge}</td>
         <td>${Math.round(c.relevance_score)}</td>
+        <td class="muted" title="${esc(c.discovered_at || '')}">${c.discovered_at ? esc(c.discovered_at.slice(0,10)) : '—'}</td>
         <td class="muted">${esc(why || '—')}</td>
         <td>${joined ? `<span class="pill HIGH">${esc(c.access_status)}</span>` : '<span class="muted">not visited</span>'}</td>
         <td>
@@ -566,36 +562,30 @@ async function pollJobs() {
 }
 
 $('c-harvest').addEventListener('click', async () => {
+  // One action: find communities (optionally for a typed niche) AND read them
+  // for leads. Blank niche = your default niches.
+  const niche = $('c-niche').value.trim();
   $('c-harvest').disabled = true;
-  $('c-harvest').textContent = 'Harvesting…';
+  $('c-harvest').textContent = 'Working…';
   try {
+    const body = {
+      // A typed niche always forces a fresh search of all niches; the checkbox
+      // re-checks communities already read.
+      only_new: !niche && !($('h-fullsearch') && $('h-fullsearch').checked),
+      no_search: false,
+      use_llm: !!($('h-llm') && $('h-llm').checked),
+      include_comments: !!($('h-comments') && $('h-comments').checked),
+    };
+    if (niche) body.niches = [niche];
     const data = await api('/api/jobs/harvest', {
       method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({
-        only_new: !($('h-fullsearch') && $('h-fullsearch').checked),
-        no_search: false,
-        use_llm: !!($('h-llm') && $('h-llm').checked),
-        include_comments: !!($('h-comments') && $('h-comments').checked),
-      }),
+      body: JSON.stringify(body),
     });
-    if (data) { toast('Harvest started'); pollJobs(); if (!jobPollTimer) jobPollTimer = setInterval(pollJobs, 3000); }
+    if (data) { toast(niche ? `Finding leads for "${niche}"…` : 'Finding leads…'); pollJobs(); if (!jobPollTimer) jobPollTimer = setInterval(pollJobs, 3000); }
   } finally {
     $('c-harvest').disabled = false;
-    $('c-harvest').textContent = 'Harvest now';
+    $('c-harvest').textContent = 'Find leads';
   }
-});
-
-$('c-search').addEventListener('click', async () => {
-  const niche = $('c-niche').value.trim();
-  if (!niche) { toast('Enter a niche to search'); return; }
-  $('c-search').disabled = true;
-  try {
-    const data = await api('/api/jobs/search', {
-      method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ niche }),
-    });
-    if (data) { toast('Search started'); pollJobs(); if (!jobPollTimer) jobPollTimer = setInterval(pollJobs, 3000); }
-  } finally { $('c-search').disabled = false; }
 });
 
 document.addEventListener('click', async (event) => {

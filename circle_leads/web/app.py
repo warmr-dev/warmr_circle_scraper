@@ -462,6 +462,9 @@ def create_app(db_url: str | None = None, config_path: str | None = None) -> Fas
                         "price_label": c.price_label,
                         "relevance_score": c.relevance_score,
                         "relevance_reasons": c.relevance_reasons or [],
+                        "discovered_at": (
+                            c.discovered_at.isoformat() if c.discovered_at else None
+                        ),
                         "relevant": c.relevant,
                         "access_status": c.access_status,
                         "permission_status": c.permission_status,
