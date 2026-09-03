@@ -134,3 +134,19 @@ def test_concurrent_duplicate_insert_is_race_safe(db):
     from circle_leads.storage.models import Post
     with db.session() as s:
         assert s.scalar(select(func.count()).select_from(Post)) == 1
+
+
+@pytest.mark.parametrize("url,expected_prefix", [
+    ("postgresql://u:p@host:5432/db", "postgresql+psycopg://"),
+    ("postgres://u:p@host:5432/db", "postgresql+psycopg://"),
+])
+def test_postgres_url_uses_psycopg_v3(url, expected_prefix, monkeypatch):
+    """A bare postgres URL must target psycopg (v3), which we ship, not psycopg2."""
+    from circle_leads.storage import database as dbmod
+
+    # Skip the real connect/create_all so the test needs no Postgres.
+    monkeypatch.setattr(dbmod.Base.metadata, "create_all", lambda *a, **k: None)
+    monkeypatch.setattr(dbmod, "create_engine", lambda u, **k: type("E", (), {"url": u})())
+
+    d = dbmod.Database(url)
+    assert d.url.startswith(expected_prefix)

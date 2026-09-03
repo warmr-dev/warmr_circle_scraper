@@ -6,7 +6,7 @@ WORKDIR /app
 # feed reader in the cloud (private communities). The public harvest doesn't
 # need it, so it's left out to keep the image small. Add it if you need it.
 COPY . .
-RUN pip install --no-cache-dir -e '.[web]' 'psycopg[binary]>=3.1'
+RUN pip install --no-cache-dir -e '.[web]'
 
 ENV CIRCLE_LEADS_DB=""
 EXPOSE 8000

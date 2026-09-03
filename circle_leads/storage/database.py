@@ -36,6 +36,14 @@ class Database:
             p = Path(url.replace("sqlite:///", "", 1))
             if p.parent and str(p.parent) not in ("", "."):
                 p.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            # We ship psycopg (v3), but SQLAlchemy defaults a bare
+            # "postgresql://" URL to psycopg2. Point it at the v3 driver so a
+            # standard Postgres URL (e.g. from Supabase/Render) works as-is.
+            if url.startswith("postgresql://"):
+                url = "postgresql+psycopg://" + url[len("postgresql://"):]
+            elif url.startswith("postgres://"):  # some hosts use the short form
+                url = "postgresql+psycopg://" + url[len("postgres://"):]
         self.url = url
         self.engine = create_engine(url, future=True)
         self._sessionmaker = sessionmaker(bind=self.engine, future=True)
