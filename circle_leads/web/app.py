@@ -300,6 +300,13 @@ def create_app(db_url: str | None = None, config_path: str | None = None) -> Fas
         def run(job):
             from circle_leads.harvest import harvest
 
+            log_activity_holder(
+                kind="harvest", level="info",
+                summary="Harvest started (dashboard)",
+                detail={"only_new": only_new, "search": not no_search,
+                        "use_llm": use_llm, "all_spaces": all_spaces,
+                        "recency_days": recency_days},
+            )
             job.detail = "Discovering + reading public communities..."
             res = harvest(
                 db, requirements(), niches=niches, search=not no_search,
@@ -317,6 +324,15 @@ def create_app(db_url: str | None = None, config_path: str | None = None) -> Fas
             job.detail = (
                 f"{res.new_communities} new, read {res.communities_read} "
                 f"community/communities, {res.leads_found} lead(s)."
+            )
+            log_activity_holder(
+                kind="harvest",
+                level="success" if res.leads_found else "info",
+                summary=(
+                    f"Harvest finished: {res.new_communities} new communities, "
+                    f"read {res.communities_read}, {res.leads_found} lead(s)"
+                ),
+                items_seen=res.posts_read, leads_found=res.leads_found,
             )
 
         job = jobs.start("harvest", "Harvest", run)
