@@ -342,3 +342,43 @@ def test_config_save_harvest_recency(auth_client, tmp_path, monkeypatch):
     got = auth_client.get("/api/config").json()
     assert got["harvest_recency_days"] == 7
     assert got["harvest_all_spaces"] is True
+
+
+# --- /api/tick (free-tier external scheduler) -------------------------------
+
+
+def test_tick_requires_auth_or_token(client):
+    assert client.get("/api/tick").status_code == 401
+
+
+def test_tick_accepts_token(client, monkeypatch):
+    monkeypatch.setenv("TICK_TOKEN", "sekret")
+    # rebuild the app so it picks up the token
+    from circle_leads.web.app import create_app
+    from fastapi.testclient import TestClient
+    import tempfile
+    c = TestClient(create_app(db_url=f"sqlite:///{tempfile.mktemp()}.db"))
+    r = c.get("/api/tick?token=sekret")
+    assert r.status_code == 200
+    assert r.json().get("ran") is True  # default schedule, never run -> due
+
+
+def test_tick_wrong_token_rejected(client, monkeypatch):
+    monkeypatch.setenv("TICK_TOKEN", "sekret")
+    from circle_leads.web.app import create_app
+    from fastapi.testclient import TestClient
+    import tempfile
+    c = TestClient(create_app(db_url=f"sqlite:///{tempfile.mktemp()}.db"))
+    assert c.get("/api/tick?token=wrong").status_code == 401
+
+
+def test_tick_skips_when_not_due(client, monkeypatch):
+    monkeypatch.setenv("TICK_TOKEN", "sekret")
+    from circle_leads.web.app import create_app
+    from fastapi.testclient import TestClient
+    import tempfile
+    c = TestClient(create_app(db_url=f"sqlite:///{tempfile.mktemp()}.db"))
+    c.get("/api/tick?token=sekret")            # first run marks it done
+    import time; time.sleep(0.2)
+    r = c.get("/api/tick?token=sekret")        # immediately after -> not due
+    assert r.json()["ran"] is False

@@ -481,6 +481,44 @@ def create_app(db_url: str | None = None, config_path: str | None = None) -> Fas
         from circle_leads.discovery.persist import new_since
         return {"communities": new_since(db, limit=limit)}
 
+    @app.post("/api/tick")
+    @app.get("/api/tick")
+    def api_tick(request: Request) -> dict[str, Any]:
+        """Wake-up endpoint for an external cron pinger (free-tier scheduling).
+
+        Runs a harvest only if the dashboard-set schedule says it is due, in a
+        background thread so the ping returns immediately. Auth: either a signed
+        session, or the TICK_TOKEN secret as ?token= (so a pinger can call it).
+        """
+        import os as _os
+        from circle_leads.storage.settings_store import is_harvest_due, mark_harvest_run
+
+        token = request.query_params.get("token", "")
+        tick_token = _os.environ.get("TICK_TOKEN", "")
+        authed = sessions.valid(request.cookies.get(COOKIE_NAME)) or (
+            tick_token and token == tick_token
+        )
+        if not authed:
+            raise HTTPException(401, "Not authenticated")
+
+        if not is_harvest_due(db):
+            return {"ran": False, "reason": "not due yet"}
+        if jobs.active("harvest"):
+            return {"ran": False, "reason": "already running"}
+
+        mark_harvest_run(db)
+
+        def run(job):
+            from circle_leads.harvest import harvest
+            res = harvest(db, requirements(), verbose_log=True,
+                          use_llm=bool(_os.environ.get("OPENAI_API_KEY")))
+            job.result = {"new": res.new_communities, "read": res.communities_read,
+                          "leads": res.leads_found}
+            job.detail = f"Scheduled harvest: {res.leads_found} lead(s)"
+
+        jobs.start("harvest", "Scheduled harvest (tick)", run)
+        return {"ran": True}
+
     @app.get("/api/schedule")
     def api_schedule(_: None = Depends(require_auth)) -> dict[str, Any]:
         from circle_leads.storage.settings_store import (

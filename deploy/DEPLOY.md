@@ -22,20 +22,41 @@ Render / Railway / Out Plane
 run the same package from the root; they differ only by the start command. The
 `deploy/Dockerfile` (at the root of the build) builds one image used by both.
 
-## Render (easiest — one blueprint file)
+## Render (free tier)
 
-`render.yaml` at the repo root declares everything:
+Render's free tier runs **web services** for free (they sleep after 15 min idle,
+wake on the next request). Cron jobs and background workers aren't a good free
+fit, and Render's free Postgres **expires after 30 days** — so use **your
+Supabase Postgres** and schedule the harvest with a free external pinger.
 
-1. In Render: **New → Blueprint**, point it at this GitHub repo.
-2. It creates: the **web** service, the **harvest cron**, and a **Postgres** DB,
-   wiring `CIRCLE_LEADS_DB` to the DB automatically.
-3. After the first deploy, set the secret env vars (marked `sync: false`) in the
-   Render dashboard:
-   - `DASHBOARD_PASSWORD` — a strong password (min 8 chars)
-   - `EXA_API_KEY` — for good community discovery
-   - `OPENAI_API_KEY` — for AI classification of ambiguous posts (optional)
+### 1. Deploy the web service
 
-The cron runs `harvest` at 8am and 8pm UTC. Leads appear in the web dashboard.
+`render.yaml` (repo root) deploys one free web service:
+1. Render: **New → Blueprint**, point at this repo.
+2. After the first deploy, set these in the Render dashboard (Environment):
+   - `CIRCLE_LEADS_DB` — your **Supabase** Postgres URL (`postgresql://...`)
+   - `DASHBOARD_PASSWORD` — a strong password
+   - `EXA_API_KEY`, `OPENAI_API_KEY`
+   - `TICK_TOKEN` — any secret string (used by the pinger below)
+
+### 2. Set the harvest schedule (in the app)
+
+Open the deployed dashboard → **Config tab** → pick a schedule (hourly / daily /
+etc.). It's stored in the DB; no redeploy to change it.
+
+### 3. Schedule the harvest with a free pinger
+
+The free web service has no cron, so an external pinger triggers the harvest.
+Create a free job at **cron-job.org** (or any uptime pinger) that GETs, hourly:
+```
+https://<your-app>.onrender.com/api/tick?token=<TICK_TOKEN>
+```
+`/api/tick` runs a harvest **only when your dashboard schedule says it's due**,
+in the background. It also keeps the free web service awake. So: the pinger runs
+hourly, but the actual harvest cadence is whatever you set in the dashboard.
+
+That's the whole free setup: one Render web service + Supabase + a free hourly
+pinger.
 
 ## Railway / Out Plane (manual, same idea)
 

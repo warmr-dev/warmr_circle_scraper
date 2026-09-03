@@ -1,47 +1,42 @@
-# Render blueprint: deploy the whole repo as two services sharing one Postgres.
-# In Render: New > Blueprint, point at this repo. Set the secret env vars in the
-# dashboard (marked sync:false below) after the first deploy.
-databases:
-  - name: circle-leads-db
-    plan: free
+# Render blueprint — FREE tier.
+#
+# Render's free tier: web services are free (they spin down after 15 min idle),
+# but cron jobs / background workers and the managed Postgres (expires in 30
+# days) are not a good fit. So this deploys ONE free web service and expects an
+# external Postgres (your Supabase) via CIRCLE_LEADS_DB.
+#
+# Scheduling: the harvest cadence is set in the dashboard (Config tab) and stored
+# in the DB. A free external pinger (e.g. cron-job.org) hits /api/tick on an
+# interval; that endpoint runs a harvest only when the schedule says it's due.
+#
+# Setup:
+#   1. New > Blueprint, point at this repo.
+#   2. Set the sync:false env vars in the Render dashboard after first deploy:
+#      CIRCLE_LEADS_DB  = your Supabase Postgres URL (postgresql://...)
+#      DASHBOARD_PASSWORD, EXA_API_KEY, OPENAI_API_KEY, TICK_TOKEN (any secret)
+#   3. Set the harvest schedule in the dashboard's Config tab.
+#   4. Create a free cron at cron-job.org (or similar) that GETs, hourly:
+#        https://<your-app>.onrender.com/api/tick?token=<TICK_TOKEN>
+#      This also keeps the free web service awake.
 
 services:
-  # The dashboard you open in a browser.
   - type: web
-    name: circle-leads-web
+    name: circle-leads
     runtime: docker
-    dockerfilePath: ./deploy/Dockerfile
+    dockerfilePath: ./Dockerfile
     plan: free
     healthCheckPath: /login
     envVars:
       - key: CIRCLE_LEADS_DB
-        fromDatabase:
-          name: circle-leads-db
-          property: connectionString
+        sync: false          # your Supabase Postgres URL
       - key: DASHBOARD_PASSWORD
-        sync: false          # set a strong password in the Render dashboard
+        sync: false
       - key: DASHBOARD_SECRET_KEY
-        generateValue: true  # so sessions survive redeploys
+        generateValue: true
       - key: DASHBOARD_HTTPS
         value: "true"
-      - key: EXA_API_KEY
-        sync: false
-      - key: OPENAI_API_KEY
-        sync: false
-
-  # The scheduled harvest. Render "cron" runs it once per schedule, then exits.
-  - type: cron
-    name: circle-leads-harvest
-    runtime: docker
-    dockerfilePath: ./deploy/Dockerfile
-    plan: free
-    schedule: "0 8,20 * * *"    # 8am and 8pm UTC
-    dockerCommand: circle-leads --db "$CIRCLE_LEADS_DB" harvest --use-llm --verbose-log
-    envVars:
-      - key: CIRCLE_LEADS_DB
-        fromDatabase:
-          name: circle-leads-db
-          property: connectionString
+      - key: TICK_TOKEN
+        sync: false          # a secret; the pinger passes it as ?token=
       - key: EXA_API_KEY
         sync: false
       - key: OPENAI_API_KEY
