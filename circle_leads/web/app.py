@@ -145,7 +145,7 @@ def create_app(db_url: str | None = None, config_path: str | None = None) -> Fas
                 else "pending_review"
             )
             row["reply_draft"] = draft_reply(
-                row, your_name=os.environ.get("DASHBOARD_YOUR_NAME")
+                row
             ).text
 
         if status:
@@ -198,7 +198,6 @@ def create_app(db_url: str | None = None, config_path: str | None = None) -> Fas
             space=payload.get("space") or None,
             source_url=payload.get("url") or None,
             use_llm=bool(payload.get("use_llm")),
-            your_name=payload.get("your_name") or os.environ.get("DASHBOARD_YOUR_NAME"),
         )
         return {
             "total_posts": result.total_posts,

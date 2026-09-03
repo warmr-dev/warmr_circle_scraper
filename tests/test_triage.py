@@ -119,8 +119,15 @@ def test_draft_flags_urgency():
     assert any("urgent" in n.lower() for n in draft.notes or [])
 
 
-def test_draft_signs_with_your_name():
-    assert "Yersultan" in draft_reply({"job_title": "Dev"}, your_name="Yersultan").text
+def test_draft_addresses_author_by_first_name():
+    text = draft_reply({"author": "Nik Udoma", "job_title": "Data Engineer"}).text
+    assert "Hi Nik" in text
+    assert "\n— " not in text  # no signature
+
+
+def test_draft_falls_back_when_no_author():
+    text = draft_reply({"job_title": "Backend Developer"}).text
+    assert text.startswith("Hi there —")
 
 
 def test_draft_asks_about_budget_when_absent():
@@ -163,9 +170,8 @@ def test_triage_ranks_by_score(db, reqs):
 
 
 def test_triage_attaches_a_reply_draft(db, reqs):
-    leads = triage_text(db, PASTED, reqs, community="flutter-devs", your_name="Y").leads
+    leads = triage_text(db, PASTED, reqs, community="flutter-devs").leads
     assert all(lead["reply_draft"] for lead in leads)
-    assert all("Y" in lead["reply_draft"] for lead in leads)
 
 
 def test_re_triaging_the_same_paste_finds_nothing_new(db, reqs):

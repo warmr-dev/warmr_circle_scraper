@@ -54,7 +54,8 @@ def draft_reply(lead: dict, *, your_name: str | None = None) -> ReplyDraft:
 
     lines: list[str] = []
 
-    opener = f"Hi{' ' + lead['author'].split()[0] if lead.get('author') else ''} —"
+    first = lead["author"].split()[0] if lead.get("author") else "there"
+    opener = f"Hi {first} —"
     lines.append(f"{opener} saw you're looking for {need}.")
 
     if skills:
@@ -76,9 +77,6 @@ def draft_reply(lead: dict, *, your_name: str | None = None) -> ReplyDraft:
     else:
         question = "What does the scope look like at the moment?"
     lines.append(question)
-
-    if your_name:
-        lines.append(f"\n— {your_name}")
 
     if urgency == "high":
         notes.append("Marked urgent — reply soon or the moment passes.")
