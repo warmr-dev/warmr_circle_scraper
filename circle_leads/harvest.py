@@ -155,41 +155,50 @@ def harvest(
         # Read each public lead-space, logging what is checked and read.
         records = []
         public_count = 0
+        from circle_leads.scraper.public_reader import normalize_public_post
         for sp in (spaces if all_spaces else _lead_spaces(spaces)):
-            was_public, raw = reader.read_space(sp.id, max_pages=max_pages, since=since)
-            sp.is_public = was_public
-            if not was_public:
+            # Guard each space: a malformed post or a classify error must not
+            # abort the whole run and lose every community not yet processed.
+            try:
+                was_public, raw = reader.read_space(sp.id, max_pages=max_pages, since=since)
+                sp.is_public = was_public
+                if not was_public:
+                    with db.session() as s:
+                        log_activity(s, kind="read", community=slug, space=sp.name,
+                                     summary=f"{host} / {sp.name}: private, skipped")
+                    continue
+                public_count += 1
+                space_recs = [
+                    r for r in (
+                        normalize_public_post(x, community_url=reader.base,
+                                              excluded_content=requirements.excluded_content,
+                                              space_slug=sp.slug)
+                        for x in raw
+                    ) if r
+                ]
+                # Optionally read comments too (a hiring ask can be a reply).
+                if include_comments:
+                    for raw_post in raw:
+                        if raw_post.get("comments_count"):
+                            for c in reader.read_comments(raw_post.get("id")):
+                                crec = normalize_public_post(
+                                    c, community_url=reader.base,
+                                    excluded_content=requirements.excluded_content,
+                                    space_slug=sp.slug)
+                                if crec:
+                                    crec["content_type"] = "comment"
+                                    space_recs.append(crec)
+                records.extend(space_recs)
                 with db.session() as s:
-                    log_activity(s, kind="read", community=slug, space=sp.name,
-                                 summary=f"{host} / {sp.name}: private, skipped")
+                    log_activity(s, kind="read", level="success", community=slug, space=sp.name,
+                                 summary=f"{host} / {sp.name}: read {len(space_recs)} public item(s)",
+                                 items_seen=len(space_recs))
+            except Exception as exc:  # noqa: BLE001 - one bad space must not kill the run
+                result.errors.append(f"{host}/{sp.name}: {exc.__class__.__name__}")
+                with db.session() as s:
+                    log_activity(s, kind="read", level="error", community=slug, space=sp.name,
+                                 summary=f"{host} / {sp.name}: error {exc.__class__.__name__}, skipped")
                 continue
-            public_count += 1
-            from circle_leads.scraper.public_reader import normalize_public_post
-            space_recs = [
-                r for r in (
-                    normalize_public_post(x, community_url=reader.base,
-                                          excluded_content=requirements.excluded_content,
-                                          space_slug=sp.slug)
-                    for x in raw
-                ) if r
-            ]
-            # Optionally read comments too (a hiring ask can be a reply).
-            if include_comments:
-                for raw_post in raw:
-                    if raw_post.get("comments_count"):
-                        for c in reader.read_comments(raw_post.get("id")):
-                            crec = normalize_public_post(
-                                c, community_url=reader.base,
-                                excluded_content=requirements.excluded_content,
-                                space_slug=sp.slug)
-                            if crec:
-                                crec["content_type"] = "comment"
-                                space_recs.append(crec)
-            records.extend(space_recs)
-            with db.session() as s:
-                log_activity(s, kind="read", level="success", community=slug, space=sp.name,
-                             summary=f"{host} / {sp.name}: read {len(space_recs)} public item(s)",
-                             items_seen=len(space_recs))
 
         if not public_count:
             _mark_synced(db, slug)

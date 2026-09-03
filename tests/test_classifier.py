@@ -353,3 +353,39 @@ def test_software_engineer_lead_passes_requirements(reqs):
     result = classify("We are hiring a software engineer for our startup", reqs)
     assert result.classification == "LEAD"
     assert meets_requirements(result, reqs) is True
+
+
+# --- Direct unit tests for the rule layer -----------------------------------
+
+
+def test_analyze_scores_hiring_intent():
+    from circle_leads.classifier import keyword_rules as kr
+    r = kr.analyze("We are hiring a backend developer")
+    assert r.score > 0
+    assert r.hiring_matches
+    assert not r.disqualifiers
+
+
+def test_analyze_scores_job_seeking_negative():
+    from circle_leads.classifier import keyword_rules as kr
+    r = kr.analyze("I am looking for a job as a developer, open to work")
+    assert r.score < 0
+    assert r.seeker_matches
+
+
+def test_analyze_negation_is_disqualifier():
+    from circle_leads.classifier import keyword_rules as kr
+    r = kr.analyze("We are not hiring developers this quarter")
+    assert r.has_hard_disqualifier
+
+
+def test_matched_keywords_finds_config_terms():
+    from circle_leads.classifier import keyword_rules as kr
+    assert "hiring" in kr.matched_keywords("we are hiring now", ["hiring", "budget"])
+    assert kr.matched_keywords("nothing here", ["hiring"]) == []
+
+
+def test_has_hiring_vocabulary():
+    from circle_leads.classifier import keyword_rules as kr
+    assert kr.has_hiring_vocabulary("we are hiring")
+    assert not kr.has_hiring_vocabulary("nice weather today")

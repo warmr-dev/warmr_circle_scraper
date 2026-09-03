@@ -1,6 +1,7 @@
 """Tests for the harvest orchestrator (search -> read public -> classify)."""
 
 import pytest
+from datetime import datetime, timedelta, timezone
 
 from circle_leads.config.settings import load_requirements
 from circle_leads.harvest import harvest
@@ -139,14 +140,14 @@ def test_harvest_skips_non_subdomain_communities(db, reqs, monkeypatch):
 def test_harvest_rereads_known_communities(db, reqs, monkeypatch):
     """A previously-read community is re-read for new posts, not skipped."""
     import circle_leads.harvest as h
-    from datetime import datetime, timedelta
+    from datetime import datetime, timedelta, timezone
 
     # Mark the seeded community as read a week ago.
     from sqlalchemy import select
     from circle_leads.storage.models import Community
     with db.session() as s:
         c = s.scalar(select(Community).where(Community.slug == "pub"))
-        c.last_synced_at = datetime.utcnow() - timedelta(days=7)
+        c.last_synced_at = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=7)
 
     read_calls = []
     class Reader:
@@ -171,7 +172,7 @@ def test_only_new_skips_known_communities(db, reqs, monkeypatch):
     from sqlalchemy import select
     from circle_leads.storage.models import Community
     with db.session() as s:
-        s.scalar(select(Community).where(Community.slug == "pub")).last_synced_at = datetime.utcnow()
+        s.scalar(select(Community).where(Community.slug == "pub")).last_synced_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
     read = []
     class Reader:
@@ -182,3 +183,29 @@ def test_only_new_skips_known_communities(db, reqs, monkeypatch):
     monkeypatch.setattr(h, "PublicReader", Reader)
     h.harvest(db, reqs, search=False, only_new=True)  # skip the already-read one
     assert read == []
+
+
+def test_harvest_survives_a_bad_space(db, reqs, monkeypatch):
+    """One space that raises must not abort the whole run."""
+    import circle_leads.harvest as h
+    from circle_leads.scraper.public_reader import PublicSpace
+
+    class Reader:
+        def __init__(self, host, **kw):
+            self.community_host = host; self.base = f"https://{host}"
+        def list_spaces(self):
+            return [PublicSpace("1", "job-board", "Job Board"),
+                    PublicSpace("2", "job-posts", "Job Posts")]
+        def read_space(self, sid, **kw):
+            if str(sid) == "1":
+                raise ValueError("malformed payload")
+            return True, [{"id": 9, "name": "Hiring",
+                           "truncated_content": "We are hiring a software engineer",
+                           "slug": "hiring"}]
+        def read_comments(self, pid): return []
+
+    monkeypatch.setattr(h, "PublicReader", Reader)
+    result = h.harvest(db, reqs, search=False, all_spaces=True)
+    # The good space was still read despite the other one erroring.
+    assert result.public_spaces == 1
+    assert any("Job Board" in e for e in result.errors)
