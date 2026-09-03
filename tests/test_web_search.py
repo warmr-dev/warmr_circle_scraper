@@ -40,7 +40,7 @@ def test_search_finds_and_ranks_communities():
     ])
     disc = discover_by_search(
         "startup founders", backend=backend,
-        fetch_result_pages=False, include_directories=False, request_delay=0,
+        fetch_result_pages=False, supplement_site_search=False, include_directories=False, request_delay=0,
     )
     assert disc.backend == "stub"
     assert disc.queries_run == 5  # five query templates
@@ -55,7 +55,7 @@ def test_the_niche_is_substituted_into_queries():
     backend = StubBackend([])
     discover_by_search(
         "flutter developer", backend=backend,
-        fetch_result_pages=False, include_directories=False, request_delay=0,
+        fetch_result_pages=False, supplement_site_search=False, include_directories=False, request_delay=0,
     )
     assert any("flutter developer" in q for q in backend.queries)
 
@@ -70,7 +70,7 @@ def test_circle_links_are_pulled_from_snippets():
     ])
     disc = discover_by_search(
         "founders", backend=backend,
-        fetch_result_pages=False, include_directories=False, request_delay=0,
+        fetch_result_pages=False, supplement_site_search=False, include_directories=False, request_delay=0,
     )
     slugs = {c.slug for c in disc.ranked}
     assert "founders-hub" in slugs
@@ -85,7 +85,7 @@ def test_infrastructure_hosts_are_not_returned():
     ])
     disc = discover_by_search(
         "founders", backend=backend,
-        fetch_result_pages=False, include_directories=False, request_delay=0,
+        fetch_result_pages=False, supplement_site_search=False, include_directories=False, request_delay=0,
     )
     slugs = {c.slug for c in disc.ranked}
     assert "real-founders" in slugs
@@ -97,7 +97,7 @@ def test_empty_backend_and_no_directories_finds_nothing():
     """An empty search backend with directories off returns nothing."""
     disc = discover_by_search(
         "founders", backend=StubBackend([]),
-        fetch_result_pages=False, include_directories=False, request_delay=0,
+        fetch_result_pages=False, supplement_site_search=False, include_directories=False, request_delay=0,
     )
     assert isinstance(disc, SearchDiscovery)
     assert disc.ranked == []
@@ -151,3 +151,52 @@ def test_exa_is_preferred_when_key_set(monkeypatch):
     monkeypatch.setenv("EXA_API_KEY", "x")
     from circle_leads.discovery.web_search import choose_backend
     assert choose_backend().name == "exa"
+
+
+# --- Supplementary site: search --------------------------------------------
+
+
+def test_site_query_templates_target_circle():
+    from circle_leads.discovery.web_search import SITE_QUERY_TEMPLATES
+    assert any("site:circle.so" in t for t in SITE_QUERY_TEMPLATES)
+    # every template mentions the niche placeholder
+    assert all("{q}" in t for t in SITE_QUERY_TEMPLATES)
+
+
+def test_supplement_runs_site_queries_on_keyword_engine():
+    """With a keyword-engine primary, the site: queries reuse it (no extra net)."""
+    class KwStub:
+        name = "duckduckgo"
+        def __init__(self):
+            self.queries = []
+        def search(self, query, *, count=10):
+            self.queries.append(query)
+            return []
+
+    from circle_leads.discovery.web_search import discover_by_search
+    be = KwStub()
+    discover_by_search(
+        "founders", backend=be,
+        fetch_result_pages=False, include_directories=False,
+        supplement_site_search=True, request_delay=0,
+    )
+    # ran the 5 niche templates + 3 site templates on the same engine
+    assert any("site:circle.so" in q for q in be.queries)
+    assert len(be.queries) == 8
+
+
+def test_supplement_can_be_disabled():
+    class KwStub:
+        name = "duckduckgo"
+        def __init__(self): self.queries = []
+        def search(self, query, *, count=10): self.queries.append(query); return []
+
+    from circle_leads.discovery.web_search import discover_by_search
+    be = KwStub()
+    discover_by_search(
+        "founders", backend=be,
+        fetch_result_pages=False, include_directories=False,
+        supplement_site_search=False, request_delay=0,
+    )
+    assert not any("site:circle.so" in q for q in be.queries)
+    assert len(be.queries) == 5

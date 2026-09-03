@@ -45,6 +45,15 @@ DEFAULT_QUERY_TEMPLATES = [
     "{q} community discussions asks and offers hiring",
 ]
 
+# Keyword-engine queries that target circle.so subdomains directly. Run as a
+# supplement to the primary (neural) backend, so we get both the semantic
+# matches and the direct site: coverage a keyword search is good at.
+SITE_QUERY_TEMPLATES = [
+    'site:circle.so {q}',
+    '"circle.so" {q} hiring OR "looking for" OR "we need"',
+    '{q} "circle.so" job OR opportunity OR consultant',
+]
+
 # Public directories worth fetching directly (no search key needed).
 SEED_DIRECTORY_URLS = [
     "https://discover.circle.so/",
@@ -246,6 +255,7 @@ def discover_by_search(
     templates: list[str] | None = None,
     fetch_result_pages: bool = True,
     include_directories: bool = True,
+    supplement_site_search: bool = True,
     max_results_per_query: int = 10,
     request_delay: float = 1.0,
     session: requests.Session | None = None,
@@ -253,10 +263,12 @@ def discover_by_search(
     """Search the web for Circle communities in a niche and rank them.
 
     Strategy:
-      1. Run each query template against the search backend.
-      2. Pull circle.so links straight out of titles + snippets.
-      3. Optionally fetch each result page and extract circle.so links from it
-         (many "best communities" posts link out to the real subdomains).
+      1. Run each niche query against the primary backend (Exa if configured).
+      2. Also run keyword `site:circle.so` queries against a keyless engine as a
+         supplement -- neural search finds semantic matches, site: search finds
+         subdomains directly, and it's a fallback if the primary times out.
+      3. Pull circle.so links out of titles + snippets; fetch listicle pages and
+         extract links from them.
       4. Fetch known public directories (Discover, Hive Index) directly.
       5. Rank everything, dedup, sort.
     """
@@ -268,30 +280,46 @@ def discover_by_search(
     all_html: list[str] = []
     seen_pages: set[str] = set()
 
-    if backend is not None:
-        for template in templates:
+    def absorb(hits) -> None:
+        for hit in hits:
+            all_html.append(f"{hit.title} {hit.snippet} {hit.url}")
+            if fetch_result_pages and hit.url and hit.url not in seen_pages:
+                seen_pages.add(hit.url)
+                if _looks_like_listing(hit.url, hit.title):
+                    html = _fetch(hit.url, http)
+                    if html:
+                        all_html.append(html)
+                        result.pages_fetched += 1
+                    time.sleep(request_delay)
+
+    def run_queries(be, tmpls) -> None:
+        for template in tmpls:
             query = template.format(q=niche)
             try:
-                hits = backend.search(query, count=max_results_per_query)
-            except Exception as exc:
+                hits = be.search(query, count=max_results_per_query)
+            except Exception as exc:  # noqa: BLE001
                 logger.warning("Search failed for %r: %s", query, exc.__class__.__name__)
                 continue
             result.queries_run += 1
-
-            for hit in hits:
-                # Titles and snippets often contain the community link directly.
-                all_html.append(f"{hit.title} {hit.snippet} {hit.url}")
-                # Fetch the page itself if it looks like a listicle/directory.
-                if fetch_result_pages and hit.url and hit.url not in seen_pages:
-                    seen_pages.add(hit.url)
-                    if _looks_like_listing(hit.url, hit.title):
-                        html = _fetch(hit.url, http)
-                        if html:
-                            all_html.append(html)
-                            result.pages_fetched += 1
-                        time.sleep(request_delay)
+            absorb(hits)
             time.sleep(request_delay)
 
+    # 1. Primary backend on the niche queries.
+    if backend is not None:
+        run_queries(backend, templates)
+
+    # 2. Supplementary site: search on a keyword engine. If the primary is
+    #    already a keyword engine, reuse it; otherwise use keyless DuckDuckGo.
+    if supplement_site_search:
+        if backend is not None and backend.name in ("brave", "serpapi", "duckduckgo"):
+            supplement = backend
+        else:
+            supplement = DuckDuckGoBackend(http)
+        run_queries(supplement, SITE_QUERY_TEMPLATES)
+        if result.backend and supplement.name != result.backend:
+            result.backend = f"{result.backend}+{supplement.name}"
+
+    # 3. Known public directories.
     if include_directories:
         for url in SEED_DIRECTORY_URLS:
             html = _fetch(url, http)
@@ -300,7 +328,7 @@ def discover_by_search(
                 result.pages_fetched += 1
             time.sleep(request_delay)
 
-    # Rank everything we gathered.
+    # 4. Rank everything gathered, keeping the best score per slug.
     ranked: dict[str, RankedCommunity] = {}
     for chunk in all_html:
         for rc in rank_from_html(chunk, source="web-search"):
@@ -312,6 +340,7 @@ def discover_by_search(
         ranked.values(), key=lambda c: (c.is_free, c.score), reverse=True
     )
     return result
+
 
 
 _LISTING_HINTS = re.compile(
