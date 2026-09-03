@@ -249,3 +249,25 @@ def test_search_job_starts_and_is_listed(auth_client, monkeypatch):
         time.sleep(0.1)
     assert j["state"] in ("done", "error")
     assert any(x["id"] == job_id for x in auth_client.get("/api/jobs").json()["jobs"])
+
+
+def test_harvest_job_starts(auth_client, monkeypatch):
+    import circle_leads.harvest as h
+    from circle_leads.harvest import HarvestResult
+
+    monkeypatch.setattr(h, "harvest", lambda *a, **k: HarvestResult())
+    resp = auth_client.post("/api/jobs/harvest", json={"only_new": True})
+    assert resp.status_code == 200
+    job_id = resp.json()["job"]["id"]
+
+    import time
+    for _ in range(20):
+        j = auth_client.get(f"/api/jobs/{job_id}").json()["job"]
+        if j["state"] != "running":
+            break
+        time.sleep(0.1)
+    assert j["state"] in ("done", "error")
+
+
+def test_harvest_job_requires_auth(client):
+    assert client.post("/api/jobs/harvest", json={}).status_code == 401

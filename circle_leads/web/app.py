@@ -277,10 +277,40 @@ def create_app(db_url: str | None = None, config_path: str | None = None) -> Fas
         job = jobs.start("read", f"Read: {host}", run)
         return {"job": job.as_dict()}
 
+    @app.post("/api/jobs/harvest")
+    def start_harvest(payload: dict, _: None = Depends(require_auth)) -> dict[str, Any]:
+        niches = payload.get("niches") or None  # list, or None for defaults
+        only_new = bool(payload.get("only_new", True))
+        no_search = bool(payload.get("no_search", False))
+
+        def run(job):
+            from circle_leads.harvest import harvest
+
+            job.detail = "Discovering + reading public communities..."
+            res = harvest(
+                db, requirements, niches=niches, search=not no_search,
+                only_new=only_new, verbose_log=True,
+            )
+            job.result = {
+                "new_communities": res.new_communities,
+                "communities_read": res.communities_read,
+                "public_spaces": res.public_spaces,
+                "posts_read": res.posts_read,
+                "leads": res.leads_found,
+            }
+            job.detail = (
+                f"{res.new_communities} new, read {res.communities_read} "
+                f"community/communities, {res.leads_found} lead(s)."
+            )
+
+        job = jobs.start("harvest", "Harvest", run)
+        return {"job": job.as_dict()}
+
     @app.get("/api/jobs")
     def list_jobs(_: None = Depends(require_auth)) -> dict[str, Any]:
         return {"jobs": jobs.list(), "search_running": jobs.active("search"),
-                "read_running": jobs.active("read")}
+                "read_running": jobs.active("read"),
+                "harvest_running": jobs.active("harvest")}
 
     @app.get("/api/jobs/{job_id}")
     def job_status(job_id: str, _: None = Depends(require_auth)) -> dict[str, Any]:

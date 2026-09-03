@@ -196,12 +196,19 @@
   <!-- COMMUNITIES -->
   <section id="view-communities" hidden>
     <div class="panel">
-      <h2 style="margin-bottom:8px">Find more communities</h2>
+      <div class="row" style="margin-bottom:10px">
+        <div style="flex:1">
+          <h2 style="margin:0 0 2px">Harvest leads automatically</h2>
+          <span class="muted" style="font-size:13px">Discover public communities and read their public spaces — no login.</span>
+        </div>
+        <button class="action" id="c-harvest">Harvest now</button>
+      </div>
+      <h2 style="margin:14px 0 8px;font-size:13px">Or search a specific niche</h2>
       <div class="row">
         <input id="c-niche" placeholder="e.g. AI startup founders, flutter developer" style="flex:1;min-width:220px">
         <button class="action" id="c-search">Search the web</button>
       </div>
-      <div id="jobs-strip" class="muted" style="margin-top:8px;font-size:13px"></div>
+      <div id="jobs-strip" class="muted" style="margin-top:10px;font-size:13px"></div>
     </div>
     <div class="panel"><div id="communities-table"><div class="empty">Loading…</div></div></div>
   </section>
@@ -488,6 +495,21 @@ async function pollJobs() {
     if (!$('view-leads').hidden) loadLeads();
   }
 }
+
+$('c-harvest').addEventListener('click', async () => {
+  $('c-harvest').disabled = true;
+  $('c-harvest').textContent = 'Harvesting…';
+  try {
+    const data = await api('/api/jobs/harvest', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ only_new: true }),
+    });
+    if (data) { toast('Harvest started'); pollJobs(); if (!jobPollTimer) jobPollTimer = setInterval(pollJobs, 3000); }
+  } finally {
+    $('c-harvest').disabled = false;
+    $('c-harvest').textContent = 'Harvest now';
+  }
+});
 
 $('c-search').addEventListener('click', async () => {
   const niche = $('c-niche').value.trim();
