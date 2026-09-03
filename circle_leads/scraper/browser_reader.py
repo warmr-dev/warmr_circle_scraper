@@ -61,7 +61,10 @@ class BrowserFeedReader:
     ):
         self.community_host = community_host.replace("https://", "").strip("/")
         self.base = f"https://{self.community_host}"
-        self.profile_dir = Path(profile_dir or DEFAULT_PROFILE_DIR)
+        # One profile per community, so each community's login is isolated and
+        # persists independently on your machine.
+        base_dir = Path(profile_dir) if profile_dir else DEFAULT_PROFILE_DIR
+        self.profile_dir = base_dir / self.community_host
         self.profile_dir.mkdir(parents=True, exist_ok=True)
         self.headless = headless
         self.request_pause = request_pause
@@ -93,16 +96,61 @@ class BrowserFeedReader:
             ctx.close()
             raise NotLoggedIn("Timed out waiting for login.")
 
+    # Endpoints that return 200 only for a signed-in member. Communities expose
+    # slightly different internal routes, so several are tried.
+    _LOGIN_CHECK_PATHS = (
+        "/internal_api/current_community_member",
+        "/internal_api/community_members/me",
+        "/internal_api/me",
+    )
+
     def _is_logged_in_via(self, page) -> bool:
-        """Heuristic: the member API for the current user returns 200 when in."""
+        """True when the browser has a valid member session for this community.
+
+        Tries member-only API endpoints first; falls back to a DOM check for a
+        signed-in shell (no visible "Sign in" affordance).
+        """
+        for path in self._LOGIN_CHECK_PATHS:
+            try:
+                resp = page.request.get(
+                    self.base + path, headers={"Accept": "application/json"}
+                )
+                if resp.status == 200:
+                    return True
+                if resp.status in (401, 403):
+                    return False  # definitively signed out
+            except Exception:
+                continue
+        # Fallback: a logged-in Circle page renders no top-level "Sign in" link.
         try:
-            resp = page.request.get(
-                f"{self.base}/internal_api/current_community_member",
-                headers={"Accept": "application/json"},
-            )
-            return resp.status == 200
+            html = page.content().lower()
+            signed_out = "sign in" in html and "internal_api" not in html
+            return not signed_out
         except Exception:
             return False
+
+    def status(self) -> bool:
+        """Return whether this community has a usable saved session."""
+        with self._sync_playwright() as pw:
+            ctx = pw.chromium.launch_persistent_context(
+                str(self.profile_dir), headless=True
+            )
+            page = ctx.pages[0] if ctx.pages else ctx.new_page()
+            try:
+                page.goto(self.base, wait_until="domcontentloaded", timeout=20000)
+                ok = self._is_logged_in_via(page)
+            except Exception:
+                ok = False
+            ctx.close()
+            return ok
+
+    def logout(self) -> None:
+        """Clear this community's saved session by wiping its profile cookies."""
+        import shutil
+
+        if self.profile_dir.exists():
+            shutil.rmtree(self.profile_dir, ignore_errors=True)
+        self.profile_dir.mkdir(parents=True, exist_ok=True)
 
     def _fetch_json(self, page, path: str) -> dict | list | None:
         """Fetch an internal endpoint using the browser's own session."""

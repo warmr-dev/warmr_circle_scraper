@@ -385,6 +385,117 @@ def read_feed_cmd(ctx, community_host, space_ids, login, profile_dir, show_brows
     click.echo("\nReview them in the dashboard, or `circle-leads search`.")
 
 
+def _load_member_feeds(path=None):
+    """Load the member-feeds config (communities + spaces you read)."""
+    import yaml
+    from pathlib import Path
+
+    default = Path("circle_leads/config/communities/member_feeds.yaml")
+    cfg_path = Path(path) if path else default
+    if not cfg_path.exists():
+        return []
+    data = yaml.safe_load(cfg_path.read_text()) or {}
+    return data.get("feeds", [])
+
+
+@cli.command("sessions")
+@click.option("--config", "feeds_config", default=None, help="member_feeds.yaml path.")
+@click.pass_context
+def sessions_cmd(ctx, feeds_config):
+    """Show login status for each community you read feeds from.
+
+    Your login lives in a per-community browser profile on this machine. This
+    checks which are still signed in. Sign in with `read-feed <host> --login`.
+    """
+    from circle_leads.scraper.browser_reader import BrowserFeedReader, BrowserNotAvailable
+
+    feeds = _load_member_feeds(feeds_config)
+    if not feeds:
+        click.echo(
+            "No member feeds configured. Copy "
+            "circle_leads/config/communities/member_feeds.yaml.template to "
+            "member_feeds.yaml and list your communities."
+        )
+        return
+
+    try:
+        click.echo(f"\n{'STATUS':<14} {'SPACES':>6}  COMMUNITY")
+        click.echo("-" * 60)
+        for feed in feeds:
+            host = feed["host"]
+            reader = BrowserFeedReader(host)
+            signed_in = reader.status()
+            state = "signed in" if signed_in else "sign in needed"
+            click.echo(f"{state:<14} {len(feed.get('spaces', [])):>6}  {host}")
+        click.echo("-" * 60)
+        click.echo("\nSign in:  circle-leads read-feed <host> --login")
+        click.echo("Read all: circle-leads read-all")
+    except BrowserNotAvailable as exc:
+        raise click.ClickException(str(exc))
+
+
+@cli.command("read-all")
+@click.option("--config", "feeds_config", default=None, help="member_feeds.yaml path.")
+@click.option("--use-llm", is_flag=True)
+@click.pass_context
+def read_all_cmd(ctx, feeds_config, use_llm):
+    """Read every configured community's spaces in one run, on your machine.
+
+    Reads each community you're signed into (skipping ones that need a login),
+    classifies the posts, and files the leads. Run this on a schedule for
+    hands-off lead collection from communities you belong to.
+    """
+    from circle_leads.scraper.browser_reader import (
+        BrowserFeedReader, BrowserNotAvailable, NotLoggedIn, fetch_space_posts,
+    )
+    from circle_leads.triage.pipeline import triage_text
+
+    feeds = _load_member_feeds(feeds_config)
+    if not feeds:
+        raise click.UsageError("No member feeds configured (see member_feeds.yaml.template).")
+
+    reqs = ctx.obj["requirements"]
+    total_leads = 0
+    try:
+        for feed in feeds:
+            host = feed["host"]
+            slug = feed.get("slug") or host.split(".")[0]
+            reader = BrowserFeedReader(host)
+            if not reader.status():
+                click.echo(f"SKIP {host}: sign in needed (read-feed {host} --login)", err=True)
+                continue
+
+            records = []
+            for space in feed.get("spaces", []):
+                try:
+                    recs = fetch_space_posts(
+                        reader, space["id"], excluded_content=reqs.excluded_content,
+                    )
+                    records.extend(recs)
+                    click.echo(f"  {host} / {space.get('name', space['id'])}: {len(recs)} post(s)", err=True)
+                except NotLoggedIn:
+                    click.echo(f"  {host}: session expired mid-run", err=True)
+                    break
+
+            if not records:
+                continue
+            text = "\n\n---\n\n".join(
+                (r["title"] + "\n" + r["content"]) if r.get("title") else r["content"]
+                for r in records
+            )
+            result = triage_text(
+                ctx.obj["db"], text, reqs, community=slug,
+                source_url=reader.base, use_llm=use_llm,
+            )
+            total_leads += len(result.leads)
+            click.echo(f"{host}: {len(result.leads)} lead(s), {result.already_seen} seen before")
+    except BrowserNotAvailable as exc:
+        raise click.ClickException(str(exc))
+
+    click.echo(f"\nDone. {total_leads} lead(s) across all communities. See the dashboard.")
+
+
+
 @cli.command("communities")
 @click.option("--relevant-only", is_flag=True, help="Only communities scored relevant.")
 @click.pass_context

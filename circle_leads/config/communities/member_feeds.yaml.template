@@ -1,0 +1,17 @@
+# Communities you're a member of, and the spaces you want to read.
+# Copy to member_feeds.yaml and edit. Gitignored (holds no secrets -- just
+# hosts and space ids; your login lives in the browser profile, not here).
+feeds:
+  - host: startupandangels.circle.so
+    slug: startupandangels
+    spaces:
+      - id: 1595123
+        name: "Job Posts"
+      # - id: <other-id>
+      #   name: "Opportunities & Collabs"
+
+  # - host: ai-community-215177.circle.so
+  #   slug: ai-community
+  #   spaces:
+  #     - id: <look-it-up-in-devtools>
+  #       name: "General"

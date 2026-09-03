@@ -76,3 +76,48 @@ def test_reader_never_takes_a_cookie_argument():
     assert "cookie" not in sig.parameters
     assert "token" not in sig.parameters
     assert "session" not in sig.parameters
+
+
+# --- Per-community profile isolation ----------------------------------------
+
+
+def test_each_community_gets_its_own_profile(tmp_path):
+    """One community's login must not collide with another's."""
+    a = BrowserFeedReader("a.circle.so", profile_dir=tmp_path)
+    b = BrowserFeedReader("b.circle.so", profile_dir=tmp_path)
+    assert a.profile_dir != b.profile_dir
+    assert a.profile_dir.name == "a.circle.so"
+    assert b.profile_dir.name == "b.circle.so"
+
+
+def test_logout_clears_the_profile(tmp_path):
+    reader = BrowserFeedReader("x.circle.so", profile_dir=tmp_path)
+    (reader.profile_dir / "Cookies").write_text("fake-session")
+    reader.logout()
+    assert not (reader.profile_dir / "Cookies").exists()
+    assert reader.profile_dir.exists()  # dir recreated, just emptied
+
+
+def test_member_feeds_config_loads(tmp_path):
+    import sys
+    sys.path.insert(0, "circle_leads/cli")
+    from circle_leads.cli.main import _load_member_feeds
+
+    cfg = tmp_path / "feeds.yaml"
+    cfg.write_text(
+        "feeds:\n"
+        "  - host: x.circle.so\n"
+        "    slug: x\n"
+        "    spaces:\n"
+        "      - id: 123\n"
+        "        name: Jobs\n"
+    )
+    feeds = _load_member_feeds(cfg)
+    assert len(feeds) == 1
+    assert feeds[0]["host"] == "x.circle.so"
+    assert feeds[0]["spaces"][0]["id"] == 123
+
+
+def test_member_feeds_config_missing_is_empty(tmp_path):
+    from circle_leads.cli.main import _load_member_feeds
+    assert _load_member_feeds(tmp_path / "nope.yaml") == []

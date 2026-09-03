@@ -21,3 +21,4 @@ data/
 *.sqlite3
 exports/
 circle-search.log
+**/config/communities/member_feeds.yaml

@@ -62,3 +62,74 @@ ambiguous posts. Leads land in the dashboard's Leads tab and in `search`.
   browser's pace as a member reading their own feed. If Circle changes them or
   the login lapses, the command fails cleanly — re-run with `--login`.
 - `--show-browser` runs the browser visibly, for debugging.
+
+## Automating it on your machine (every community, on a schedule)
+
+Once you've signed into each community once, you can read them all
+automatically — no logins, no tokens, running locally on your account.
+
+### 1. List your communities and spaces
+
+Copy the template and fill in the communities you belong to:
+
+```bash
+cp circle_leads/config/communities/member_feeds.yaml.template \
+   circle_leads/config/communities/member_feeds.yaml
+```
+
+```yaml
+feeds:
+  - host: startupandangels.circle.so
+    slug: startupandangels
+    spaces:
+      - id: 1595123
+        name: "Job Posts"
+  - host: ai-community-215177.circle.so
+    slug: ai-community
+    spaces:
+      - id: 234567
+        name: "General"
+```
+
+(This file holds no secrets — just hosts and space ids — and is gitignored.)
+
+### 2. Sign into each, once
+
+```bash
+circle-leads read-feed startupandangels.circle.so --login
+circle-leads read-feed ai-community-215177.circle.so --login
+```
+
+Each opens a window; you sign in (SSO included) and it saves that community's
+session to its own browser profile under `~/.circle-leads/`.
+
+### 3. Check status any time
+
+```bash
+circle-leads sessions
+```
+
+```
+STATUS         SPACES  COMMUNITY
+------------------------------------------------------------
+signed in           1  startupandangels.circle.so
+sign in needed      1  ai-community-215177.circle.so
+```
+
+### 4. Read them all — manually or on a schedule
+
+```bash
+circle-leads read-all --use-llm       # every signed-in community, once
+```
+
+To run it automatically on your machine, add a cron line (see
+`deploy/read-all.cron.example`):
+
+```cron
+0 */4 * * *  cd /path/to/circle-scraper && ./.venv/bin/circle-leads read-all --use-llm
+```
+
+That's the full local loop: **you sign into each community once; your machine
+reads their feeds every few hours and files the leads** — no login automation,
+no stored tokens, nothing leaving your control. A community whose session has
+expired is simply skipped until you re-run its `--login`.
