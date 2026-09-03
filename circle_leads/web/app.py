@@ -17,7 +17,9 @@ from fastapi import Depends, FastAPI, Form, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from sqlalchemy import func, select
 
-from circle_leads.config.settings import load_requirements
+from circle_leads.config.settings import (
+    load_requirements, requirements_to_dict, save_requirements,
+)
 from circle_leads.export.exporters import query_leads
 from circle_leads.storage.activity import log_activity, recent_activity
 from circle_leads.storage.database import Database
@@ -44,9 +46,17 @@ def create_app(db_url: str | None = None, config_path: str | None = None) -> Fas
 
     app = FastAPI(title="Circle Leads", docs_url=None, redoc_url=None)
     db = Database(db_url or os.environ.get("CIRCLE_LEADS_DB") or None)
-    requirements = load_requirements(config_path)
+    requirements_holder = {"req": load_requirements(config_path)}
+    config_file = config_path
     sessions = SessionManager()
     jobs = JobRegistry()
+
+    def requirements():
+        return requirements_holder["req"]
+
+    def log_activity_holder(**kw):
+        with db.session() as s:
+            log_activity(s, **kw)
 
     def require_auth(request: Request) -> None:
         if not sessions.valid(request.cookies.get(COOKIE_NAME)):
@@ -183,7 +193,7 @@ def create_app(db_url: str | None = None, config_path: str | None = None) -> Fas
         if not text.strip():
             raise HTTPException(400, "No text supplied.")
         result = triage_text(
-            db, text, requirements,
+            db, text, requirements(),
             community=str(payload.get("community") or "manual").strip() or "manual",
             space=payload.get("space") or None,
             source_url=payload.get("url") or None,
@@ -254,7 +264,7 @@ def create_app(db_url: str | None = None, config_path: str | None = None) -> Fas
                 try:
                     records.extend(
                         fetch_space_posts(reader, sid,
-                                          excluded_content=requirements.excluded_content)
+                                          excluded_content=requirements().excluded_content)
                     )
                 except NotLoggedIn:
                     job.state = "error"
@@ -268,7 +278,7 @@ def create_app(db_url: str | None = None, config_path: str | None = None) -> Fas
                 for r in records
             )
             result = triage_text(
-                db, text, requirements, community=slug, source_url=reader.base,
+                db, text, requirements(), community=slug, source_url=reader.base,
             )
             job.result = {"leads": len(result.leads), "posts": result.total_posts,
                           "seen": result.already_seen}
@@ -288,7 +298,7 @@ def create_app(db_url: str | None = None, config_path: str | None = None) -> Fas
 
             job.detail = "Discovering + reading public communities..."
             res = harvest(
-                db, requirements, niches=niches, search=not no_search,
+                db, requirements(), niches=niches, search=not no_search,
                 only_new=only_new, verbose_log=True,
             )
             job.result = {
@@ -304,6 +314,24 @@ def create_app(db_url: str | None = None, config_path: str | None = None) -> Fas
             )
 
         job = jobs.start("harvest", "Harvest", run)
+        return {"job": job.as_dict()}
+
+    @app.post("/api/jobs/reclassify")
+    def start_reclassify(payload: dict, _: None = Depends(require_auth)) -> dict[str, Any]:
+        def run(job):
+            from circle_leads.pipeline import classify_pending
+            from circle_leads.storage.models import Post
+            from sqlalchemy import update
+            # Mark everything unclassified so the new rules re-decide it.
+            with db.session() as s:
+                s.execute(update(Post).values(classified=False))
+            stats = classify_pending(db, requirements())
+            job.result = stats
+            job.detail = (
+                f"Re-classified {stats.get('classified', 0)}: "
+                f"{stats.get('leads', 0)} lead(s)."
+            )
+        job = jobs.start("reclassify", "Re-classify with new rules", run)
         return {"job": job.as_dict()}
 
     @app.get("/api/jobs")
@@ -430,14 +458,25 @@ def create_app(db_url: str | None = None, config_path: str | None = None) -> Fas
 
     @app.get("/api/config")
     def api_config(_: None = Depends(require_auth)) -> dict[str, Any]:
-        return {
-            "target_roles": requirements.target_roles,
-            "target_skills": requirements.target_skills,
-            "minimum_confidence": requirements.minimum_confidence,
-            "priority_high": requirements.priority_thresholds.high,
-            "priority_medium": requirements.priority_thresholds.medium,
-            "llm_available": bool(os.environ.get("ANTHROPIC_API_KEY")),
-        }
+        data = requirements_to_dict(requirements())
+        data["llm_available"] = bool(os.environ.get("ANTHROPIC_API_KEY"))
+        return data
+
+    @app.post("/api/config")
+    def api_config_save(payload: dict, _: None = Depends(require_auth)) -> dict[str, Any]:
+        # Never let the editor change what content is excluded, or the rate
+        # limits -- those are safety settings, not lead tuning. Keep current.
+        current = requirements_to_dict(requirements())
+        payload.pop("llm_available", None)
+        for locked in ("excluded_content", "rate_limit"):
+            payload[locked] = current[locked]
+        try:
+            new_req = save_requirements(payload, config_file)
+        except Exception as exc:  # noqa: BLE001 - report validation errors to UI
+            raise HTTPException(400, f"Invalid config: {exc}")
+        requirements_holder["req"] = new_req
+        log_activity_holder(kind="review", summary="Lead requirements updated via dashboard")
+        return {"ok": True, "config": requirements_to_dict(new_req)}
 
     return app
 

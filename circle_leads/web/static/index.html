@@ -113,6 +113,7 @@
     <button data-view="activity" aria-selected="false">Activity</button>
     <button data-view="stats" aria-selected="false">Stats</button>
     <button data-view="communities" aria-selected="false">Communities</button>
+    <button data-view="config" aria-selected="false">Config</button>
     <button id="logout">Sign out</button>
   </nav>
 </header>
@@ -193,6 +194,56 @@
     <div class="panel"><h2>Decided by</h2><div id="by-decided"></div></div>
   </section>
 
+  <!-- CONFIG -->
+  <section id="view-config" hidden>
+    <div class="panel">
+      <h2>What counts as a lead</h2>
+      <p class="muted" style="margin-top:-6px">Edit here, Save, and it re-classifies everything with the new rules.</p>
+      <label style="display:block;margin-top:12px;font-weight:600;font-size:13px">Target roles (comma-separated)</label>
+      <textarea id="cfg-roles" style="min-height:70px"></textarea>
+      <label style="display:block;margin-top:12px;font-weight:600;font-size:13px">Target skills (comma-separated)</label>
+      <textarea id="cfg-skills" style="min-height:70px"></textarea>
+      <div class="row" style="margin-top:12px;gap:20px">
+        <div><label style="font-size:13px;font-weight:600">Include keywords</label>
+          <textarea id="cfg-kw-include" style="min-height:60px;min-width:280px"></textarea></div>
+        <div><label style="font-size:13px;font-weight:600">Exclude keywords</label>
+          <textarea id="cfg-kw-exclude" style="min-height:60px;min-width:280px"></textarea></div>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>Thresholds &amp; scoring</h2>
+      <div class="row" style="gap:18px;flex-wrap:wrap">
+        <label style="font-size:13px">Min confidence
+          <input id="cfg-conf" type="number" step="0.05" min="0" max="1" style="width:80px;margin-left:6px"></label>
+        <label style="font-size:13px">AI escalates below score
+          <input id="cfg-llm" type="number" min="0" max="200" style="width:80px;margin-left:6px"></label>
+        <label style="font-size:13px">HIGH ≥
+          <input id="cfg-high" type="number" min="0" max="100" style="width:70px;margin-left:6px"></label>
+        <label style="font-size:13px">MEDIUM ≥
+          <input id="cfg-med" type="number" min="0" max="100" style="width:70px;margin-left:6px"></label>
+        <label class="muted" style="font-size:13px;display:flex;align-items:center;gap:6px">
+          <input id="cfg-exclude-seekers" type="checkbox" style="width:auto"> Exclude job seekers</label>
+      </div>
+      <div class="row" style="gap:14px;flex-wrap:wrap;margin-top:12px">
+        <label style="font-size:13px">Hiring intent <input id="sc-hiring" type="number" style="width:60px;margin-left:4px"></label>
+        <label style="font-size:13px">Role match <input id="sc-role" type="number" style="width:60px;margin-left:4px"></label>
+        <label style="font-size:13px">Skill match <input id="sc-skill" type="number" style="width:60px;margin-left:4px"></label>
+        <label style="font-size:13px">Budget <input id="sc-budget" type="number" style="width:60px;margin-left:4px"></label>
+        <label style="font-size:13px">Company <input id="sc-company" type="number" style="width:60px;margin-left:4px"></label>
+        <label style="font-size:13px">Recent <input id="sc-recent" type="number" style="width:60px;margin-left:4px"></label>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="row">
+        <button class="action" id="cfg-save">Save &amp; re-classify</button>
+        <span id="cfg-status" class="muted" style="font-size:13px"></span>
+      </div>
+      <p class="muted" style="font-size:12px;margin-top:8px">
+        Content-privacy exclusions and rate limits are locked here (edit them in requirements.yaml if ever needed).
+      </p>
+    </div>
+  </section>
+
   <!-- COMMUNITIES -->
   <section id="view-communities" hidden>
     <div class="panel">
@@ -236,10 +287,10 @@ async function api(path, options) {
 }
 
 // --- Navigation -------------------------------------------------------
-const views = ['leads', 'triage', 'activity', 'stats', 'communities'];
+const views = ['leads', 'triage', 'activity', 'stats', 'communities', 'config'];
 const loaders = {
   leads: loadLeads, activity: loadActivity, stats: loadStats,
-  communities: loadCommunities, triage: () => {},
+  communities: loadCommunities, config: loadConfig, triage: () => {},
 };
 
 document.querySelectorAll('nav button[data-view]').forEach(btn => {
@@ -536,6 +587,61 @@ document.addEventListener('click', async (event) => {
     body: JSON.stringify({ host, slug, space_ids }),
   });
   if (data) { toast('Reading feed…'); pollJobs(); if (!jobPollTimer) jobPollTimer = setInterval(pollJobs, 3000); }
+});
+
+// --- Config editor ----------------------------------------------------
+const csv = (a) => (a || []).join(', ');
+const parseCsv = (v) => v.split(',').map(x => x.trim()).filter(Boolean);
+
+async function loadConfig() {
+  const c = await api('/api/config');
+  if (!c) return;
+  $('cfg-roles').value = csv(c.target_roles);
+  $('cfg-skills').value = csv(c.target_skills);
+  $('cfg-kw-include').value = csv(c.keywords.include);
+  $('cfg-kw-exclude').value = csv(c.keywords.exclude);
+  $('cfg-conf').value = c.minimum_confidence;
+  $('cfg-llm').value = c.llm_escalation_threshold;
+  $('cfg-high').value = c.priority_thresholds.high;
+  $('cfg-med').value = c.priority_thresholds.medium;
+  $('cfg-exclude-seekers').checked = c.exclude_job_seekers;
+  $('sc-hiring').value = c.scoring.hiring_intent;
+  $('sc-role').value = c.scoring.target_role_match;
+  $('sc-skill').value = c.scoring.target_skill_match;
+  $('sc-budget').value = c.scoring.budget_mentioned;
+  $('sc-company').value = c.scoring.company_identified;
+  $('sc-recent').value = c.scoring.recent_post;
+  $('cfg-status').textContent = c.llm_available ? 'AI classification available' : 'AI off (no ANTHROPIC_API_KEY)';
+}
+
+$('cfg-save').addEventListener('click', async () => {
+  const body = {
+    target_roles: parseCsv($('cfg-roles').value),
+    target_skills: parseCsv($('cfg-skills').value),
+    exclude_job_seekers: $('cfg-exclude-seekers').checked,
+    minimum_confidence: parseFloat($('cfg-conf').value),
+    llm_escalation_threshold: parseInt($('cfg-llm').value),
+    keywords: { include: parseCsv($('cfg-kw-include').value), exclude: parseCsv($('cfg-kw-exclude').value) },
+    priority_thresholds: { high: parseInt($('cfg-high').value), medium: parseInt($('cfg-med').value) },
+    scoring: {
+      hiring_intent: parseInt($('sc-hiring').value), target_role_match: parseInt($('sc-role').value),
+      target_skill_match: parseInt($('sc-skill').value), budget_mentioned: parseInt($('sc-budget').value),
+      company_identified: parseInt($('sc-company').value), recent_post: parseInt($('sc-recent').value),
+    },
+  };
+  $('cfg-save').disabled = true; $('cfg-status').textContent = 'Saving…';
+  try {
+    const resp = await fetch('/api/config', {
+      method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body),
+    });
+    if (resp.status === 401) { window.location='/login'; return; }
+    if (!resp.ok) { const e = await resp.json().catch(()=>({})); $('cfg-status').textContent = e.detail || 'Save failed'; return; }
+    toast('Saved. Re-classifying…');
+    // re-classify existing content with the new rules
+    const cls = await api('/api/jobs/reclassify', { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' });
+    $('cfg-status').textContent = 'Saved. Re-classifying in the background — check Leads shortly.';
+    pollJobs(); if (!jobPollTimer) jobPollTimer = setInterval(pollJobs, 3000);
+  } finally { $('cfg-save').disabled = false; }
 });
 
 loadLeads();

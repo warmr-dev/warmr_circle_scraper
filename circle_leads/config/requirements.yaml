@@ -1,74 +1,68 @@
 # Lead requirements. Everything here is editable without touching source code.
-# Reload at runtime with:  circle-leads config show / --config <path>
+# Edit here or in the dashboard's Config tab, then re-run: circle-leads classify
 
 target_roles:
-  - Backend Developer
-  - Frontend Developer
-  - Full Stack Developer
-  - Flutter Developer
-  - React Developer
-  - Mobile Developer
-  - Software Engineer
-  - DevOps Engineer
-  - Data Engineer
-  - Machine Learning Engineer
-  - Technical Cofounder
-  - CTO
-
+- Backend Developer
+- Frontend Developer
+- Full Stack Developer
+- Flutter Developer
+- React Developer
+- Mobile Developer
+- Software Engineer
+- DevOps Engineer
+- Data Engineer
+- Machine Learning Engineer
+- Technical Cofounder
+- CTO
 target_skills:
-  - Python
-  - Java
-  - C++
-  - Go
-  - Rust
-  - Flutter
-  - Dart
-  - React
-  - React Native
-  - Vue
-  - Angular
-  - Node.js
-  - TypeScript
-  - Django
-  - FastAPI
-  - Rails
-  - Laravel
-  - PostgreSQL
-  - MySQL
-  - MongoDB
-  - AWS
-  - GCP
-  - Azure
-  - Kubernetes
-  - Docker
-  - Terraform
-  - Swift
-  - Kotlin
-  - Supabase
-  - Firebase
-
+- Python
+- Java
+- C++
+- Go
+- Rust
+- Flutter
+- Dart
+- React
+- React Native
+- Vue
+- Angular
+- Node.js
+- TypeScript
+- Django
+- FastAPI
+- Rails
+- Laravel
+- PostgreSQL
+- MySQL
+- MongoDB
+- AWS
+- GCP
+- Azure
+- Kubernetes
+- Docker
+- Terraform
+- Swift
+- Kotlin
+- Supabase
+- Firebase
 exclude_job_seekers: true
-minimum_confidence: 0.80
-
-# Posts scoring at or above this go to the LLM; below it, rules decide alone.
+minimum_confidence: 0.8
 llm_escalation_threshold: 55
-
 keywords:
   include:
-    - hiring
-    - looking for
-    - need a developer
-    - need an engineer
-    - looking to hire
-    - developer wanted
-    - contractor needed
-    - agency needed
+  - hiring
+  - looking for
+  - need a developer
+  - need an engineer
+  - looking to hire
+  - developer wanted
+  - contractor needed
+  - agency needed
   exclude:
-    - looking for a job
-    - open to work
-    - seeking employment
-    - available for hire
-
+  - looking for a job
+  - open to work
+  - seeking employment
+  - available for hire
 scoring:
   hiring_intent: 40
   target_role_match: 20
@@ -77,20 +71,15 @@ scoring:
   company_identified: 5
   recent_post: 10
   recency_days: 7
-
 priority_thresholds:
   high: 80
   medium: 50
-
-# Content the system will never collect, regardless of token capability.
 excluded_content:
-  - direct_messages
-  - member_bios
-  - email_addresses
-  - phone_numbers
-
+- direct_messages
+- member_bios
+- email_addresses
+- phone_numbers
 retention_days: 30
-
 rate_limit:
   requests_per_minute: 60
   max_retries: 5

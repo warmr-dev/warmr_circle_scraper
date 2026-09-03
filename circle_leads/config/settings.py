@@ -95,6 +95,65 @@ def load_requirements(path: str | Path | None = None) -> Requirements:
     return Requirements(**data)
 
 
+def requirements_to_dict(req: "Requirements") -> dict:
+    """Serialize Requirements back to the YAML shape (for the config editor)."""
+    return {
+        "target_roles": list(req.target_roles),
+        "target_skills": list(req.target_skills),
+        "exclude_job_seekers": req.exclude_job_seekers,
+        "minimum_confidence": req.minimum_confidence,
+        "llm_escalation_threshold": req.llm_escalation_threshold,
+        "keywords": {
+            "include": list(req.keywords.include),
+            "exclude": list(req.keywords.exclude),
+        },
+        "scoring": {
+            "hiring_intent": req.scoring.hiring_intent,
+            "target_role_match": req.scoring.target_role_match,
+            "target_skill_match": req.scoring.target_skill_match,
+            "budget_mentioned": req.scoring.budget_mentioned,
+            "company_identified": req.scoring.company_identified,
+            "recent_post": req.scoring.recent_post,
+            "recency_days": req.scoring.recency_days,
+        },
+        "priority_thresholds": {
+            "high": req.priority_thresholds.high,
+            "medium": req.priority_thresholds.medium,
+        },
+        "excluded_content": list(req.excluded_content),
+        "retention_days": req.retention_days,
+        "rate_limit": {
+            "requests_per_minute": req.rate_limit.requests_per_minute,
+            "max_retries": req.rate_limit.max_retries,
+            "backoff_base_seconds": req.rate_limit.backoff_base_seconds,
+            "max_backoff_seconds": req.rate_limit.max_backoff_seconds,
+        },
+    }
+
+
+def save_requirements(data: dict, path: str | Path | None = None) -> "Requirements":
+    """Validate a requirements dict and write it to YAML. Returns the reloaded model.
+
+    Validation happens first (via the pydantic model), so an invalid edit is
+    rejected before it can overwrite the file and break classification.
+    """
+    cfg_path = Path(path) if path else DEFAULT_CONFIG_PATH
+    # Validate by constructing the model; raises on bad input.
+    req = Requirements(**data)
+    # Write the canonical serialized form (not the raw dict) so it round-trips.
+    header = (
+        "# Lead requirements. Everything here is editable without touching source"
+        " code.\n"
+        "# Edit here or in the dashboard's Config tab, then re-run: circle-leads"
+        " classify\n\n"
+    )
+    cfg_path.write_text(
+        header + yaml.safe_dump(requirements_to_dict(req), sort_keys=False),
+        encoding="utf-8",
+    )
+    return load_requirements(cfg_path)
+
+
 class CommunityPermission(BaseModel):
     """Per-community authorization record. One file per community.
 

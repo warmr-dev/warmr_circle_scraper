@@ -271,3 +271,54 @@ def test_harvest_job_starts(auth_client, monkeypatch):
 
 def test_harvest_job_requires_auth(client):
     assert client.post("/api/jobs/harvest", json={}).status_code == 401
+
+
+# --- Config editor ----------------------------------------------------------
+
+
+def test_config_read_returns_full_shape(auth_client):
+    c = auth_client.get("/api/config").json()
+    assert "target_roles" in c and "target_skills" in c
+    assert "keywords" in c and "scoring" in c
+    assert "llm_available" in c
+
+
+def test_config_save_updates_and_takes_effect(auth_client, tmp_path, monkeypatch):
+    # Point the app at a temp config file so the test doesn't edit the real one.
+    import circle_leads.web.app as appmod
+    from circle_leads.config.settings import load_requirements, requirements_to_dict, save_requirements
+
+    cfg = tmp_path / "req.yaml"
+    save_requirements(requirements_to_dict(load_requirements()), cfg)
+    # monkeypatch the module-level default so create_app writes here
+    monkeypatch.setattr("circle_leads.config.settings.DEFAULT_CONFIG_PATH", cfg)
+
+    # Save a new config via the API
+    body = auth_client.get("/api/config").json()
+    body["target_roles"] = ["Flutter Developer"]
+    resp = auth_client.post("/api/config", json=body)
+    assert resp.status_code == 200
+    # The change is reflected on the next read
+    assert auth_client.get("/api/config").json()["target_roles"] == ["Flutter Developer"]
+
+
+def test_config_save_rejects_invalid(auth_client):
+    body = auth_client.get("/api/config").json()
+    body["minimum_confidence"] = 5.0  # out of range 0..1
+    assert auth_client.post("/api/config", json=body).status_code == 400
+
+
+def test_config_save_locks_excluded_content(auth_client):
+    """A dashboard save must not weaken privacy exclusions."""
+    body = auth_client.get("/api/config").json()
+    before = set(body.get("excluded_content", []))
+    body["excluded_content"] = []  # attempt to clear it
+    resp = auth_client.post("/api/config", json=body)
+    assert resp.status_code == 200
+    after = set(resp.json()["config"]["excluded_content"])
+    assert after == before  # unchanged despite the attempt
+
+
+def test_config_requires_auth(client):
+    assert client.get("/api/config").status_code == 401
+    assert client.post("/api/config", json={}).status_code == 401
