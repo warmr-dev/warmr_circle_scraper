@@ -301,64 +301,79 @@ def new_communities_cmd(ctx, limit):
 
 @cli.command("read-feed")
 @click.argument("community_host")
-@click.option("--space-id", "space_ids", multiple=True, required=True,
-              help="A space id to read. Repeatable. Find the id in DevTools; see docs/member_feed.md.")
-@click.option("--cookie-env", default="CIRCLE_SESSION_COOKIE", show_default=True,
-              help="Env var holding your browser Cookie header for this community.")
+@click.option("--space-id", "space_ids", multiple=True,
+              help="A space id to read. Repeatable. Find it in DevTools; see docs/member_feed.md.")
+@click.option("--login", is_flag=True,
+              help="Open a browser window to sign in (do this once, or when the session expires).")
+@click.option("--profile-dir", default=None, help="Where to keep the browser profile.")
+@click.option("--show-browser", is_flag=True, help="Show the browser while reading (debug).")
 @click.option("--community", default=None, help="Slug to record leads under (default: host).")
 @click.option("--max-pages", type=int, default=10, show_default=True)
 @click.option("--use-llm", is_flag=True)
 @click.pass_context
-def read_feed_cmd(ctx, community_host, space_ids, cookie_env, community, max_pages, use_llm):
-    """Read spaces you're a member of, via Circle's internal feed endpoints.
+def read_feed_cmd(ctx, community_host, space_ids, login, profile_dir, show_browser,
+                  community, max_pages, use_llm):
+    """Read spaces you're a member of, via a browser you log into yourself.
 
-    For communities where you are a genuine, logged-in member. It calls the same
-    /internal_api/ endpoints your browser calls, authenticated by your session
-    cookie (from the environment -- see docs/member_feed.md). Read-only; stops
-    on a 401/403; polite request rate.
+    A Chromium window (persistent profile) holds your Circle login. Python reads
+    the rendered feed through it and never sees, copies, or stores your session
+    token -- the browser holds it, exactly like your normal browser. Read-only.
 
     \b
-      export CIRCLE_SESSION_COOKIE='<your Cookie header>'
+      # once: sign in
+      circle-leads read-feed startupandangels.circle.so --login
+      # then, any time:
       circle-leads read-feed startupandangels.circle.so --space-id 1595123
     """
+    from circle_leads.scraper.browser_reader import (
+        BrowserFeedReader, BrowserNotAvailable, NotLoggedIn, fetch_space_posts,
+    )
     from circle_leads.triage.pipeline import triage_text
 
     try:
-        client = MemberFeedClient.from_env(community_host, cookie_env)
-    except SessionExpired as exc:
+        reader = BrowserFeedReader(
+            community_host, profile_dir=profile_dir, headless=not show_browser,
+        )
+    except BrowserNotAvailable as exc:
         raise click.ClickException(str(exc))
 
-    slug = community or community_host.split(".")[0]
-    community_url = f"https://{client.community_host}"
-    reqs = ctx.obj["requirements"]
+    if login:
+        try:
+            reader.login()
+        except NotLoggedIn as exc:
+            raise click.ClickException(str(exc))
+        click.echo("Logged in. Now read a space with --space-id.")
+        if not space_ids:
+            return
 
+    if not space_ids:
+        raise click.UsageError("Give at least one --space-id (or --login first).")
+
+    slug = community or community_host.split(".")[0]
+    reqs = ctx.obj["requirements"]
     all_records = []
     try:
         for space_id in space_ids:
             click.echo(f"Reading space {space_id}...", err=True)
             recs = fetch_space_posts(
-                client, space_id, community_url=community_url,
-                excluded_content=reqs.excluded_content, max_pages=max_pages,
+                reader, space_id, excluded_content=reqs.excluded_content, max_pages=max_pages,
             )
             click.echo(f"  {len(recs)} post(s)", err=True)
             all_records.extend(recs)
-    except SessionExpired as exc:
-        raise click.ClickException(str(exc))
+    except NotLoggedIn as exc:
+        raise click.ClickException(str(exc) + "\nRun with --login to sign in.")
 
     if not all_records:
-        click.echo("No posts read. Check the space id and that your cookie is fresh.")
+        click.echo("No posts read. Check the space id, or re-run with --login.")
         return
 
-    # Feed records already carry structure, so classify them directly by
-    # reusing the triage pipeline on their joined text.
     text = "\n\n---\n\n".join(
         (r["title"] + "\n" + r["content"]) if r.get("title") else r["content"]
         for r in all_records
     )
     result = triage_text(
         ctx.obj["db"], text, reqs, community=slug,
-        source_url=community_url, use_llm=use_llm,
-        your_name=None,
+        source_url=reader.base, use_llm=use_llm,
     )
     click.echo(
         f"\nRead {result.total_posts} post(s): {len(result.leads)} lead(s), "
@@ -368,7 +383,6 @@ def read_feed_cmd(ctx, community_host, space_ids, cookie_env, community, max_pag
         click.echo(f"  {lead['lead_score']:>3} {lead['priority']:<7} "
                    f"{lead.get('job_title') or lead.get('hire_target') or '-'}")
     click.echo("\nReview them in the dashboard, or `circle-leads search`.")
-
 
 
 @cli.command("communities")
