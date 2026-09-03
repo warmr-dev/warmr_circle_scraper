@@ -121,6 +121,7 @@ def triage_records(
             ),
             author=(r.get("author") or {}).get("display_name"),
             index=i,
+            meta={"url": r.get("url")},
         )
         for i, r in enumerate(records)
         if (r.get("content") or "").strip()
@@ -216,7 +217,7 @@ def _triage_posts(
                 "content_type": "post",
                 "content": raw.content,
                 "title": None,
-                "url": source_url,
+                "url": (raw.meta or {}).get("url") or source_url,
                 "published_at": published,
                 "author_id": author.id if author else None,
                 "permission_reference": TRIAGE_SOURCE,

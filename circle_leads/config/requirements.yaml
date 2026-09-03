@@ -14,6 +14,8 @@ target_roles:
 - Machine Learning Engineer
 - Technical Cofounder
 - CTO
+- HR
+- AI
 target_skills:
 - Python
 - Java
@@ -45,8 +47,11 @@ target_skills:
 - Kotlin
 - Supabase
 - Firebase
+- Meta
+- Facebook
+- Amazon
 exclude_job_seekers: true
-minimum_confidence: 0.8
+minimum_confidence: 0.6
 harvest_recency_days: 30
 harvest_all_spaces: false
 llm_escalation_threshold: 55

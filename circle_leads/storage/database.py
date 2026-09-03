@@ -173,6 +173,11 @@ def upsert_post(session: Session, *, community_id: int, record: dict) -> tuple[P
 
     if existing is not None:
         if existing.dedup_hash == new_hash:
+            # Content unchanged, but backfill a better URL/permalink if we now
+            # have one (e.g. a real thread link where before we had none).
+            new_url = record.get("url")
+            if new_url and new_url != existing.url:
+                existing.url = new_url
             return existing, "unchanged"
         # Content changed since last run: refresh and re-classify.
         existing.content = text

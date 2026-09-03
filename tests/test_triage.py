@@ -239,3 +239,19 @@ def test_triage_records_does_not_merge_posts(db, reqs):
     result = triage_records(db, records, reqs, community="x")
     assert result.total_posts == 2
     assert len(result.leads) == 2  # both are distinct leads
+
+
+def test_triage_records_preserves_per_post_url(db, reqs):
+    """Each lead must keep its own thread permalink, not the community URL."""
+    from sqlalchemy import select
+    from circle_leads.triage.pipeline import triage_records
+    from circle_leads.storage.models import Post
+
+    records = [{
+        "content": "We are hiring a Flutter developer for our app",
+        "url": "https://x.circle.so/c/job-posts/hiring-a-flutter-dev",
+    }]
+    triage_records(db, records, reqs, community="x", source_url="https://x.circle.so")
+    with db.session() as s:
+        post = s.scalars(select(Post)).first()
+        assert post.url == "https://x.circle.so/c/job-posts/hiring-a-flutter-dev"

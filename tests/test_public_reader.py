@@ -206,3 +206,33 @@ def test_read_space_no_cutoff_reads_all():
     r = PublicReader("x.circle.so", session=Sess(), requests_per_minute=100000)
     ok, recs = r.read_space(1)  # no since -> old post still read
     assert len(recs) == 1
+
+
+def test_permalink_built_from_slugs():
+    """Posts carry no url, only a slug -> build /c/<space>/<post>."""
+    from circle_leads.scraper.public_reader import normalize_public_post
+    rec = normalize_public_post(
+        {"id": 1, "name": "Hiring", "truncated_content": "we need a dev",
+         "slug": "hiring-a-dev"},
+        community_url="https://x.circle.so",
+        space_slug="job-posts",
+    )
+    assert rec["url"] == "https://x.circle.so/c/job-posts/hiring-a-dev"
+
+
+def test_permalink_prefers_explicit_url():
+    from circle_leads.scraper.public_reader import normalize_public_post
+    rec = normalize_public_post(
+        {"id": 1, "content": "hiring a dev here", "url": "/c/space/direct-link"},
+        community_url="https://x.circle.so", space_slug="job-posts",
+    )
+    assert rec["url"] == "https://x.circle.so/c/space/direct-link"
+
+
+def test_no_permalink_without_space_slug():
+    from circle_leads.scraper.public_reader import normalize_public_post
+    rec = normalize_public_post(
+        {"id": 1, "content": "hiring a dev", "slug": "x"},
+        community_url="https://x.circle.so",
+    )
+    assert rec["url"] is None  # can't build a thread link without the space slug

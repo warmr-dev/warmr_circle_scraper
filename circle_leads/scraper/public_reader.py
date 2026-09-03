@@ -181,7 +181,8 @@ def _extract_text(record: dict) -> tuple[str, str]:
 
 
 def normalize_public_post(
-    record: dict, *, community_url: str, excluded_content: list[str] | None = None
+    record: dict, *, community_url: str, excluded_content: list[str] | None = None,
+    space_slug: str | None = None,
 ) -> dict | None:
     pid = record.get("id") or record.get("post_id")
     if pid is None:
@@ -191,9 +192,13 @@ def normalize_public_post(
     text = redact_pii(text, excluded_content)
     if not text.strip():
         return None
-    url = record.get("url")
+    # Posts carry no `url`, only a slug, so build the thread permalink:
+    # https://<host>/c/<space-slug>/<post-slug> -- which opens the actual thread.
+    url = record.get("url") or record.get("show_url")
     if url and url.startswith("/"):
         url = community_url.rstrip("/") + url
+    elif not url and space_slug and record.get("slug"):
+        url = f"{community_url.rstrip('/')}/c/{space_slug}/{record['slug']}"
     author = record.get("user") or record.get("community_member") or {}
     return {
         "source_content_id": str(pid),
@@ -253,7 +258,8 @@ def discover_and_read_public(
             continue
         for r in raw:
             rec = normalize_public_post(
-                r, community_url=reader.base, excluded_content=excluded_content
+                r, community_url=reader.base, excluded_content=excluded_content,
+                space_slug=sp.slug,
             )
             if rec:
                 records.append(rec)
@@ -261,8 +267,11 @@ def discover_and_read_public(
             if include_comments and r.get("comments_count"):
                 for c in reader.read_comments(r.get("id")):
                     crec = normalize_public_post(
-                        c, community_url=reader.base, excluded_content=excluded_content
+                        c, community_url=reader.base, excluded_content=excluded_content,
+                        space_slug=sp.slug,
                     )
+                    if crec and rec and rec.get("url"):
+                        crec["url"] = rec["url"]  # comment links to its post's thread
                     if crec:
                         crec["content_type"] = "comment"
                         crec["thread_id"] = str(r.get("id"))

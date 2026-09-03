@@ -168,7 +168,8 @@ def harvest(
             space_recs = [
                 r for r in (
                     normalize_public_post(x, community_url=reader.base,
-                                          excluded_content=requirements.excluded_content)
+                                          excluded_content=requirements.excluded_content,
+                                          space_slug=sp.slug)
                     for x in raw
                 ) if r
             ]
@@ -179,7 +180,8 @@ def harvest(
                         for c in reader.read_comments(raw_post.get("id")):
                             crec = normalize_public_post(
                                 c, community_url=reader.base,
-                                excluded_content=requirements.excluded_content)
+                                excluded_content=requirements.excluded_content,
+                                space_slug=sp.slug)
                             if crec:
                                 crec["content_type"] = "comment"
                                 space_recs.append(crec)
