@@ -258,6 +258,22 @@ class ActivityLog(Base):
     decided_by: Mapped[str | None] = mapped_column(String(32))
 
 
+class Setting(Base):
+    """Key-value app settings, editable at runtime (e.g. the harvest schedule).
+
+    Lives in the DB (not .env) so it can be changed from the dashboard without a
+    redeploy -- the worker reads it each run to decide whether to harvest.
+    """
+
+    __tablename__ = "settings"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str | None] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, onupdate=utcnow
+    )
+
+
 class ScrapeRun(Base):
     __tablename__ = "scrape_runs"
 

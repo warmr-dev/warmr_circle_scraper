@@ -81,3 +81,25 @@ Env:   CIRCLE_LEADS_DB, DASHBOARD_PASSWORD, DASHBOARD_SECRET_KEY,
 Never commit `.env`. In the cloud, set every key as a platform env var:
 `DASHBOARD_PASSWORD`, `DASHBOARD_SECRET_KEY`, `EXA_API_KEY`, `OPENAI_API_KEY`,
 `CIRCLE_LEADS_DB`. The `.gitignore` already excludes `.env`.
+
+## Out Plane worker (with dashboard-controlled schedule)
+
+The harvest schedule is stored in the DB and editable from the dashboard's
+Config tab (Off / hourly / 6h / 12h / twice daily / daily / weekly). The worker
+runs `harvest --scheduled`, which checks that interval and only harvests when
+it's due -- so you run the worker on a *fixed* frequent cron and control the
+*actual* harvest cadence from the dashboard without redeploying.
+
+Get started (from https://docs.outplane.com/cli/agents):
+```bash
+curl -fsSL https://outplane.com/install.sh | sh
+outplane login                 # approve in the console
+outplane app create --repo Rasreal/circle-scraper --branch main
+```
+
+Worker command (set as the app's start command / a scheduled job):
+```
+circle-leads --db "$CIRCLE_LEADS_DB" harvest --scheduled --use-llm --verbose-log
+```
+Run it hourly (cron `0 * * * *`); it harvests only when the dashboard schedule
+says it's due. Env: CIRCLE_LEADS_DB (Postgres), EXA_API_KEY, OPENAI_API_KEY.

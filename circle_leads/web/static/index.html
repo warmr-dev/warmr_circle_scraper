@@ -200,6 +200,23 @@
   <!-- CONFIG -->
   <section id="view-config" hidden>
     <div class="panel">
+      <h2>Automatic harvest schedule</h2>
+      <p class="muted" style="margin-top:-6px">How often the background worker harvests leads. Change any time — no redeploy.</p>
+      <div class="row" style="margin-top:8px">
+        <select id="cfg-schedule" style="min-width:180px">
+          <option value="off">Off (manual only)</option>
+          <option value="hourly">Every hour</option>
+          <option value="every_6h">Every 6 hours</option>
+          <option value="every_12h">Every 12 hours</option>
+          <option value="twice_daily">Twice a day</option>
+          <option value="daily">Once a day</option>
+          <option value="weekly">Once a week</option>
+        </select>
+        <button class="action" id="cfg-schedule-save">Save schedule</button>
+        <span id="schedule-status" class="muted" style="font-size:13px"></span>
+      </div>
+    </div>
+    <div class="panel">
       <h2>What counts as a lead</h2>
       <p class="muted" style="margin-top:-6px">Edit here, Save, and it re-classifies everything with the new rules.</p>
       <label style="display:block;margin-top:12px;font-weight:600;font-size:13px">Target roles (comma-separated)</label>
@@ -606,7 +623,23 @@ document.addEventListener('click', async (event) => {
 const csv = (a) => (a || []).join(', ');
 const parseCsv = (v) => v.split(',').map(x => x.trim()).filter(Boolean);
 
+async function loadSchedule() {
+  const d = await api('/api/schedule');
+  if (!d) return;
+  $('cfg-schedule').value = d.schedule;
+  $('schedule-status').textContent = d.last_run
+    ? `Last harvest: ${d.last_run.slice(0,16).replace('T',' ')}` : 'Not run yet';
+}
+$('cfg-schedule-save').addEventListener('click', async () => {
+  const d = await api('/api/schedule', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ schedule: $('cfg-schedule').value }),
+  });
+  if (d) { toast('Schedule saved'); loadSchedule(); }
+});
+
 async function loadConfig() {
+  await loadSchedule();
   const c = await api('/api/config');
   if (!c) return;
   $('cfg-roles').value = csv(c.target_roles);

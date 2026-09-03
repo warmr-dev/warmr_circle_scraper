@@ -574,8 +574,10 @@ def read_public_cmd(ctx, community_host, space_ids, list_spaces, all_spaces, com
 @click.option("--recency-days", type=int, default=30, show_default=True,
               help="Only read posts newer than this many days.")
 @click.option("--all-spaces", is_flag=True, help="Read every public space, not just hiring-related ones.")
+@click.option("--scheduled", is_flag=True,
+              help="Only run if the dashboard-set schedule interval has elapsed (for the worker/cron).")
 @click.pass_context
-def harvest_cmd(ctx, niches, no_search, only_new, max_communities, use_llm, verbose_log, comments, recency_days, all_spaces):
+def harvest_cmd(ctx, niches, no_search, only_new, max_communities, use_llm, verbose_log, comments, recency_days, all_spaces, scheduled):
     """Discover public communities and read them for leads -- fully automatic.
 
     Chains it all: search niches (Exa), save new communities, then read every
@@ -588,6 +590,18 @@ def harvest_cmd(ctx, niches, no_search, only_new, max_communities, use_llm, verb
       circle-leads harvest --only-new                   # skip already-read ones
     """
     from circle_leads.harvest import harvest
+    from circle_leads.storage.settings_store import (
+        is_harvest_due, mark_harvest_run, get_schedule,
+    )
+
+    if scheduled:
+        if not is_harvest_due(ctx.obj["db"]):
+            click.echo(
+                f"Harvest not due yet (schedule: {get_schedule(ctx.obj['db'])}). Skipping.",
+                err=True,
+            )
+            return
+        mark_harvest_run(ctx.obj["db"])
 
     click.echo("Harvesting: searching + reading public communities...", err=True)
     res = harvest(
