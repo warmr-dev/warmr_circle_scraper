@@ -330,3 +330,26 @@ def test_finding_and_bring_on_phrasings_are_leads(text, reqs):
 )
 def test_finding_non_role_objects_are_not_leads(text, reqs):
     assert classify(text, reqs).classification == "NOT_LEAD"
+
+
+# --- Title extraction for exec and software roles ---------------------------
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("We are hiring a software engineer", "Software Engineer"),
+        ("Looking for a CTO for our startup", "CTO"),
+        ("VP of Engineering needed", "VP Of Engineering"),
+        ("Hiring a Head of Software Engineering", "Head Of Software Engineering"),
+    ],
+)
+def test_exec_and_software_roles_are_extracted(text, expected):
+    from circle_leads.classifier.extraction import extract_job_title
+    assert extract_job_title(text) == expected
+
+
+def test_software_engineer_lead_passes_requirements(reqs):
+    result = classify("We are hiring a software engineer for our startup", reqs)
+    assert result.classification == "LEAD"
+    assert meets_requirements(result, reqs) is True

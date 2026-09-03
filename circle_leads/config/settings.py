@@ -142,3 +142,25 @@ def load_community_permissions(directory: str | Path) -> list[CommunityPermissio
         data = yaml.safe_load(f.read_text()) or {}
         out.append(CommunityPermission(**data))
     return out
+
+
+def load_dotenv(path: str | Path = ".env") -> int:
+    """Load KEY=VALUE lines from a .env file into os.environ (no overwrite).
+
+    Minimal, dependency-free. Values already set in the environment win, so an
+    explicit export always overrides the file. Returns how many vars were set.
+    """
+    p = Path(path)
+    if not p.exists():
+        return 0
+    count = 0
+    for line in p.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key, value = key.strip(), value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+            count += 1
+    return count

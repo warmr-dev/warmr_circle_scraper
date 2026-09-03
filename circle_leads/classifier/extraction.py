@@ -46,8 +46,16 @@ LOCATION_PATTERNS = [
 # quadratic on long runs.
 _ROLE_RX = re.compile(
     r"\b((?:(?:senior|junior|mid[\s-]?level|lead|principal|staff|entry[\s-]?level)\s+)?"
-    r"(?:(?:back[\s-]?end|front[\s-]?end|full[\s-]?stack|mobile|web|cloud|data|ml|ai|devops|qa|site\s+reliability)\s+)?"
+    r"(?:(?:software|back[\s-]?end|front[\s-]?end|full[\s-]?stack|mobile|web|cloud|data|ml|ai|"
+    r"machine\s+learning|devops|qa|site\s+reliability|platform|security|blockchain)\s+)?"
     r"(?:developer|engineer|programmer|architect|designer|scientist))\b",
+    re.I,
+)
+# Executive / leadership tech roles that are strong hiring signals.
+_EXEC_ROLE_RX = re.compile(
+    r"\b(cto|chief\s+technology\s+officer|vp\s+(?:of\s+)?engineering|"
+    r"head\s+of\s+(?:software\s+)?engineering|technical\s+cofounder|tech\s+lead|"
+    r"engineering\s+manager)\b",
     re.I,
 )
 _NAMED_ROLE_RX = re.compile(
@@ -114,6 +122,14 @@ def extract_job_title(text: str) -> str | None:
     named = _NAMED_ROLE_RX.search(text)
     if named:
         return " ".join(named.group(1).split()).title()
+    exec_role = _EXEC_ROLE_RX.search(text)
+    if exec_role:
+        raw = " ".join(exec_role.group(1).split())
+        # Keep acronyms uppercase (CTO, VP), title-case the rest.
+        return " ".join(
+            w.upper() if w.lower() in ("cto", "vp") else w.title()
+            for w in raw.split()
+        )
     generic = _ROLE_RX.search(text)
     if generic:
         title = " ".join(generic.group(1).split()).strip()

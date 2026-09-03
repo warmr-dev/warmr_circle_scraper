@@ -93,7 +93,13 @@ def hamming_distance(a: str, b: str) -> int:
 
 
 def get_or_create_community(session: Session, *, slug: str, url: str, **kw) -> Community:
-    c = session.scalar(select(Community).where(Community.slug == slug))
+    # Match on slug OR url: the same community can be referenced by different
+    # slugs (a search find vs. a manual read), but its url is unique.
+    c = session.scalar(
+        select(Community).where(
+            (Community.slug == slug) | (Community.url == url)
+        )
+    )
     if c is None:
         c = Community(slug=slug, url=url, **kw)
         session.add(c)

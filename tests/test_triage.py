@@ -205,3 +205,31 @@ def test_triage_handles_empty_input(db, reqs):
     result = triage_text(db, "", reqs)
     assert result.total_posts == 0
     assert result.leads == []
+
+
+# --- triage_records (structured input, no splitting) ------------------------
+
+def test_triage_records_classifies_per_record(db, reqs):
+    from circle_leads.triage.pipeline import triage_records
+
+    records = [
+        {"title": "Hiring", "content": "We are hiring a software engineer for our team",
+         "published_at": None},
+        {"title": None, "content": "I'm a developer looking for a job, open to work"},
+    ]
+    result = triage_records(db, records, reqs, community="x")
+    assert result.total_posts == 2
+    assert len(result.leads) == 1  # the hiring post, not the job seeker
+
+
+def test_triage_records_does_not_merge_posts(db, reqs):
+    """Structured records must not be joined-and-resplit (which merged posts)."""
+    from circle_leads.triage.pipeline import triage_records
+
+    records = [
+        {"content": "We are hiring a Flutter developer for our app"},
+        {"content": "Separate post: we need a backend engineer, budget $20k"},
+    ]
+    result = triage_records(db, records, reqs, community="x")
+    assert result.total_posts == 2
+    assert len(result.leads) == 2  # both are distinct leads

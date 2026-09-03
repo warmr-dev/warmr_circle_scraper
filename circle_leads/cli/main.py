@@ -9,6 +9,7 @@ from pathlib import Path
 import click
 
 from circle_leads.config.settings import (
+    load_dotenv,
     load_community_permissions,
     load_requirements,
 )
@@ -47,6 +48,7 @@ def _setup_logging(verbose: bool) -> None:
 @click.pass_context
 def cli(ctx, db_url, config_path, verbose):
     """Consent-first hiring-lead discovery across authorized Circle communities."""
+    load_dotenv()  # pick up EXA_API_KEY, ANTHROPIC_API_KEY, DASHBOARD_* from .env
     _setup_logging(verbose)
     ctx.ensure_object(dict)
     ctx.obj["db"] = Database(db_url)
@@ -493,6 +495,70 @@ def read_all_cmd(ctx, feeds_config, use_llm):
         raise click.ClickException(str(exc))
 
     click.echo(f"\nDone. {total_leads} lead(s) across all communities. See the dashboard.")
+
+
+
+@cli.command("read-public")
+@click.argument("community_host")
+@click.option("--space-id", "space_ids", multiple=True,
+              help="Only read these space ids/slugs. Default: auto-discover public lead spaces.")
+@click.option("--list-spaces", is_flag=True, help="Just list the community's spaces and which are public.")
+@click.option("--all-spaces", is_flag=True, help="Try every space, not only likely lead spaces.")
+@click.option("--community", default=None, help="Slug to record leads under.")
+@click.option("--use-llm", is_flag=True)
+@click.pass_context
+def read_public_cmd(ctx, community_host, space_ids, list_spaces, all_spaces, community, use_llm):
+    """Read a community's PUBLIC spaces -- no membership or login required.
+
+    Some communities publish spaces openly (e.g. a public "I need a consultant"
+    board). This auto-discovers the spaces, reads the ones that are public, and
+    classifies the posts. Private spaces (401/403) are skipped.
+
+    \b
+      circle-leads read-public the-technical-freelancer-academy.circle.so --list-spaces
+      circle-leads read-public the-technical-freelancer-academy.circle.so
+    """
+    from circle_leads.scraper.public_reader import PublicReader, discover_and_read_public
+    from circle_leads.triage.pipeline import triage_records
+
+    reader = PublicReader(community_host)
+
+    if list_spaces:
+        spaces = reader.list_spaces()
+        if not spaces:
+            click.echo("No public space list for this community (it may be fully private).")
+            return
+        click.echo(f"\n{len(spaces)} space(s) found. Probing which are public...\n")
+        for sp in spaces:
+            ok, _ = reader.read_space(sp.id, max_pages=1)
+            click.echo(f"  {'PUBLIC ' if ok else 'private'}  id={sp.id:<10} {sp.name[:36]}")
+        return
+
+    spaces, records = discover_and_read_public(
+        reader,
+        space_ids=list(space_ids) or None,
+        only_lead_spaces=not all_spaces and not space_ids,
+        excluded_content=ctx.obj["requirements"].excluded_content,
+    )
+    if not records:
+        click.echo("No public posts read. Try --list-spaces to see what's available.")
+        return
+
+    public = [s for s in spaces if s.is_public]
+    click.echo(f"Read {len(records)} post(s) from {len(public)} public space(s).", err=True)
+
+    slug = community or community_host.split(".")[0]
+    result = triage_records(
+        ctx.obj["db"], records, ctx.obj["requirements"], community=slug,
+        source_url=reader.base, use_llm=use_llm,
+    )
+    click.echo(
+        f"\nRead {result.total_posts} post(s): {len(result.leads)} lead(s), "
+        f"{result.not_leads} not-lead, {result.already_seen} seen before."
+    )
+    for lead in result.leads:
+        click.echo(f"  {lead['lead_score']:>3} {lead['priority']:<7} "
+                   f"{lead.get('job_title') or lead.get('hire_target') or '-'}")
 
 
 

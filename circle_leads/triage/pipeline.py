@@ -92,6 +92,46 @@ def _relative_to_datetime(label: str | None) -> datetime | None:
     return now - (scale * n) if scale else None
 
 
+def triage_records(
+    db: Database,
+    records: list[dict],
+    requirements: Requirements,
+    *,
+    community: str = "manual",
+    space: str | None = None,
+    source_url: str | None = None,
+    use_llm: bool = False,
+    your_name: str | None = None,
+) -> TriageResult:
+    """Classify already-structured post records (one per post, no splitting).
+
+    For callers that read a feed and have clean per-post records -- avoids the
+    text splitter, which merges posts when records are joined then re-split.
+    Each record carries at least ``content``; optionally ``title`` and
+    ``author.display_name`` / ``published_at``.
+    """
+    posts = [
+        RawPost(
+            content=(
+                (r.get("title", "") + "\n" + r["content"])
+                if r.get("title") else r["content"]
+            ),
+            author=(r.get("author") or {}).get("display_name"),
+            index=i,
+        )
+        for i, r in enumerate(records)
+        if (r.get("content") or "").strip()
+    ]
+    published_map = {
+        i: r.get("published_at") for i, r in enumerate(records)
+    }
+    return _triage_posts(
+        db, posts, requirements, community=community, space=space,
+        source_url=source_url, use_llm=use_llm, your_name=your_name,
+        published_override=published_map,
+    )
+
+
 def triage_text(
     db: Database,
     text: str,
@@ -105,6 +145,25 @@ def triage_text(
 ) -> TriageResult:
     """Split, classify, score and store pasted community text."""
     posts: list[RawPost] = split_posts(text)
+    return _triage_posts(
+        db, posts, requirements, community=community, space=space,
+        source_url=source_url, use_llm=use_llm, your_name=your_name,
+    )
+
+
+def _triage_posts(
+    db: Database,
+    posts: list[RawPost],
+    requirements: Requirements,
+    *,
+    community: str = "manual",
+    space: str | None = None,
+    source_url: str | None = None,
+    use_llm: bool = False,
+    your_name: str | None = None,
+    published_override: dict | None = None,
+) -> TriageResult:
+    """Shared classify/score/store loop for split or structured posts."""
     result = TriageResult(total_posts=len(posts))
     if not posts:
         return result
@@ -134,6 +193,10 @@ def triage_text(
 
     for raw in posts:
         published = _relative_to_datetime(raw.posted_label)
+        if published_override and raw.index in published_override:
+            override = published_override[raw.index]
+            if override is not None:
+                published = override
 
         with db.session() as s:
             author = get_or_create_author(
