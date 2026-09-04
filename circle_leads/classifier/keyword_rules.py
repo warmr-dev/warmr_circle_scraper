@@ -117,6 +117,40 @@ HIRING_PATTERNS: list[tuple[str, str, int]] = [
     ),
     ("anyone_available", rf"\bany(?:one|body)\b[^.!?]{{0,30}}?\bavailable\b", 22),
     ("open_role", r"\b(?:open\s+(?:role|position|req)|job\s+opening|we\s+have\s+an?\s+opening)\b", 35),
+    # --- Job-post headline grammar --------------------------------------
+    # Hiring in a projects/jobs space is often posted as a headline, not a
+    # sentence: "Senior Data Engineer (Contract)", "2x DevOps Engineers",
+    # "Snowflake freelancers wanted", "Power BI Developer — Contract". These
+    # pair a role with an explicit hiring marker, so they don't fire on a
+    # freelancer merely naming their own title.
+    (
+        # "<role> (Contract)" / "<role> - Contract Opportunity" / "<role>, Remote"
+        "role_with_contract_marker",
+        rf"{ROLE_NOUNS}\b[^.!?\n]{{0,40}}?\b(?:contract|contractor|freelance|"
+        rf"part[- ]time|full[- ]time|w2|c2c|1099)\b",
+        35,
+    ),
+    (
+        # "<count>x <role>" or "<count> <role>s": "2x DevOps Engineers",
+        # "3 Data Engineers" -- a count of people to bring on is a hire.
+        "count_of_roles",
+        rf"\b\d+\s?x?\s+(?:[\w/-]+\s+){{0,3}}?{ROLE_NOUNS}s?\b",
+        35,
+    ),
+    (
+        # "<skills> freelancers/contractors/experts wanted/needed"
+        "skills_pros_wanted",
+        rf"\b(?:{ROLE_NOUNS}s?|experts?|professionals?|pros?)\s+"
+        rf"(?:wanted|needed|required|sought)\b",
+        38,
+    ),
+    (
+        # "Contract Opportunity", "Freelance Opportunity", "Remote Opportunity"
+        # -- naming an opportunity offered (not sought) is a hiring post.
+        "opportunity_offered",
+        r"\b(?:contract|freelance|remote|consulting|project)\s+opportunit(?:y|ies)\b",
+        30,
+    ),
     ("join_our_team", r"\bjoin\s+(?:our|my|the)\s+(?:team|company|startup)\b", 30),
     ("budget_for_work", r"\b(?:budget|paying|pay|rate|compensation)\b[^.!?]{0,40}?\b(?:for\s+(?:this|the)\s+(?:work|project|build)|per\s+hour|/hr)\b", 20),
 ]
