@@ -319,7 +319,7 @@
         <label class="muted" style="display:flex;gap:6px;align-items:center">
           <input type="checkbox" id="h-fullsearch" style="width:auto"> Re-check communities already read</label>
         <label class="muted" style="display:flex;gap:6px;align-items:center">
-          <input type="checkbox" id="h-llm" style="width:auto"> Use AI for ambiguous posts</label>
+          <input type="checkbox" id="h-llm" style="width:auto"> Use AI for ambiguous posts <span class="muted" style="font-size:11px">(on by default when an AI key is set)</span></label>
         <label class="muted" style="display:flex;gap:6px;align-items:center">
           <input type="checkbox" id="h-comments" style="width:auto"> Read comments too</label>
       </div>
@@ -624,9 +624,11 @@ $('c-harvest').addEventListener('click', async () => {
       // re-checks communities already read.
       only_new: !niche && !($('h-fullsearch') && $('h-fullsearch').checked),
       no_search: false,
-      use_llm: !!($('h-llm') && $('h-llm').checked),
       include_comments: !!($('h-comments') && $('h-comments').checked),
     };
+    // Only send use_llm when the box is checked; leaving it out lets the server
+    // default AI on whenever an OpenAI key is configured.
+    if ($('h-llm') && $('h-llm').checked) body.use_llm = true;
     if (niche) body.niches = [niche];
     const data = await api('/api/jobs/harvest', {
       method: 'POST', headers: {'Content-Type':'application/json'},
@@ -755,7 +757,7 @@ $('cfg-save-harvest').addEventListener('click', async () => {
     $('cfg-status').textContent = 'Saved. Starting full harvest…';
     await api('/api/jobs/harvest', {
       method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ only_new: false, no_search: false, use_llm: false }),
+      body: JSON.stringify({ only_new: false, no_search: false }),
     });
     toast('Full harvest started with new rules');
     pollJobs(); if (!jobPollTimer) jobPollTimer = setInterval(pollJobs, 3000);

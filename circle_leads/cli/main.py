@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -602,6 +603,10 @@ def harvest_cmd(ctx, niches, no_search, only_new, max_communities, use_llm, verb
             )
             return
         mark_harvest_run(ctx.obj["db"])
+        # On a scheduled run, escalate ambiguous posts to the LLM whenever a
+        # key is present -- an unattended run should classify as well as it can.
+        if not use_llm and os.environ.get("OPENAI_API_KEY"):
+            use_llm = True
 
     click.echo("Harvesting: searching + reading public communities...", err=True)
     res = harvest(
