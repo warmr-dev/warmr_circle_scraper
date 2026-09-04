@@ -3,6 +3,8 @@
 import pytest
 
 from circle_leads.discovery.web_search import (
+    DEFAULT_QUERY_TEMPLATES,
+    SITE_QUERY_TEMPLATES,
     SearchDiscovery,
     SearchResult,
     _looks_like_listing,
@@ -43,7 +45,7 @@ def test_search_finds_and_ranks_communities():
         fetch_result_pages=False, supplement_site_search=False, include_directories=False, request_delay=0,
     )
     assert disc.backend == "stub"
-    assert disc.queries_run == 5  # five query templates
+    assert disc.queries_run == len(DEFAULT_QUERY_TEMPLATES)  # five query templates
     slugs = {c.slug for c in disc.ranked}
     assert "saas-founders" in slugs
     top = disc.ranked[0]
@@ -182,7 +184,7 @@ def test_supplement_runs_site_queries_on_keyword_engine():
     )
     # ran the 5 niche templates + 3 site templates on the same engine
     assert any("site:circle.so" in q for q in be.queries)
-    assert len(be.queries) == 8
+    assert len(be.queries) == len(DEFAULT_QUERY_TEMPLATES) + len(SITE_QUERY_TEMPLATES)
 
 
 def test_supplement_can_be_disabled():
@@ -199,4 +201,4 @@ def test_supplement_can_be_disabled():
         supplement_site_search=False, request_delay=0,
     )
     assert not any("site:circle.so" in q for q in be.queries)
-    assert len(be.queries) == 5
+    assert len(be.queries) == len(DEFAULT_QUERY_TEMPLATES)

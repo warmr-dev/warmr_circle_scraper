@@ -43,6 +43,11 @@ DEFAULT_QUERY_TEMPLATES = [
     "community for {q} looking for developers to build their product",
     "best online communities for {q}",
     "{q} community discussions asks and offers hiring",
+    "{q} community members hiring or recruiting engineers",
+    "{q} network where people post jobs and projects",
+    "{q} mastermind or membership community on circle.so",
+    "{q} slack alternative community for founders and builders",
+    "{q} paid community for entrepreneurs and startups",
 ]
 
 # Keyword-engine queries that target circle.so subdomains directly. Run as a
@@ -50,14 +55,23 @@ DEFAULT_QUERY_TEMPLATES = [
 # matches and the direct site: coverage a keyword search is good at.
 SITE_QUERY_TEMPLATES = [
     'site:circle.so {q}',
+    'site:circle.so {q} community',
     '"circle.so" {q} hiring OR "looking for" OR "we need"',
     '{q} "circle.so" job OR opportunity OR consultant',
+    '{q} community "post a job" OR "job board" circle.so',
+    '{q} circle.so members hiring OR recruiting',
+    '{q} "we are looking for" OR "we need" developer circle.so',
+    'inurl:circle.so {q} founders OR startup OR builders',
 ]
 
 # Public directories worth fetching directly (no search key needed).
 SEED_DIRECTORY_URLS = [
     "https://discover.circle.so/",
     "https://thehiveindex.com/communities/?platforms=circle",
+    "https://thehiveindex.com/communities/?category=startups",
+    "https://thehiveindex.com/communities/?category=tech",
+    "https://discover.circle.so/search?q=startup",
+    "https://discover.circle.so/search?q=developers",
 ]
 
 
