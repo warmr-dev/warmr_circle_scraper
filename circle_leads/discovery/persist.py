@@ -17,6 +17,8 @@ from dataclasses import dataclass, field
 
 from sqlalchemy import select
 
+from circle_leads.scraper.http_client import shared_session
+
 from circle_leads.discovery.finder import RankedCommunity
 from circle_leads.discovery.validate_finds import (
     is_subdomain_community,
@@ -65,8 +67,7 @@ def persist_finds(
     # Validate URLs (drop soft-404 Discover pages, confirm subdomains are live)
     # and mark the real <slug>.circle.so communities, which are the joinable
     # ones. Discover /products pages are kept only if they load a real page.
-    import requests
-    http = session or requests.Session()
+    http = session or shared_session()
     validated: list[RankedCommunity] = []
     for rc in ranked:
         if rc.score < min_score:

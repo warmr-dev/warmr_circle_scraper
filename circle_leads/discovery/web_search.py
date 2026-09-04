@@ -29,6 +29,8 @@ from typing import Callable, Protocol
 
 import requests
 
+from circle_leads.scraper.http_client import shared_session
+
 from circle_leads.discovery.discover_communities import extract_from_text
 from circle_leads.discovery.finder import RankedCommunity, rank_extracted, rank_from_html
 
@@ -99,7 +101,7 @@ class ExaBackend:
 
     def __init__(self, api_key, session=None, include_domains=None):
         self._key = api_key
-        self._http = session or requests.Session()
+        self._http = session or shared_session()
         self._include_domains = include_domains
 
     def search(self, query: str, *, count: int = 10) -> list[SearchResult]:
@@ -163,7 +165,7 @@ class BraveBackend:
 
     def __init__(self, api_key: str, session: requests.Session | None = None):
         self._key = api_key
-        self._http = session or requests.Session()
+        self._http = session or shared_session()
 
     def search(self, query: str, *, count: int = 10) -> list[SearchResult]:
         resp = self._http.get(
@@ -190,7 +192,7 @@ class SerpApiBackend:
 
     def __init__(self, api_key: str, session: requests.Session | None = None):
         self._key = api_key
-        self._http = session or requests.Session()
+        self._http = session or shared_session()
 
     def search(self, query: str, *, count: int = 10) -> list[SearchResult]:
         resp = self._http.get(
@@ -221,7 +223,7 @@ class DuckDuckGoBackend:
     _SNIPPET = re.compile(r'class="result__snippet"[^>]*>(.*?)</a>', re.I | re.S)
 
     def __init__(self, session: requests.Session | None = None):
-        self._http = session or requests.Session()
+        self._http = session or shared_session()
 
     def search(self, query: str, *, count: int = 10) -> list[SearchResult]:
         try:
@@ -311,7 +313,7 @@ def discover_by_search(
       4. Fetch known public directories (Discover, Hive Index) directly.
       5. Rank everything, dedup, sort.
     """
-    http = session or requests.Session()
+    http = session or shared_session()
     backend = backend or choose_backend(http)
     templates = templates or DEFAULT_QUERY_TEMPLATES
 

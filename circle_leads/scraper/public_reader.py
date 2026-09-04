@@ -19,14 +19,10 @@ from typing import Iterator
 
 import requests
 
+from circle_leads.scraper.http_client import BROWSER_UA, shared_session
 from circle_leads.scraper.normalize import parse_timestamp, redact_pii, strip_html
 
 logger = logging.getLogger(__name__)
-
-BROWSER_UA = (
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
-)
 
 
 @dataclass
@@ -37,6 +33,12 @@ class PublicSpace:
     is_public: bool | None = None  # None until probed
 
 
+# One conditional-request cache shared across all readers in the process, so a
+# path we fetched before sends its ETag / Last-Modified and the server can
+# answer 304 Not Modified -- no body, no re-parse. Keyed by absolute URL.
+_COND_CACHE: dict[str, dict] = {}
+
+
 @dataclass
 class PublicReader:
     """Reads a Circle community's publicly available spaces and posts."""
@@ -44,7 +46,9 @@ class PublicReader:
     community_host: str
     requests_per_minute: int = 40
     timeout: int = 20
-    session: requests.Session = field(default_factory=requests.Session)
+    #: Default to the shared pooled session so connections + TLS handshakes are
+    #: reused across every community, not rebuilt per reader.
+    session: requests.Session = field(default_factory=shared_session)
     _last: float = 0.0
 
     def __post_init__(self) -> None:
@@ -60,21 +64,39 @@ class PublicReader:
 
     def _get(self, path: str) -> tuple[int, dict | list | None]:
         self._throttle()
+        url = self.base + path
+        headers = {"User-Agent": BROWSER_UA, "Accept": "application/json"}
+        # Send validators from the last time we saw this URL, so an unchanged
+        # resource comes back as a cheap 304 instead of a full re-download.
+        cached = _COND_CACHE.get(url)
+        if cached:
+            if cached.get("etag"):
+                headers["If-None-Match"] = cached["etag"]
+            if cached.get("last_modified"):
+                headers["If-Modified-Since"] = cached["last_modified"]
         try:
-            resp = self.session.get(
-                self.base + path,
-                headers={"User-Agent": BROWSER_UA, "Accept": "application/json"},
-                timeout=self.timeout,
-            )
+            resp = self.session.get(url, headers=headers, timeout=self.timeout)
         except requests.RequestException as exc:
             logger.debug("Public fetch failed for %s: %s", path, exc.__class__.__name__)
             return 0, None
+        if resp.status_code == 304 and cached:
+            # Not modified: reuse the parsed body we stored last time.
+            return 200, cached.get("payload")
         if resp.status_code != 200:
             return resp.status_code, None
         try:
-            return 200, resp.json()
+            payload = resp.json()
         except ValueError:
             return 200, None
+        # Remember validators + parsed body for next time.
+        resp_headers = getattr(resp, "headers", {}) or {}
+        etag = resp_headers.get("ETag")
+        last_mod = resp_headers.get("Last-Modified")
+        if etag or last_mod:
+            _COND_CACHE[url] = {
+                "etag": etag, "last_modified": last_mod, "payload": payload,
+            }
+        return 200, payload
 
     def community_name(self) -> str | None:
         """The community's real display name, from the public JSON API.

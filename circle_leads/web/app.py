@@ -301,6 +301,9 @@ def create_app(db_url: str | None = None, config_path: str | None = None) -> Fas
         include_comments = bool(payload.get("include_comments", False))
         recency_days = int(payload.get("recency_days", requirements().harvest_recency_days))
         all_spaces = bool(payload.get("all_spaces", requirements().harvest_all_spaces))
+        # "Re-check communities already read" (only_new=False) means: read the
+        # ones already synced too, so bypass the recent-recheck skip window.
+        force_recheck = bool(payload.get("force_recheck", not only_new))
 
         def run(job):
             from circle_leads.harvest import harvest
@@ -317,7 +320,7 @@ def create_app(db_url: str | None = None, config_path: str | None = None) -> Fas
                 db, requirements(), niches=niches, search=not no_search,
                 only_new=only_new, verbose_log=True, use_llm=use_llm,
                 include_comments=include_comments, recency_days=recency_days,
-                all_spaces=all_spaces,
+                all_spaces=all_spaces, force_recheck=force_recheck,
             )
             job.result = {
                 "new_communities": res.new_communities,

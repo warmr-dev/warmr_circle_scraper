@@ -128,6 +128,8 @@ def harvest(
     include_comments: bool = False,
     recency_days: int = 30,
     all_spaces: bool = False,
+    min_recheck_hours: float = 6.0,
+    force_recheck: bool = False,
 ) -> HarvestResult:
     """Discover public communities and read their public spaces for leads.
 
@@ -168,6 +170,26 @@ def harvest(
     for host, slug, last_synced in hosts:
         if only_new and last_synced is not None:
             continue  # caller asked to read only never-seen communities
+        # Skip a community we re-checked very recently: re-reading it again this
+        # soon would just re-open a connection to fetch nothing new. force_recheck
+        # (the dashboard "re-check" box) overrides this.
+        if (
+            not force_recheck
+            and last_synced is not None
+            and (datetime.now(timezone.utc).replace(tzinfo=None) - last_synced)
+            < timedelta(hours=min_recheck_hours)
+        ):
+            with db.session() as s:
+                log_activity(
+                    s, kind="read", level="info", community=slug,
+                    summary=(
+                        f"{host}: checked {_ago(last_synced)} ago — skipping "
+                        f"(re-check interval {min_recheck_hours:g}h)"
+                    ),
+                    detail={"last_synced": last_synced.isoformat(),
+                            "min_recheck_hours": min_recheck_hours},
+                )
+            continue
         # First read of a community: pull its whole backlog (bounded by
         # max_pages), because its best hiring posts are often months old and a
         # tight recency window would skip them. Only on *re-reads* do we apply
@@ -347,6 +369,18 @@ def harvest(
         )
 
     return result
+
+
+def _ago(when: datetime) -> str:
+    """Human-readable 'time since' for a naive UTC datetime."""
+    delta = datetime.now(timezone.utc).replace(tzinfo=None) - when
+    mins = int(delta.total_seconds() // 60)
+    if mins < 60:
+        return f"{mins}m"
+    hours = mins // 60
+    if hours < 24:
+        return f"{hours}h"
+    return f"{hours // 24}d"
 
 
 def _mark_synced(db: Database, slug: str) -> None:

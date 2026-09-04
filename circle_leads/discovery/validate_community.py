@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 
 import requests
 
+from circle_leads.scraper.http_client import shared_session
+
 from circle_leads.storage.models import AccessState
 
 logger = logging.getLogger(__name__)
@@ -101,7 +103,7 @@ def check_public_access(
     required, the result is recorded as such -- the system does not attempt to
     authenticate against it.
     """
-    http = session or requests.Session()
+    http = session or shared_session()
     try:
         resp = http.get(
             url,

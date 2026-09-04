@@ -21,6 +21,8 @@ from dataclasses import dataclass
 
 import requests
 
+from circle_leads.scraper.http_client import shared_session
+
 logger = logging.getLogger(__name__)
 
 BROWSER_UA = (
@@ -128,7 +130,7 @@ def validate_url(
     url: str, *, session: requests.Session | None = None, timeout: int = 12
 ) -> Validation:
     """Check a community URL is real and, where possible, whether it is free."""
-    http = session or requests.Session()
+    http = session or shared_session()
     try:
         resp = http.get(
             url,
