@@ -202,3 +202,64 @@ def test_supplement_can_be_disabled():
     )
     assert not any("site:circle.so" in q for q in be.queries)
     assert len(be.queries) == len(DEFAULT_QUERY_TEMPLATES)
+
+
+# --- findSimilar expansion (when search runs dry) ---------------------------
+
+
+class SimilarStub:
+    """Backend that returns no keyword hits but has find_similar."""
+    name = "exa"
+    def __init__(self):
+        self.searched = []
+        self.similar_calls = []
+    def search(self, query, *, count=10):
+        self.searched.append(query)
+        return []  # keyword search comes up dry
+    def find_similar(self, url, *, count=10):
+        self.similar_calls.append(url)
+        return [SearchResult(title="Neighbour", url="https://neighbour.circle.so", snippet="founders")]
+
+
+def test_expands_from_seeds_when_search_is_dry():
+    from circle_leads.discovery.web_search import discover_by_search
+    be = SimilarStub()
+    disc = discover_by_search(
+        "obscure niche", backend=be,
+        expand_from=["https://seed.circle.so"],
+        fetch_result_pages=False, include_directories=False,
+        supplement_site_search=False, request_delay=0,
+    )
+    assert be.similar_calls == ["https://seed.circle.so"]  # expansion ran
+    assert any(c.slug == "neighbour" for c in disc.ranked)  # its result absorbed
+
+
+def test_no_expansion_when_search_finds_enough():
+    from circle_leads.discovery.web_search import discover_by_search, SearchResult as SR
+
+    class RichStub:
+        name = "exa"
+        def __init__(self): self.similar_calls = []
+        def search(self, query, *, count=10):
+            # returns plenty of circle.so hits, so expansion shouldn't trigger
+            return [SR(title="C", url=f"https://c{i}.circle.so", snippet="") for i in range(10)]
+        def find_similar(self, url, *, count=10):
+            self.similar_calls.append(url); return []
+
+    be = RichStub()
+    discover_by_search(
+        "rich niche", backend=be, expand_from=["https://seed.circle.so"],
+        expand_when_fewer_than=8, fetch_result_pages=False,
+        include_directories=False, supplement_site_search=False, request_delay=0,
+    )
+    assert be.similar_calls == []  # enough found -> no expansion
+
+
+def test_expand_from_none_is_safe():
+    from circle_leads.discovery.web_search import discover_by_search
+    disc = discover_by_search(
+        "x", backend=SimilarStub(), expand_from=None,
+        fetch_result_pages=False, include_directories=False,
+        supplement_site_search=False, request_delay=0,
+    )
+    assert isinstance(disc.ranked, list)

@@ -134,6 +134,29 @@ class ExaBackend:
             )
         return out
 
+    def find_similar(self, url: str, *, count: int = 10) -> list[SearchResult]:
+        """Exa's findSimilar: pages like a given URL. Used to expand from a
+        community we already have when keyword search runs dry."""
+        body = {"url": url, "numResults": count}
+        if self._include_domains:
+            body["includeDomains"] = self._include_domains
+        try:
+            resp = self._http.post(
+                "https://api.exa.ai/findSimilar",
+                headers={"x-api-key": self._key, "Content-Type": "application/json"},
+                json=body,
+                timeout=25,
+            )
+            resp.raise_for_status()
+        except requests.RequestException as exc:
+            logger.warning("Exa findSimilar failed: %s", exc.__class__.__name__)
+            return []
+        return [
+            SearchResult(title=i.get("title", "") or "", url=i.get("url", "") or "",
+                         snippet=(i.get("summary") or "")[:300])
+            for i in resp.json().get("results", [])
+        ]
+
 
 class BraveBackend:
     name = "brave"
@@ -270,6 +293,8 @@ def discover_by_search(
     fetch_result_pages: bool = True,
     include_directories: bool = True,
     supplement_site_search: bool = True,
+    expand_from: list[str] | None = None,
+    expand_when_fewer_than: int = 8,
     max_results_per_query: int = 10,
     request_delay: float = 1.0,
     session: requests.Session | None = None,
@@ -341,6 +366,24 @@ def discover_by_search(
                 all_html.append(html)
                 result.pages_fetched += 1
             time.sleep(request_delay)
+
+    # 3b. Expand from communities we already have: if the search surfaced few
+    #     circle.so subdomains, ask Exa for pages similar to some known ones.
+    #     This finds neighbours of your existing communities when a keyword
+    #     search runs dry.
+    if expand_from and hasattr(backend, "find_similar"):
+        found_so_far = sum(1 for chunk in all_html if ".circle.so" in chunk)
+        if found_so_far < expand_when_fewer_than:
+            for seed_url in expand_from[:5]:
+                try:
+                    similar = backend.find_similar(seed_url, count=max_results_per_query)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("findSimilar failed: %s", exc.__class__.__name__)
+                    continue
+                result.queries_run += 1
+                for hit in similar:
+                    all_html.append(f"{hit.title} {hit.snippet} {hit.url}")
+                time.sleep(request_delay)
 
     # 4. Rank everything gathered, keeping the best score per slug.
     ranked: dict[str, RankedCommunity] = {}

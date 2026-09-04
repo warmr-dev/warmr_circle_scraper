@@ -74,6 +74,21 @@ def _community_hosts(db: Database, *, limit: int) -> list[tuple[str, str, object
         return out
 
 
+def _existing_community_urls(db: Database, *, limit: int) -> list[str]:
+    """Top existing community subdomains, to seed findSimilar expansion."""
+    with db.session() as s:
+        rows = s.scalars(
+            select(Community).order_by(Community.relevance_score.desc()).limit(limit * 3)
+        ).all()
+        out = []
+        for c in rows:
+            if is_subdomain_community(c.url):
+                out.append(c.url)
+            if len(out) >= limit:
+                break
+        return out
+
+
 def harvest(
     db: Database,
     requirements: Requirements,
@@ -107,9 +122,12 @@ def harvest(
 
     # --- 1. Discover new communities via search --------------------------
     if search:
+        # Seed findSimilar with the top communities we already have, so a dry
+        # keyword search still expands from your existing set.
+        seed_urls = _existing_community_urls(db, limit=8)
         for niche in niches:
             try:
-                disc = discover_by_search(niche)
+                disc = discover_by_search(niche, expand_from=seed_urls)
                 res = persist_finds(
                     db, disc.ranked, niche=niche, min_score=min_score,
                     source="harvest",
