@@ -211,10 +211,16 @@
           <option value="twice_daily">Twice a day</option>
           <option value="daily">Once a day</option>
           <option value="weekly">Once a week</option>
+          <option value="custom">Custom…</option>
         </select>
+        <label id="cfg-custom-wrap" hidden style="font-size:13px">every
+          <input id="cfg-custom-hours" type="number" min="1" max="720" value="3" style="width:70px;margin:0 4px"> hours</label>
         <button class="action" id="cfg-schedule-save">Save schedule</button>
         <span id="schedule-status" class="muted" style="font-size:13px"></span>
       </div>
+      <p class="muted" style="font-size:12px;margin-top:6px">
+        The background worker checks this each run and harvests only when the interval has elapsed.
+      </p>
     </div>
     <div class="panel">
       <h2>What counts as a lead</h2>
@@ -250,14 +256,37 @@
         <label class="muted" style="font-size:13px;display:flex;align-items:center;gap:6px">
           <input id="cfg-all-spaces" type="checkbox" style="width:auto"> Read all public spaces (not just hiring-named)</label>
       </div>
-      <div class="row" style="gap:14px;flex-wrap:wrap;margin-top:12px">
-        <label style="font-size:13px">Hiring intent <input id="sc-hiring" type="number" style="width:60px;margin-left:4px"></label>
-        <label style="font-size:13px">Role match <input id="sc-role" type="number" style="width:60px;margin-left:4px"></label>
-        <label style="font-size:13px">Skill match <input id="sc-skill" type="number" style="width:60px;margin-left:4px"></label>
-        <label style="font-size:13px">Budget <input id="sc-budget" type="number" style="width:60px;margin-left:4px"></label>
-        <label style="font-size:13px">Company <input id="sc-company" type="number" style="width:60px;margin-left:4px"></label>
-        <label style="font-size:13px">Recent <input id="sc-recent" type="number" style="width:60px;margin-left:4px"></label>
+      <p class="muted" style="font-size:12.5px;margin:12px 0 6px">
+        Each lead scores 0–100. These are the points added when a signal is present, then the total is scaled by confidence:
+      </p>
+      <div class="row" style="gap:14px;flex-wrap:wrap">
+        <label style="font-size:13px" title="Points for a post that is actually a hiring request (the base signal every lead gets)">
+          Hiring intent <input id="sc-hiring" type="number" style="width:60px;margin-left:4px"></label>
+        <label style="font-size:13px" title="Extra points when the extracted job title matches one of your Target roles above (e.g. 'Backend Developer')">
+          Role match <input id="sc-role" type="number" style="width:60px;margin-left:4px"></label>
+        <label style="font-size:13px" title="Extra points when a skill in the post matches your Target skills above (e.g. Python, AWS)">
+          Skill match <input id="sc-skill" type="number" style="width:60px;margin-left:4px"></label>
+        <label style="font-size:13px" title="Extra points when the post states a budget or rate (e.g. '$20k', '$50/hr')">
+          Budget <input id="sc-budget" type="number" style="width:60px;margin-left:4px"></label>
+        <label style="font-size:13px" title="Extra points when a company name is identified in the post">
+          Company <input id="sc-company" type="number" style="width:60px;margin-left:4px"></label>
+        <label style="font-size:13px" title="Extra points when the post is recent (within the recency window)">
+          Recent <input id="sc-recent" type="number" style="width:60px;margin-left:4px"></label>
       </div>
+      <details style="margin-top:10px">
+        <summary class="muted" style="font-size:12.5px;cursor:pointer">What do these mean?</summary>
+        <ul class="muted" style="font-size:12.5px;margin:6px 0 0;padding-left:18px;line-height:1.6">
+          <li><b>Hiring intent</b> — the post is a real hiring request (not a job seeker). Every lead gets this.</li>
+          <li><b>Role match</b> — its job title matches one of your <i>Target roles</i>.</li>
+          <li><b>Skill match</b> — it mentions one of your <i>Target skills</i>.</li>
+          <li><b>Budget</b> — it states a budget or rate ($20k, $50/hr).</li>
+          <li><b>Company</b> — a company name was identified.</li>
+          <li><b>Recent</b> — the post is recent (within the recency window).</li>
+        </ul>
+        <p class="muted" style="font-size:12.5px;margin:6px 0 0">
+          The total is then scaled by classifier confidence. Priority: HIGH ≥ 80, MEDIUM ≥ 50, LOW below.
+        </p>
+      </details>
     </div>
     <div class="panel">
       <div class="row">
@@ -623,17 +652,30 @@ document.addEventListener('click', async (event) => {
 const csv = (a) => (a || []).join(', ');
 const parseCsv = (v) => v.split(',').map(x => x.trim()).filter(Boolean);
 
+function toggleCustom() {
+  $('cfg-custom-wrap').hidden = $('cfg-schedule').value !== 'custom';
+}
 async function loadSchedule() {
   const d = await api('/api/schedule');
   if (!d) return;
-  $('cfg-schedule').value = d.schedule;
+  const sch = d.schedule || 'twice_daily';
+  if (sch.startsWith('custom:')) {
+    $('cfg-schedule').value = 'custom';
+    $('cfg-custom-hours').value = sch.split(':')[1] || 3;
+  } else {
+    $('cfg-schedule').value = sch;
+  }
+  toggleCustom();
   $('schedule-status').textContent = d.last_run
     ? `Last harvest: ${d.last_run.slice(0,16).replace('T',' ')}` : 'Not run yet';
 }
+$('cfg-schedule').addEventListener('change', toggleCustom);
 $('cfg-schedule-save').addEventListener('click', async () => {
+  let schedule = $('cfg-schedule').value;
+  if (schedule === 'custom') schedule = 'custom:' + (parseInt($('cfg-custom-hours').value) || 3);
   const d = await api('/api/schedule', {
     method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ schedule: $('cfg-schedule').value }),
+    body: JSON.stringify({ schedule }),
   });
   if (d) { toast('Schedule saved'); loadSchedule(); }
 });

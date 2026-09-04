@@ -69,3 +69,20 @@ def test_generic_setting_roundtrip(db):
     set_setting(db, "foo", "bar")
     assert get_setting(db, "foo") == "bar"
     assert get_setting(db, "missing", "default") == "default"
+
+
+def test_custom_schedule(db):
+    set_schedule(db, "custom:3")
+    assert get_schedule(db) == "custom:3"
+    mark_harvest_run(db)
+    soon = datetime.utcnow() + timedelta(hours=2)
+    later = datetime.utcnow() + timedelta(hours=4)
+    assert is_harvest_due(db, now=soon) is False    # < 3h
+    assert is_harvest_due(db, now=later) is True     # > 3h
+
+
+def test_invalid_custom_schedule_rejected(db):
+    with pytest.raises(ValueError):
+        set_schedule(db, "custom:abc")
+    with pytest.raises(ValueError):
+        set_schedule(db, "custom:0")

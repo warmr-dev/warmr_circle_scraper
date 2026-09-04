@@ -48,10 +48,24 @@ def get_schedule(db: Database) -> str:
     return get_setting(db, KEY_SCHEDULE, DEFAULT_SCHEDULE) or DEFAULT_SCHEDULE
 
 
+def _schedule_hours(schedule: str) -> int | None:
+    """Hours for a schedule name, or a custom:<hours> value. None = off."""
+    if schedule.startswith("custom:"):
+        try:
+            hours = int(schedule.split(":", 1)[1])
+        except (ValueError, IndexError):
+            return None
+        return hours if hours > 0 else None
+    return SCHEDULE_INTERVALS.get(schedule)
+
+
 def set_schedule(db: Database, schedule: str) -> None:
-    if schedule not in SCHEDULE_INTERVALS:
+    if schedule.startswith("custom:"):
+        if _schedule_hours(schedule) is None:
+            raise ValueError(f"Invalid custom schedule {schedule!r}; use custom:<hours>")
+    elif schedule not in SCHEDULE_INTERVALS:
         raise ValueError(
-            f"Unknown schedule {schedule!r}; choose from {sorted(SCHEDULE_INTERVALS)}"
+            f"Unknown schedule {schedule!r}; choose from {sorted(SCHEDULE_INTERVALS)} or custom:<hours>"
         )
     set_setting(db, KEY_SCHEDULE, schedule)
 
@@ -72,7 +86,7 @@ def is_harvest_due(db: Database, *, now: datetime | None = None) -> bool:
     the interval against the recorded last-run time.
     """
     schedule = get_schedule(db)
-    hours = SCHEDULE_INTERVALS.get(schedule)
+    hours = _schedule_hours(schedule)
     if hours is None:
         return False  # 'off'
     now = now or datetime.now(timezone.utc).replace(tzinfo=None)
