@@ -488,6 +488,28 @@ $('t-run').addEventListener('click', async () => {
 });
 
 // --- Activity ---------------------------------------------------------
+// Build the small grey sub-line under an activity row from its detail JSON.
+function activityDetail(a) {
+  const d = a.detail || {};
+  const bits = [];
+  // Classify rows: score / confidence / matched patterns / quoted evidence.
+  if (d.rule_score !== undefined) bits.push(`score ${esc(d.rule_score)}`);
+  if (d.confidence !== undefined) bits.push(`conf ${esc(d.confidence)}`);
+  if (d.hiring_patterns && d.hiring_patterns !== 'none') bits.push(`matched: ${esc(d.hiring_patterns)}`);
+  if (d.evidence) bits.push(`“${esc(d.evidence)}”`);
+  // Read/harvest rows: spaces, posts, pages, leads saved.
+  if (d.spaces_total !== undefined) bits.push(`${esc(d.spaces_total)} space(s), reading ${esc(d.spaces_to_read)}`);
+  if (d.reading) bits.push(`spaces: ${esc(d.reading)}`);
+  if (d.pages_scanned !== undefined) bits.push(`${esc(d.pages_scanned)} page(s) scanned`);
+  if (d.raw_fetched !== undefined) bits.push(`${esc(d.raw_fetched)} fetched`);
+  if (d.posts_read !== undefined) bits.push(`${esc(d.posts_read)} post(s) read`);
+  if (d.leads_saved !== undefined) bits.push(`${esc(d.leads_saved)} lead(s) saved`);
+  if (d.already_seen) bits.push(`${esc(d.already_seen)} seen before`);
+  if (d.scope) bits.push(esc(d.scope));
+  if (d.errors) bits.push(`errors: ${esc(d.errors)}`);
+  return bits.length ? `<div class="muted" style="font-size:12px">${bits.join(' · ')}</div>` : '';
+}
+
 async function loadActivity() {
   const kind = $('a-kind').value;
   const data = await api('/api/activity?limit=200' + (kind ? `&kind=${kind}` : ''));
@@ -499,12 +521,7 @@ async function loadActivity() {
       <td class="muted">${esc((a.created_at || '').replace('T', ' ').slice(0, 16))}</td>
       <td class="level-${esc(a.level)}">${esc(a.kind)}</td>
       <td>${esc(a.community || '—')}</td>
-      <td>${esc(a.summary)}${a.detail && (a.detail.hiring_patterns || a.detail.evidence || a.detail.rule_score !== undefined)
-        ? `<div class="muted" style="font-size:12px">${
-            a.detail.rule_score !== undefined ? `score ${esc(a.detail.rule_score)}` : ''
-          }${a.detail.confidence !== undefined ? ` · conf ${esc(a.detail.confidence)}` : ''
-          }${a.detail.hiring_patterns && a.detail.hiring_patterns !== 'none' ? ` · matched: ${esc(a.detail.hiring_patterns)}` : ''
-          }${a.detail.evidence ? ` · “${esc(a.detail.evidence)}”` : ''}</div>` : ''}</td>
+      <td>${esc(a.summary)}${activityDetail(a)}</td>
       <td class="muted">${esc(a.decided_by || '—')}</td>
     </tr>`).join('')}</tbody></table>`
     : '<div class="empty">No activity yet.</div>';

@@ -173,9 +173,19 @@ def harvest(
             since = None  # never read before -> read everything available
         else:
             since = last_synced if last_synced > recency_cutoff else recency_cutoff
+        # Say what kind of read this is: a first full-backlog pass, or an
+        # incremental re-read only pulling posts newer than the watermark.
+        if since is None:
+            scope = "first read (full backlog)"
+        else:
+            scope = f"re-read (posts since {since.date()})"
         with db.session() as s:
-            log_activity(s, kind="read", community=slug,
-                         summary=f"Checking community {host} for public spaces")
+            log_activity(
+                s, kind="read", community=slug,
+                summary=f"Checking {host} for public spaces — {scope}",
+                detail={"host": host, "scope": scope,
+                        "since": since.isoformat() if since else "all"},
+            )
         try:
             reader = PublicReader(host)
             spaces = reader.list_spaces()
@@ -197,7 +207,19 @@ def harvest(
         records = []
         public_count = 0
         from circle_leads.scraper.public_reader import normalize_public_post
-        for sp in (spaces if all_spaces else _lead_spaces(spaces)):
+        targets = spaces if all_spaces else _lead_spaces(spaces)
+        with db.session() as s:
+            log_activity(
+                s, kind="read", community=slug,
+                summary=(
+                    f"{host}: {len(spaces)} space(s) found, reading "
+                    f"{len(targets)} {'(all)' if all_spaces else 'hiring-related'}"
+                ),
+                detail={"spaces_total": len(spaces),
+                        "spaces_to_read": len(targets),
+                        "reading": ", ".join(sp.name for sp in targets[:12])},
+            )
+        for sp in targets:
             # Guard each space: a malformed post or a classify error must not
             # abort the whole run and lose every community not yet processed.
             try:
@@ -234,9 +256,17 @@ def harvest(
                                     space_recs.append(crec)
                 records.extend(space_recs)
                 with db.session() as s:
-                    log_activity(s, kind="read", level="success", community=slug, space=sp.name,
-                                 summary=f"{host} / {sp.name}: read {len(space_recs)} public item(s)",
-                                 items_seen=len(space_recs))
+                    log_activity(
+                        s, kind="read", level="success", community=slug, space=sp.name,
+                        summary=(
+                            f"{host} / {sp.name}: read {len(space_recs)} public "
+                            f"post(s) (up to {pages} page(s))"
+                        ),
+                        detail={"space": sp.name, "posts": len(space_recs),
+                                "pages_scanned": pages,
+                                "raw_fetched": len(raw)},
+                        items_seen=len(space_recs),
+                    )
             except Exception as exc:  # noqa: BLE001 - one bad space must not kill the run
                 result.errors.append(f"{host}/{sp.name}: {exc.__class__.__name__}")
                 with db.session() as s:
@@ -252,12 +282,35 @@ def harvest(
         result.public_spaces += public_count
         result.posts_read += len(records)
 
+        community_leads = 0
+        already_seen = 0
         if records:
             triage_res = triage_records(
                 db, records, requirements, community=slug,
                 source_url=reader.base, use_llm=use_llm, verbose_log=verbose_log,
             )
-            result.leads_found += len(triage_res.leads)
+            community_leads = len(triage_res.leads)
+            already_seen = getattr(triage_res, "already_seen", 0)
+            result.leads_found += community_leads
+        # Per-community summary: how much was read here and how many leads it
+        # produced -- so the activity feed shows results community by community,
+        # not just one number at the very end.
+        with db.session() as s:
+            log_activity(
+                s, kind="read",
+                level="success" if community_leads else "info",
+                community=slug,
+                summary=(
+                    f"{host}: {public_count} public space(s), {len(records)} "
+                    f"post(s) read → {community_leads} lead(s) saved"
+                    + (f", {already_seen} seen before" if already_seen else "")
+                ),
+                detail={"host": host, "public_spaces": public_count,
+                        "posts_read": len(records), "leads_saved": community_leads,
+                        "already_seen": already_seen},
+                items_seen=len(records),
+                leads_found=community_leads,
+            )
         _mark_synced(db, slug)
 
     with db.session() as s:
