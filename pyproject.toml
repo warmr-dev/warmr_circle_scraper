@@ -31,5 +31,8 @@ circle-leads = "circle_leads.cli.main:cli"
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
+[tool.setuptools.packages.find]
+include = ["circle_leads*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
