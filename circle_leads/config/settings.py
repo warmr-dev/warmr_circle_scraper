@@ -60,6 +60,9 @@ class Requirements(BaseModel):
     harvest_recency_days: int = 30
     # Read every public space, not only hiring-named ones.
     harvest_all_spaces: bool = False
+    # How many of your target roles/skills to search each harvest. More = more
+    # coverage but more Exa calls (each niche runs ~18 searches). 0 = all.
+    max_search_niches: int = 12
     llm_escalation_threshold: int = 55
     keywords: Keywords = Field(default_factory=Keywords)
     scoring: ScoringWeights = Field(default_factory=ScoringWeights)
@@ -109,6 +112,7 @@ def requirements_to_dict(req: "Requirements") -> dict:
         "minimum_confidence": req.minimum_confidence,
         "harvest_recency_days": req.harvest_recency_days,
         "harvest_all_spaces": req.harvest_all_spaces,
+        "max_search_niches": req.max_search_niches,
         "llm_escalation_threshold": req.llm_escalation_threshold,
         "keywords": {
             "include": list(req.keywords.include),

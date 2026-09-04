@@ -255,7 +255,12 @@
           <input id="cfg-recency" type="number" min="1" max="365" style="width:70px;margin-left:6px"> days</label>
         <label class="muted" style="font-size:13px;display:flex;align-items:center;gap:6px">
           <input id="cfg-all-spaces" type="checkbox" style="width:auto"> Read all public spaces (not just hiring-named)</label>
+        <label style="font-size:13px" title="How many of your target roles/skills to search each harvest. More = more coverage but more search calls. 0 = search all.">
+          Search top <input id="cfg-max-niches" type="number" min="0" max="50" style="width:60px;margin:0 4px"> roles</label>
       </div>
+      <p class="muted" style="font-size:12px;margin-top:6px">
+        Search uses your <b>Target roles</b> above as the niches (plus a few skills). Add roles → they get searched.
+      </p>
       <p class="muted" style="font-size:12.5px;margin:12px 0 6px">
         Each lead scores 0–100. These are the points added when a signal is present, then the total is scaled by confidence:
       </p>
@@ -695,6 +700,7 @@ async function loadConfig() {
   $('cfg-exclude-seekers').checked = c.exclude_job_seekers;
   $('cfg-recency').value = c.harvest_recency_days;
   $('cfg-all-spaces').checked = c.harvest_all_spaces;
+  $('cfg-max-niches').value = c.max_search_niches;
   $('sc-hiring').value = c.scoring.hiring_intent;
   $('sc-role').value = c.scoring.target_role_match;
   $('sc-skill').value = c.scoring.target_skill_match;
@@ -712,6 +718,7 @@ $('cfg-save').addEventListener('click', async () => {
     minimum_confidence: parseFloat($('cfg-conf').value),
     harvest_recency_days: parseInt($('cfg-recency').value),
     harvest_all_spaces: $('cfg-all-spaces').checked,
+    max_search_niches: parseInt($('cfg-max-niches').value),
     llm_escalation_threshold: parseInt($('cfg-llm').value),
     keywords: { include: parseCsv($('cfg-kw-include').value), exclude: parseCsv($('cfg-kw-exclude').value) },
     priority_thresholds: { high: parseInt($('cfg-high').value), medium: parseInt($('cfg-med').value) },

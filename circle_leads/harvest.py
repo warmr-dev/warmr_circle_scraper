@@ -74,6 +74,27 @@ def _community_hosts(db: Database, *, limit: int) -> list[tuple[str, str, object
         return out
 
 
+def _niches_from_config(requirements) -> list[str]:
+    """Build search niches from the config's target roles (and a few skills).
+
+    So the roles you set in the dashboard's Config tab actually drive
+    discovery. Roles like "Backend Developer" become good search phrases;
+    a couple of skills are appended for breadth. Falls back to DEFAULT_NICHES.
+    """
+    roles = [r for r in (requirements.target_roles or []) if r.strip()]
+    skills = [s for s in (requirements.target_skills or []) if s.strip()]
+    # All roles are searched (they're the primary signal); a few skill angles
+    # are appended. The total is capped by max_search_niches to bound Exa cost;
+    # 0 means no cap (search everything).
+    niches: list[str] = list(roles)
+    for sk in skills[:3]:
+        niches.append(f"{sk} developer")
+    cap = getattr(requirements, "max_search_niches", 12)
+    if cap and cap > 0:
+        niches = niches[:cap]
+    return niches or DEFAULT_NICHES
+
+
 def _existing_community_urls(db: Database, *, limit: int) -> list[str]:
     """Top existing community subdomains, to seed findSimilar expansion."""
     with db.session() as s:
@@ -117,7 +138,7 @@ def harvest(
       use it to focus a run purely on fresh discoveries.
     - ``recency_days`` bounds how far back to look for a never-read community.
     """
-    niches = niches or DEFAULT_NICHES
+    niches = niches or _niches_from_config(requirements)
     result = HarvestResult(niches=niches)
 
     # --- 1. Discover new communities via search --------------------------

@@ -54,6 +54,7 @@ exclude_job_seekers: true
 minimum_confidence: 0.6
 harvest_recency_days: 30
 harvest_all_spaces: false
+max_search_niches: 12
 llm_escalation_threshold: 55
 keywords:
   include:
