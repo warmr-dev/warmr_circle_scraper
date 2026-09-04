@@ -18,7 +18,11 @@ from dataclasses import dataclass, field
 from sqlalchemy import select
 
 from circle_leads.discovery.finder import RankedCommunity
-from circle_leads.discovery.validate_finds import is_subdomain_community, validate_url
+from circle_leads.discovery.validate_finds import (
+    is_subdomain_community,
+    is_interstitial_title,
+    validate_url,
+)
 from circle_leads.storage.activity import log_activity
 from circle_leads.storage.database import Database
 from circle_leads.storage.models import AccessState, Community, PermissionStatus
@@ -120,6 +124,11 @@ def persist_finds(
                     changed = True
                 if rc.name and not existing.name:
                     existing.name = rc.name
+                    changed = True
+                # Repair a name that a bot-check page corrupted on an earlier
+                # run (e.g. "Verifying you are a human" from a datacenter IP).
+                elif existing.name and is_interstitial_title(existing.name):
+                    existing.name = rc.name or rc.slug
                     changed = True
                 if rc.price_label and not existing.price_label:
                     existing.price_label = rc.price_label

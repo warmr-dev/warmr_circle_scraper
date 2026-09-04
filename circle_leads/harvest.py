@@ -165,12 +165,14 @@ def harvest(
     for host, slug, last_synced in hosts:
         if only_new and last_synced is not None:
             continue  # caller asked to read only never-seen communities
-        # Only fetch posts newer than the recency window, and newer than the
-        # last time this community was read (whichever is later). A never-read
-        # community uses the recency window alone.
-        since = recency_cutoff
-        if last_synced is not None and last_synced > recency_cutoff:
-            since = last_synced
+        # First read of a community: pull its whole backlog (bounded by
+        # max_pages), because its best hiring posts are often months old and a
+        # tight recency window would skip them. Only on *re-reads* do we apply
+        # the incremental watermark, so we don't re-fetch history every run.
+        if last_synced is None:
+            since = None  # never read before -> read everything available
+        else:
+            since = last_synced if last_synced > recency_cutoff else recency_cutoff
         with db.session() as s:
             log_activity(s, kind="read", community=slug,
                          summary=f"Checking community {host} for public spaces")
@@ -199,7 +201,10 @@ def harvest(
             # Guard each space: a malformed post or a classify error must not
             # abort the whole run and lose every community not yet processed.
             try:
-                was_public, raw = reader.read_space(sp.id, max_pages=max_pages, since=since)
+                # Read deeper on a first, full-backlog pass; a light re-read
+                # (incremental watermark) only needs the top few pages.
+                pages = max(max_pages, 10) if since is None else max_pages
+                was_public, raw = reader.read_space(sp.id, max_pages=pages, since=since)
                 sp.is_public = was_public
                 if not was_public:
                     with db.session() as s:

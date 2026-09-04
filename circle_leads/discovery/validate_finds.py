@@ -53,13 +53,36 @@ class Validation:
     reason: str = ""
 
 
+# Titles served by a bot-check / interstitial page rather than the real site.
+# A datacenter IP (e.g. Render) often gets these instead of the community page,
+# so the extracted title is the challenge text, not the community's name. Reject
+# them so the caller keeps the slug-derived name instead of storing junk.
+_INTERSTITIAL_TITLE_RX = re.compile(
+    r"verif\w*\s+you\s+are\s+(a\s+)?human"
+    r"|just\s+a\s+moment"
+    r"|attention\s+required"
+    r"|checking\s+your\s+browser"
+    r"|access\s+denied"
+    r"|are\s+you\s+(a\s+)?human",
+    re.I,
+)
+
+
+def is_interstitial_title(title: str | None) -> bool:
+    """True if a title is a bot-check / interstitial page's text, not a real name."""
+    return bool(title and _INTERSTITIAL_TITLE_RX.search(title))
+
+
 def _title(html: str) -> str | None:
     m = re.search(r"<title[^>]*>(.*?)</title>", html, re.I | re.S)
     if not m:
         return None
     import html as _html
 
-    return _html.unescape(re.sub(r"\s+", " ", m.group(1)).strip())[:120] or None
+    title = _html.unescape(re.sub(r"\s+", " ", m.group(1)).strip())[:120] or None
+    if title and _INTERSTITIAL_TITLE_RX.search(title):
+        return None  # bot-check page, not the real title
+    return title
 
 
 
