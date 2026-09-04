@@ -22,7 +22,10 @@ from sqlalchemy import select
 
 from circle_leads.config.settings import Requirements
 from circle_leads.discovery.persist import persist_finds
-from circle_leads.discovery.validate_finds import is_subdomain_community
+from circle_leads.discovery.validate_finds import (
+    is_interstitial_title,
+    is_subdomain_community,
+)
 from circle_leads.discovery.web_search import discover_by_search
 from circle_leads.scraper.public_reader import PublicReader, discover_and_read_public
 from circle_leads.storage.activity import log_activity
@@ -202,6 +205,21 @@ def harvest(
                              summary=f"{host}: no public space list (fully private)")
             _mark_synced(db, slug)
             continue
+
+        # Set/repair the community's real display name from the JSON API. This
+        # avoids the marketing HTML page, which a datacenter IP gets served as a
+        # "Verifying you are a human" bot-check -- so the name never gets that
+        # junk. Only fills a missing/interstitial name; a good name is left be.
+        try:
+            real_name = reader.community_name()
+        except Exception:  # noqa: BLE001 - name is cosmetic; never fail the read
+            real_name = None
+        if real_name:
+            with db.session() as s:
+                c = s.scalar(select(Community).where(Community.slug == slug))
+                if c is not None and (not c.name or c.name == slug
+                                      or is_interstitial_title(c.name)):
+                    c.name = real_name
 
         # Read each public lead-space, logging what is checked and read.
         records = []

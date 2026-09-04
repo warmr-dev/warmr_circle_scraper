@@ -76,6 +76,22 @@ class PublicReader:
         except ValueError:
             return 200, None
 
+    def community_name(self) -> str | None:
+        """The community's real display name, from the public JSON API.
+
+        Uses ``/internal_api/communities/current`` -- the same unauthenticated
+        JSON API used to read posts -- so it works where fetching the marketing
+        HTML page returns a "Verifying you are a human" bot-check instead.
+        """
+        status, payload = self._get("/internal_api/communities/current")
+        if status != 200 or not isinstance(payload, dict):
+            return None
+        for key in ("name", "community_name", "title"):
+            val = payload.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()[:120]
+        return None
+
     def list_spaces(self) -> list[PublicSpace]:
         """List the community's spaces, if its space list is public."""
         status, payload = self._get("/internal_api/spaces")
