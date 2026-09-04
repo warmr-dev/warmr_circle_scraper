@@ -701,7 +701,7 @@ async function loadConfig() {
   $('sc-budget').value = c.scoring.budget_mentioned;
   $('sc-company').value = c.scoring.company_identified;
   $('sc-recent').value = c.scoring.recent_post;
-  $('cfg-status').textContent = c.llm_available ? `AI on (${c.llm_provider || 'LLM'})` : 'AI off (set OPENAI_API_KEY or ANTHROPIC_API_KEY)';
+  $('cfg-status').textContent = (c.llm_available ? `AI on (${c.llm_provider || 'LLM'})` : 'AI off (set OPENAI_API_KEY)') + `  ·  Search: ${c.search_backend || '?'}`;
 }
 
 $('cfg-save').addEventListener('click', async () => {

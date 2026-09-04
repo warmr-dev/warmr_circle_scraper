@@ -551,6 +551,12 @@ def create_app(db_url: str | None = None, config_path: str | None = None) -> Fas
             "OpenAI" if os.environ.get("OPENAI_API_KEY")
             else "Anthropic" if os.environ.get("ANTHROPIC_API_KEY") else None
         )
+        data["search_backend"] = (
+            "Exa" if os.environ.get("EXA_API_KEY")
+            else "Brave" if os.environ.get("BRAVE_API_KEY")
+            else "SerpAPI" if os.environ.get("SERPAPI_API_KEY")
+            else "DuckDuckGo (keyless — fewer results; set EXA_API_KEY)"
+        )
         return data
 
     @app.post("/api/config")
