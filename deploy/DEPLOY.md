@@ -99,6 +99,34 @@ Vercel's serverless model (functions time out in seconds and hold no state).
 be to split the dashboard into a static SPA (Vercel) talking to the FastAPI API
 on Railway over CORS -- a real refactor, not a config change.
 
+### If you try Vercel anyway (build error: "does not define a top-level app")
+`main.py` at the repo root is the **CLI** entrypoint (`if __name__ ==
+"__main__": main()`), not a FastAPI app, so Vercel's Python/FastAPI framework
+preset can't find an `app` instance there and the build fails immediately.
+`pyproject.toml` now sets `tool.vercel.entrypoint =
+"circle_leads.web.vercel_app:app"`, which points Vercel at
+`circle_leads/web/vercel_app.py` (a thin module that just calls
+`create_app()`). That fixes the *build* error, but does not make the app work
+correctly on Vercel:
+
+- `create_app()` calls `get_password()` at import time, so if
+  `DASHBOARD_PASSWORD` (8+ chars) isn't set as a Vercel **Environment
+  Variable** (available at both Build and Runtime), the import itself raises
+  and the build/function fails with a different error.
+- Without `CIRCLE_LEADS_DB` pointing at an external Postgres (e.g. Supabase),
+  `Database(None)` tries to create a local `data/` directory, which fails on
+  Vercel's read-only filesystem.
+- Even with both of those set, sessions (`SessionManager`) and the background
+  job registry (`JobRegistry` in `circle_leads/web/jobs.py`) are plain
+  in-memory Python state and threads. They do not survive across cold starts
+  or get shared across concurrent function instances, and any job started
+  from `/api/jobs/*` (search, harvest, feed read) will very likely be killed
+  when the function's execution window ends before it finishes.
+
+In short: this unblocks the specific build error, but Vercel is still the
+wrong platform to actually run this dashboard on. Use Render/Railway above
+for anything beyond a quick experiment.
+
 ## The database
 
 - **Use Postgres.** Point `CIRCLE_LEADS_DB` at its connection URL
