@@ -44,7 +44,7 @@ def create_app(db_url: str | None = None, config_path: str | None = None) -> Fas
     # Fail fast and loudly rather than serving other people's posts openly.
     get_password()
 
-    app = FastAPI(title="Circle Leads", docs_url=None, redoc_url=None)
+    app = FastAPI(title="Warmr Circle", docs_url=None, redoc_url=None)
     db = Database(db_url or os.environ.get("CIRCLE_LEADS_DB") or None)
     requirements_holder = {"req": load_requirements(config_path)}
     config_file = config_path
@@ -906,5 +906,5 @@ def run(host: str = "127.0.0.1", port: int = 8000, db_url: str | None = None) ->
             "machine.\n  It serves other people's posts. Use a tunnel or a "
             "firewall rather than a public bind.\n"
         )
-    print(f"\n  Circle Leads dashboard → http://{host}:{port}\n")
+    print(f"\n  Warmr Circle dashboard → http://{host}:{port}\n")
     uvicorn.run(app, host=host, port=port, log_level="warning")
