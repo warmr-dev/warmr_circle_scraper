@@ -10,6 +10,14 @@ dependencies = [
     "pyyaml>=6.0",
     "click>=8.1",
     "tenacity>=8.3",
+    # Web dashboard (also listed under optional-dependencies.web so
+    # `pip install -e '.[web]'` keeps working). Required at the top level so
+    # Vercel's FastAPI builder installs FastAPI instead of only detecting it.
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "python-multipart>=0.0.9",
+    "itsdangerous>=2.1",
+    "psycopg[binary]>=3.1",
 ]
 
 [project.optional-dependencies]
@@ -34,6 +42,14 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["circle_leads*"]
+
+[tool.setuptools.package-data]
+circle_leads = ["web/static/**/*", "config/*.yaml"]
+
+# Vercel auto-detects FastAPI from pyproject.toml, then looks for a top-level
+# `app` in main.py (the CLI). Point it at the dashboard ASGI export instead.
+[tool.vercel]
+entrypoint = "app:app"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
