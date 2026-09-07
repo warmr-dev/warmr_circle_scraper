@@ -27,6 +27,22 @@ from circle_leads.storage.models import (
 DEFAULT_DB_PATH = "data/circle_leads.db"
 
 
+def _sanitize_db_url(url: str) -> str:
+    """Clean common malformed database URLs from hosting env vars.
+
+    - Strip surrounding whitespace/quotes and stray newlines (a pasted env var
+      often carries them).
+    - Fix an EMPTY port: "host:/db" or "host:?..." -> "host/db". This happens
+      when a URL is built from parts and the PORT variable is unset (e.g.
+      "...@$HOST:$PORT/db" with $PORT blank), which SQLAlchemy 2.x rejects with
+      "invalid literal for int()" while parsing the port.
+    """
+    url = url.strip().strip('"').strip("'").replace("\n", "").replace("\r", "")
+    # Empty port between host and the path/query/end: the colon with no digits.
+    url = re.sub(r"(@[^/:?#]+):(?=[/?#]|$)", r"\1", url)
+    return url
+
+
 class Database:
     def __init__(self, url: str | None = None):
         if url is None:
@@ -37,6 +53,7 @@ class Database:
             if p.parent and str(p.parent) not in ("", "."):
                 p.parent.mkdir(parents=True, exist_ok=True)
         else:
+            url = _sanitize_db_url(url)
             # We ship psycopg (v3), but SQLAlchemy defaults a bare
             # "postgresql://" URL to psycopg2. Point it at the v3 driver so a
             # standard Postgres URL (e.g. from Supabase/Render) works as-is.

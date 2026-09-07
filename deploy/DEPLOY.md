@@ -71,13 +71,33 @@ Env:   CIRCLE_LEADS_DB, DASHBOARD_PASSWORD, DASHBOARD_SECRET_KEY,
 ```
 
 **Service 2 — worker (the harvest):**
-- If the platform has scheduled jobs / cron, run a one-shot on a schedule:
-  ```
-  Start: circle-leads --db "$CIRCLE_LEADS_DB" harvest --use-llm --verbose-log
-  Env:   CIRCLE_LEADS_DB, EXA_API_KEY, OPENAI_API_KEY
-  ```
-- If it only supports always-on services, loop it in the container instead, e.g.
-  a shell that runs `harvest` then `sleep 43200` (12h). Prefer real cron.
+
+The recommended shape on Railway is an **always-on worker** that reads the
+dashboard-set schedule from the DB and harvests when due:
+```
+Start: circle-leads --db "$CIRCLE_LEADS_DB" harvest --loop --poll-seconds 60
+Env:   CIRCLE_LEADS_DB, EXA_API_KEY, OPENAI_API_KEY
+```
+`--loop` runs forever: every `--poll-seconds` it checks `is_harvest_due` (the
+interval you picked in the dashboard Config tab, down to every 5 min) and only
+harvests when due. So the worker is a *fixed* frequent poller; the *actual*
+cadence is controlled from the dashboard with no redeploy. It needs no HTTP
+port and no external pinger.
+
+Alternatives:
+- Platform cron: run one-shot `circle-leads --db "$CIRCLE_LEADS_DB" harvest
+  --scheduled` on a frequent cron (it self-skips when not due).
+- No separate worker at all: run only the web service and hit its
+  `/api/tick?token=...` from an external pinger (see the Render section).
+
+### Why the dashboard can't go on Vercel
+The dashboard is a **persistent FastAPI server** with in-process background
+jobs, a pooled HTTP session, and a long-running harvest -- none of which fit
+Vercel's serverless model (functions time out in seconds and hold no state).
+"Worker on Railway, dashboard on Vercel" is therefore not possible as-is: put
+**both** on Railway (two services above). The only way to involve Vercel would
+be to split the dashboard into a static SPA (Vercel) talking to the FastAPI API
+on Railway over CORS -- a real refactor, not a config change.
 
 ## The database
 

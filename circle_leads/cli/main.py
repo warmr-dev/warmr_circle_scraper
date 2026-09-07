@@ -583,8 +583,12 @@ def read_public_cmd(ctx, community_host, space_ids, list_spaces, all_spaces, com
 @click.option("--all-spaces", is_flag=True, help="Read every public space, not just hiring-related ones.")
 @click.option("--scheduled", is_flag=True,
               help="Only run if the dashboard-set schedule interval has elapsed (for the worker/cron).")
+@click.option("--loop", is_flag=True,
+              help="Run forever as a worker: sleep and re-check the schedule (implies --scheduled).")
+@click.option("--poll-seconds", type=int, default=60, show_default=True,
+              help="With --loop, seconds to sleep between schedule checks.")
 @click.pass_context
-def harvest_cmd(ctx, niches, no_search, only_new, max_communities, use_llm, verbose_log, comments, recency_days, all_spaces, scheduled):
+def harvest_cmd(ctx, niches, no_search, only_new, max_communities, use_llm, verbose_log, comments, recency_days, all_spaces, scheduled, loop, poll_seconds):
     """Discover public communities and read them for leads -- fully automatic.
 
     Chains it all: search niches (Exa), save new communities, then read every
@@ -596,41 +600,72 @@ def harvest_cmd(ctx, niches, no_search, only_new, max_communities, use_llm, verb
       circle-leads harvest "AI founders" "fintech"      # custom niches
       circle-leads harvest --only-new                   # skip already-read ones
     """
+    import time as _time
     from circle_leads.harvest import harvest
     from circle_leads.storage.settings_store import (
         is_harvest_due, mark_harvest_run, get_schedule,
     )
 
-    if scheduled:
-        if not is_harvest_due(ctx.obj["db"]):
+    # --loop makes this a standalone worker: it repeatedly checks the
+    # dashboard-set schedule and harvests when due. It implies --scheduled.
+    if loop:
+        scheduled = True
+
+    def _run_once() -> bool:
+        """One pass. Returns True if a harvest actually ran (was due)."""
+        nonlocal use_llm
+        if scheduled:
+            if not is_harvest_due(ctx.obj["db"]):
+                return False
+            mark_harvest_run(ctx.obj["db"])
+            # Unattended: escalate ambiguous posts to the LLM if a key is set.
+            if not use_llm and os.environ.get("OPENAI_API_KEY"):
+                use_llm = True
+
+        click.echo("Harvesting: searching + reading public communities...", err=True)
+        res = harvest(
+            ctx.obj["db"], ctx.obj["requirements"],
+            niches=list(niches) or None,
+            search=not no_search, only_new=only_new,
+            max_communities=max_communities, use_llm=use_llm, verbose_log=verbose_log,
+            include_comments=comments, recency_days=recency_days, all_spaces=all_spaces,
+        )
+        click.echo(
+            f"\nDiscovered {res.new_communities} new community/communities.\n"
+            f"Read {res.communities_read} community/communities "
+            f"({res.public_spaces} public spaces, {res.posts_read} posts).\n"
+            f"Found {res.leads_found} lead(s)."
+        )
+        for err in res.errors[:8]:
+            click.echo(f"  ! {err}", err=True)
+        return True
+
+    if not loop:
+        ran = _run_once()
+        if scheduled and not ran:
             click.echo(
                 f"Harvest not due yet (schedule: {get_schedule(ctx.obj['db'])}). Skipping.",
                 err=True,
             )
-            return
-        mark_harvest_run(ctx.obj["db"])
-        # On a scheduled run, escalate ambiguous posts to the LLM whenever a
-        # key is present -- an unattended run should classify as well as it can.
-        if not use_llm and os.environ.get("OPENAI_API_KEY"):
-            use_llm = True
+        if ran:
+            click.echo("\nReview leads in the dashboard, or `circle-leads search`.")
+        return
 
-    click.echo("Harvesting: searching + reading public communities...", err=True)
-    res = harvest(
-        ctx.obj["db"], ctx.obj["requirements"],
-        niches=list(niches) or None,
-        search=not no_search, only_new=only_new,
-        max_communities=max_communities, use_llm=use_llm, verbose_log=verbose_log,
-        include_comments=comments, recency_days=recency_days, all_spaces=all_spaces,
-    )
+    # Worker loop: sleep between checks; a harvest fires only when due.
     click.echo(
-        f"\nDiscovered {res.new_communities} new community/communities.\n"
-        f"Read {res.communities_read} community/communities "
-        f"({res.public_spaces} public spaces, {res.posts_read} posts).\n"
-        f"Found {res.leads_found} lead(s)."
+        f"Worker started. Schedule: {get_schedule(ctx.obj['db'])}. "
+        f"Polling every {poll_seconds}s. Ctrl-C to stop.",
+        err=True,
     )
-    for err in res.errors[:8]:
-        click.echo(f"  ! {err}", err=True)
-    click.echo("\nReview leads in the dashboard, or `circle-leads search`.")
+    while True:
+        try:
+            _run_once()
+        except KeyboardInterrupt:
+            click.echo("Worker stopped.", err=True)
+            return
+        except Exception as exc:  # noqa: BLE001 - a worker must survive one bad run
+            click.echo(f"  ! harvest error: {exc.__class__.__name__}: {exc}", err=True)
+        _time.sleep(max(5, poll_seconds))
 
 
 
