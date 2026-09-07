@@ -76,6 +76,17 @@ class BackendClient:
         except requests.RequestException:
             return False
 
+    def worklist(self) -> list[dict]:
+        """Ask the backend which communities to scan, highest priority first.
+
+        The dashboard is the control plane: this is how a priority change there
+        reaches the connector without touching the command line.
+        """
+        r = self._http.get(self._url("/api/connector/worklist"),
+                           headers=self._headers(), timeout=self.timeout)
+        r.raise_for_status()
+        return r.json().get("communities") or []
+
     def report_connection(self, **fields) -> None:
         self._http.post(self._url("/api/connector/connections"),
                         json=fields, headers=self._headers(), timeout=self.timeout).raise_for_status()

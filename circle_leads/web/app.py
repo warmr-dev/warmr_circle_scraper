@@ -18,7 +18,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from sqlalchemy import func, select
 
 from circle_leads.config.settings import (
-    load_requirements, requirements_to_dict, save_requirements,
+    load_requirements, requirements_to_dict,
 )
 from circle_leads.export.exporters import query_leads
 from circle_leads.storage.activity import log_activity, recent_activity
@@ -46,8 +46,28 @@ def create_app(db_url: str | None = None, config_path: str | None = None) -> Fas
 
     app = FastAPI(title="Circle Leads", docs_url=None, redoc_url=None)
     db = Database(db_url or os.environ.get("CIRCLE_LEADS_DB") or None)
-    requirements_holder = {"req": load_requirements(config_path)}
     config_file = config_path
+
+    def _load_effective_requirements():
+        """Packaged defaults, with any DB-stored dashboard edits merged on top.
+
+        Config is persisted in the DB (writable) rather than the packaged YAML
+        (read-only on serverless), so an override wins when present.
+        """
+        from circle_leads.config.settings import validate_requirements
+        from circle_leads.storage.settings_store import get_requirements_override
+        try:
+            override = get_requirements_override(db)
+        except Exception:  # noqa: BLE001 - a fresh/empty DB just means no override
+            override = None
+        if override:
+            try:
+                return validate_requirements(override)
+            except Exception:  # noqa: BLE001 - a bad stored blob must not brick startup
+                pass
+        return load_requirements(config_path)
+
+    requirements_holder = {"req": _load_effective_requirements()}
     sessions = SessionManager()
     jobs = JobRegistry()
 
@@ -323,6 +343,30 @@ def create_app(db_url: str | None = None, config_path: str | None = None) -> Fas
         """Connector liveness ping. Updates last_seen (done in verify)."""
         return {"ok": True, "connector_id": connector.id}
 
+    @app.get("/api/connector/worklist")
+    def connector_worklist(connector=Depends(require_connector)) -> dict[str, Any]:
+        """The communities this connector should scan, highest priority first.
+
+        This is what makes the dashboard the control plane: the connector asks
+        the server what to work on instead of being handed a host list on the
+        command line. PAUSED communities are withheld entirely.
+        """
+        from circle_leads.storage.models import (
+            CircleConnection, ConnectionPriority, SCAN_ORDER,
+        )
+        with db.session() as s:
+            rows = s.scalars(
+                select(CircleConnection).where(
+                    CircleConnection.priority != ConnectionPriority.PAUSED.value
+                )
+            ).all()
+            rows = sorted(rows, key=lambda c: (SCAN_ORDER.get(c.priority, 1), c.host))
+            return {"communities": [
+                {"host": c.host, "priority": c.priority, "state": c.state,
+                 "last_sync_at": c.last_sync_at.isoformat() if c.last_sync_at else None}
+                for c in rows
+            ]}
+
     @app.get("/api/connectors")
     def list_connectors(_: None = Depends(require_auth)) -> dict[str, Any]:
         from circle_leads.storage.models import Connector
@@ -403,38 +447,103 @@ def create_app(db_url: str | None = None, config_path: str | None = None) -> Fas
         )
         return {"ok": True, "leads": len(res.leads), "posts": res.total_posts}
 
+    def _clean_host(raw: Any) -> str:
+        """Normalize a community host, or raise if it isn't one."""
+        host = (str(raw or "").strip().lower()
+                .replace("https://", "").replace("http://", "").strip("/"))
+        host = host.split("/")[0]  # tolerate a pasted deep link
+        if not host or "." not in host:
+            raise HTTPException(400, "Enter a community host, e.g. altea.circle.so")
+        return host
+
+    def _connection_dict(c) -> dict[str, Any]:
+        return {
+            "id": c.id, "host": c.host, "name": c.name,
+            "member_label": c.member_label, "state": c.state,
+            "state_detail": c.state_detail,
+            "priority": c.priority, "notes": c.notes,
+            "spaces_total": c.spaces_total, "spaces_readable": c.spaces_readable,
+            "last_sync_at": c.last_sync_at.isoformat() if c.last_sync_at else None,
+        }
+
     @app.get("/api/connections")
     def list_connections(_: None = Depends(require_auth)) -> dict[str, Any]:
-        from circle_leads.storage.models import CircleConnection
+        """List connected private communities in scan order: VIP first."""
+        from circle_leads.storage.models import CircleConnection, SCAN_ORDER
         with db.session() as s:
-            rows = s.scalars(
-                select(CircleConnection).order_by(CircleConnection.host)
-            ).all()
-            return {"connections": [
-                {"id": c.id, "host": c.host, "name": c.name,
-                 "member_label": c.member_label, "state": c.state,
-                 "state_detail": c.state_detail,
-                 "spaces_total": c.spaces_total, "spaces_readable": c.spaces_readable,
-                 "last_sync_at": c.last_sync_at.isoformat() if c.last_sync_at else None}
-                for c in rows
-            ]}
+            rows = s.scalars(select(CircleConnection)).all()
+            # Sort in Python so the ordering matches SCAN_ORDER exactly rather
+            # than the alphabetical accident of the stored string.
+            rows = sorted(rows, key=lambda c: (SCAN_ORDER.get(c.priority, 1), c.host))
+            return {"connections": [_connection_dict(c) for c in rows]}
 
     @app.post("/api/connections/add")
     def add_connection(payload: dict, _: None = Depends(require_auth)) -> dict[str, Any]:
         """Dashboard: register a private community host to monitor. The actual
         login happens locally in the connector; this just creates the record."""
-        from circle_leads.storage.models import CircleConnection, ConnectionState
-        host = str(payload.get("host") or "").strip().lower().replace("https://", "").strip("/")
-        if not host or "." not in host:
-            raise HTTPException(400, "Enter a community host, e.g. altea.circle.so")
+        from circle_leads.storage.models import (
+            CircleConnection, ConnectionPriority, ConnectionState,
+        )
+        host = _clean_host(payload.get("host"))
+        priority = str(payload.get("priority") or ConnectionPriority.NORMAL.value).lower()
+        if priority not in ConnectionPriority.values():
+            raise HTTPException(400, f"Unknown priority {priority!r}.")
         with db.session() as s:
             conn = s.scalar(select(CircleConnection).where(CircleConnection.host == host))
+            created = conn is None
             if conn is None:
                 conn = CircleConnection(host=host, state=ConnectionState.NOT_CONNECTED.value)
                 s.add(conn)
+            # Re-adding an existing host updates its settings rather than
+            # silently ignoring what you typed.
+            conn.priority = priority
+            if payload.get("name"):
+                conn.name = str(payload["name"])[:512]
+            if payload.get("notes") is not None:
+                conn.notes = str(payload["notes"])[:2000] or None
+            log_activity(
+                s, kind="review", community=host.split(".")[0],
+                summary=(f"Private community {host} "
+                         f"{'added' if created else 'updated'} "
+                         f"({priority}; awaiting local login)"),
+            )
+        return {"ok": True, "host": host, "priority": priority, "created": created}
+
+    @app.post("/api/connections/{host}/priority")
+    def set_connection_priority(
+        host: str, payload: dict, _: None = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Set a community's scan priority (vip / normal / low / paused)."""
+        from circle_leads.storage.models import CircleConnection, ConnectionPriority
+        host = _clean_host(host)
+        priority = str((payload or {}).get("priority") or "").lower()
+        if priority not in ConnectionPriority.values():
+            raise HTTPException(
+                400, f"priority must be one of {sorted(ConnectionPriority.values())}."
+            )
+        with db.session() as s:
+            conn = s.scalar(select(CircleConnection).where(CircleConnection.host == host))
+            if conn is None:
+                raise HTTPException(404, f"{host} is not a connected community.")
+            conn.priority = priority
             log_activity(s, kind="review", community=host.split(".")[0],
-                         summary=f"Private community {host} added (awaiting local login)")
-        return {"ok": True, "host": host}
+                         summary=f"{host} scan priority set to {priority}")
+        return {"ok": True, "host": host, "priority": priority}
+
+    @app.post("/api/connections/{host}/notes")
+    def set_connection_notes(
+        host: str, payload: dict, _: None = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Attach a private note to a community (why it matters, who you know)."""
+        from circle_leads.storage.models import CircleConnection
+        host = _clean_host(host)
+        notes = str((payload or {}).get("notes") or "")[:2000]
+        with db.session() as s:
+            conn = s.scalar(select(CircleConnection).where(CircleConnection.host == host))
+            if conn is None:
+                raise HTTPException(404, f"{host} is not a connected community.")
+            conn.notes = notes or None
+        return {"ok": True, "host": host, "notes": notes or None}
 
     @app.post("/api/connections/{host}/remove")
     def remove_connection(host: str, _: None = Depends(require_auth)) -> dict[str, Any]:
@@ -868,13 +977,32 @@ def create_app(db_url: str | None = None, config_path: str | None = None) -> Fas
         payload.pop("llm_available", None)
         for locked in ("excluded_content", "rate_limit"):
             payload[locked] = current[locked]
+        # Persist to the DB (writable) rather than the packaged YAML, which is
+        # read-only on a serverless deploy (/var/task -> Errno 30).
+        from circle_leads.config.settings import validate_requirements
+        from circle_leads.storage.settings_store import set_requirements_override
         try:
-            new_req = save_requirements(payload, config_file)
+            new_req = validate_requirements(payload)
         except Exception as exc:  # noqa: BLE001 - report validation errors to UI
             raise HTTPException(400, f"Invalid config: {exc}")
+        # Store the canonical serialized form so it round-trips exactly.
+        canonical = requirements_to_dict(new_req)
+        set_requirements_override(db, canonical)
         requirements_holder["req"] = new_req
         log_activity_holder(kind="review", summary="Lead requirements updated via dashboard")
-        return {"ok": True, "config": requirements_to_dict(new_req)}
+        return {"ok": True, "config": canonical}
+
+    # --- Remote browser (server-hosted interactive Chromium) --------------
+    # Proof of concept: the Circle session originates in a browser that lives
+    # here, so nothing is exported from another machine and replayed. Opt-in
+    # via REMOTE_BROWSER_ENABLED; every route requires the dashboard session.
+    from circle_leads.web.remote_browser_api import (
+        build_replay_router as _replay_router, build_router as _rb_router,
+    )
+
+    app.include_router(_rb_router(require_auth))
+    # Version B experiment: cookie store + server-side replay (opt-in, encrypted).
+    app.include_router(_replay_router(require_auth, db))
 
     return app
 

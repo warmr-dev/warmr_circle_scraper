@@ -150,6 +150,7 @@
     <button data-view="stats" aria-selected="false"><span class="ic">📊</span> Overview</button>
     <button data-view="communities" aria-selected="false"><span class="ic">🌐</span> Communities</button>
     <button data-view="connector" aria-selected="false"><span class="ic">🔌</span> Circle Connector</button>
+    <button data-view="remote" aria-selected="false"><span class="ic">🖥️</span> Remote Browser</button>
     <button data-view="activity" aria-selected="false"><span class="ic">📡</span> Activity</button>
     <div class="sep"></div>
     <button data-view="triage" aria-selected="false"><span class="ic">🔎</span> Triage</button>
@@ -425,8 +426,18 @@
       <h2 style="margin:0 0 2px">Private communities</h2>
       <span class="muted" style="font-size:13px">Add a private community host. Then run <code>circle-connector login &lt;host&gt;</code> locally to sign in yourself.</span>
       <div class="row" style="margin-top:10px">
-        <input id="conn-host" placeholder="altea.circle.so" style="flex:1;min-width:260px">
+        <input id="conn-host" placeholder="altea.circle.so" style="flex:1;min-width:220px">
+        <select id="conn-priority" title="Scan priority">
+          <option value="vip">⭐ VIP — scan first</option>
+          <option value="normal" selected>Normal</option>
+          <option value="low">Low — scan last</option>
+          <option value="paused">Paused — don't scan</option>
+        </select>
         <button class="action" id="conn-add">Add community</button>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <input id="conn-notes" placeholder="Note (optional) — why this community matters"
+               style="flex:1;min-width:260px">
       </div>
       <div id="connections-table" style="margin-top:12px"><div class="empty">No private communities yet.</div></div>
     </div>
@@ -439,6 +450,68 @@
         <li>Run <code>circle-connector login &lt;host&gt;</code> — a browser opens, you sign in.</li>
         <li>Run <code>circle-connector run &lt;host&gt;</code> — it reads what your account can see and uploads only the text. No cookies, no password, no session ever reach this server.</li>
       </ol>
+    </div>
+  </section>
+
+  <!-- REMOTE BROWSER (server-hosted Chromium — proof of concept) -->
+  <section id="view-remote" hidden>
+    <div class="page-head">
+      <h1>Remote Browser <span class="muted" style="font-size:13px;font-weight:400">proof of concept</span></h1>
+      <p>A Chromium that runs <b>on the server</b>. You log into Circle inside it, so the session originates here — nothing is copied from your Mac and replayed. If Circle shows a verification challenge, this stops and reports it.</p>
+    </div>
+
+    <div class="panel">
+      <div class="row">
+        <input id="rb-host" placeholder="altea.circle.so" style="flex:1;min-width:240px">
+        <button class="action" id="rb-start">Start &amp; open</button>
+        <button class="action" id="rb-probe">Run PoC (env)</button>
+        <button class="action" id="rb-probe-auth">Run PoC (signed in)</button>
+        <button class="action" id="rb-stop">Stop</button>
+      </div>
+      <div id="rb-status" class="muted" style="margin-top:10px;font-size:13px">Loading…</div>
+    </div>
+
+    <div class="panel">
+      <h2 style="margin:0 0 2px">Live view</h2>
+      <span class="muted" style="font-size:13px">Click the image to click in the remote browser; type to send keystrokes. Use this to sign in to Circle yourself. Keystrokes are relayed straight to the browser and are never logged or stored.</span>
+      <div style="margin-top:10px">
+        <img id="rb-screen" alt="Remote browser view"
+             style="max-width:100%;border:1px solid var(--line);border-radius:8px;cursor:crosshair;display:none">
+        <div id="rb-screen-empty" class="empty">Not running. Enter a host and press “Start &amp; open”.</div>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <input id="rb-keys" placeholder="Type here, then press Send (or Enter)" style="flex:1;min-width:240px">
+        <button class="action" id="rb-send">Send text</button>
+        <button class="action" id="rb-enter">Press Enter</button>
+        <label class="muted" style="font-size:13px;display:flex;align-items:center;gap:6px">
+          <input type="checkbox" id="rb-live" checked> auto-refresh
+        </label>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2 style="margin:0 0 6px">PoC report</h2>
+      <div id="rb-report"><div class="empty">Run the PoC to see the verdict.</div></div>
+    </div>
+
+    <div class="panel" style="border:1px dashed var(--medium)">
+      <h2 style="margin:0 0 2px">⚗️ Session replay <span class="muted" style="font-size:12px;font-weight:400">experiment — Version B</span></h2>
+      <span class="muted" style="font-size:13px">
+        Paste a cookie export from a browser where you're logged into Circle. It's
+        stored <b>encrypted</b> (needs <code>CIRCLE_CRED_KEY</code>) and replayed
+        from the server. Expect Cloudflare to re-challenge it — this measures whether
+        it works, it does not try to bypass anything.
+      </span>
+      <div class="row" style="margin-top:10px">
+        <input id="rp-host" placeholder="www.yourspinstate.com" style="flex:1;min-width:220px">
+      </div>
+      <textarea id="rp-cookies" placeholder='Paste the cookie JSON array here'
+                style="margin-top:8px;min-height:120px"></textarea>
+      <div class="row" style="margin-top:8px">
+        <button class="action" id="rp-store">Store (encrypted)</button>
+        <button class="action" id="rp-test">Test replay from server</button>
+      </div>
+      <div id="rp-sessions" style="margin-top:12px"><div class="empty">No stored sessions.</div></div>
     </div>
   </section>
 </main>
@@ -466,11 +539,11 @@ async function api(path, options) {
 }
 
 // --- Navigation -------------------------------------------------------
-const views = ['leads', 'triage', 'activity', 'stats', 'communities', 'connector', 'config'];
+const views = ['leads', 'triage', 'activity', 'stats', 'communities', 'connector', 'remote', 'config'];
 const loaders = {
   leads: loadLeads, activity: loadActivity, stats: loadStats,
   communities: loadCommunities, config: loadConfig, triage: () => {},
-  connector: loadConnector,
+  connector: loadConnector, remote: loadRemote,
 };
 
 document.querySelectorAll('nav button[data-view]').forEach(btn => {
@@ -775,9 +848,17 @@ async function loadConnector() {
         <b>${esc(c.name || c.host)}</b>
         <span class="meta">${esc(c.host)}</span>
         <span class="pill" style="color:${color};background:color-mix(in srgb, ${color} 14%, transparent)">${icon} ${esc(label)}</span>
+        ${prioPill(c.priority)}
       </div>
       <div class="meta">${c.member_label ? 'as ' + esc(c.member_label) + ' · ' : ''}${c.spaces_readable}/${c.spaces_total} space(s) readable${c.last_sync_at ? ' · synced ' + esc(c.last_sync_at.replace('T',' ').slice(0,16)) : ''}</div>
-      <div style="margin-top:8px"><button class="ghost conn-remove" data-host="${esc(c.host)}">Remove</button></div>
+      ${c.notes ? `<div class="meta" style="margin-top:4px;font-style:italic">${esc(c.notes)}</div>` : ''}
+      <div class="row" style="margin-top:8px">
+        <select class="conn-prio" data-host="${esc(c.host)}" title="Scan priority">
+          ${PRIORITIES.map(([v, lbl]) =>
+            `<option value="${v}"${c.priority === v ? ' selected' : ''}>${lbl}</option>`).join('')}
+        </select>
+        <button class="ghost conn-remove" data-host="${esc(c.host)}">Remove</button>
+      </div>
     </div>`;
   }).join('');
 }
@@ -791,11 +872,55 @@ $('conn-pair').addEventListener('click', async () => {
     `<code>circle-connector pair --backend ${esc(location.origin)} --code ${esc(r.pairing_code)}</code>`;
 });
 
+// Scan priority: VIP communities are read first, paused ones are skipped.
+const PRIORITIES = [
+  ['vip', '⭐ VIP'], ['normal', 'Normal'], ['low', 'Low'], ['paused', '⏸ Paused'],
+];
+const PRIO_STYLE = {
+  vip:    ['⭐ VIP',    'var(--high)'],
+  low:    ['Low',       'var(--muted)'],
+  paused: ['⏸ Paused',  'var(--medium)'],
+};
+function prioPill(p) {
+  const style = PRIO_STYLE[p];      // 'normal' needs no pill — it's the default
+  if (!style) return '';
+  const [label, color] = style;
+  return `<span class="pill" style="color:${color};background:color-mix(in srgb, ${color} 14%, transparent)">${label}</span>`;
+}
+
+// Changing the dropdown on a row updates its priority immediately.
+document.addEventListener('change', async (ev) => {
+  const sel = ev.target.closest('.conn-prio');
+  if (!sel) return;
+  const host = sel.dataset.host;
+  try {
+    await api(`/api/connections/${encodeURIComponent(host)}/priority`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ priority: sel.value }),
+    });
+    toast(`${host} → ${sel.value}`);
+    loadConnector();
+  } catch (e) { toast(String(e.message || e).slice(0, 160)); }
+});
+
 $('conn-add').addEventListener('click', async () => {
   const host = $('conn-host').value.trim();
-  if (!host) return;
-  const r = await api('/api/connections/add', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ host }) });
-  if (r) { $('conn-host').value = ''; toast('Community added — log in locally next'); loadConnector(); }
+  if (!host) return toast('Enter a community host');
+  const priority = $('conn-priority').value;
+  const notes = $('conn-notes').value.trim();
+  let r;
+  try {
+    r = await api('/api/connections/add', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ host, priority, notes }),
+    });
+  } catch (e) { return toast(String(e.message || e).slice(0, 160)); }
+  if (r) {
+    $('conn-host').value = '';
+    $('conn-notes').value = '';
+    toast(r.created ? 'Community added — log in locally next' : 'Community updated');
+    loadConnector();
+  }
 });
 
 document.addEventListener('click', async (event) => {
@@ -1035,6 +1160,227 @@ async function saveConfigOnly() {
 
 loadLeads();
 pollJobs();
+
+// --- Remote browser (server-hosted Chromium, PoC) ---------------------
+// The live view is a screenshot poll plus an input relay: clicks and
+// keystrokes are forwarded to the browser running on the server, so you can
+// sign into Circle there. Nothing typed here is stored by the dashboard.
+let rbTimer = null;
+
+function rbStateBadge(st) {
+  const map = {
+    authenticated: ['🟢', 'Signed in'],
+    awaiting_login: ['🟡', 'Not signed in'],
+    challenged:    ['🛑', 'Verification challenge — stopped'],
+    starting:      ['⏳', 'Starting'],
+    stopped:       ['⚪', 'Stopped'],
+    error:         ['🔴', 'Error'],
+  };
+  const [icon, label] = map[st] || ['⚪', st || 'unknown'];
+  return `${icon} <b>${esc(label)}</b>`;
+}
+
+async function loadRemote() {
+  const st = await api('/api/remote-browser/status');
+  if (!st) return;
+  if (st.enabled === false) {
+    $('rb-status').innerHTML =
+      'Disabled. Set <code>REMOTE_BROWSER_ENABLED=true</code> and deploy an image with Chromium.';
+    rbShowScreen(false);
+    return;
+  }
+  const bits = [rbStateBadge(st.state)];
+  if (st.member_label) bits.push(`as <b>${esc(st.member_label)}</b>`);
+  if (st.host) bits.push(esc(st.host));
+  if (st.detail) bits.push(`<span class="muted">${esc(st.detail)}</span>`);
+  $('rb-status').innerHTML = bits.join(' · ');
+  if (st.host && !$('rb-host').value) $('rb-host').value = st.host;
+
+  const live = st.state !== 'stopped';
+  rbShowScreen(live);
+  if (live) rbTick();
+  loadReplaySessions();
+}
+
+function rbShowScreen(on) {
+  $('rb-screen').style.display = on ? 'block' : 'none';
+  $('rb-screen-empty').hidden = on;
+  if (rbTimer) { clearInterval(rbTimer); rbTimer = null; }
+  if (on && $('rb-live').checked) rbTimer = setInterval(rbTick, 2000);
+}
+
+function rbTick() {
+  // Cache-bust so each poll gets the current frame.
+  $('rb-screen').src = `/api/remote-browser/screenshot?t=${Date.now()}`;
+}
+
+$('rb-start').addEventListener('click', async () => {
+  const host = $('rb-host').value.trim();
+  if (!host) return toast('Enter a community host');
+  $('rb-start').disabled = true;
+  try {
+    await api('/api/remote-browser/start', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ host }),
+    });
+    await loadRemote();
+  } catch (e) { toast(String(e.message || e).slice(0, 200)); }
+  finally { $('rb-start').disabled = false; }
+});
+
+$('rb-stop').addEventListener('click', async () => {
+  await api('/api/remote-browser/stop', { method: 'POST' });
+  await loadRemote();
+});
+
+// Map a click on the screenshot to the same point in the remote viewport.
+$('rb-screen').addEventListener('click', async (ev) => {
+  const img = $('rb-screen');
+  const rect = img.getBoundingClientRect();
+  const x = Math.round((ev.clientX - rect.left) * (img.naturalWidth || rect.width) / rect.width);
+  const y = Math.round((ev.clientY - rect.top) * (img.naturalHeight || rect.height) / rect.height);
+  await api('/api/remote-browser/input', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ kind: 'click', x, y }),
+  });
+  setTimeout(rbTick, 400);
+});
+
+async function rbSendText() {
+  const box = $('rb-keys');
+  const text = box.value;
+  if (!text) return;
+  box.value = '';            // don't leave credentials sitting in the field
+  await api('/api/remote-browser/input', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ kind: 'type', text }),
+  });
+  setTimeout(rbTick, 400);
+}
+
+$('rb-send').addEventListener('click', rbSendText);
+$('rb-keys').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); rbSendText(); }
+});
+$('rb-enter').addEventListener('click', async () => {
+  await api('/api/remote-browser/input', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ kind: 'press', key: 'Enter' }),
+  });
+  setTimeout(rbTick, 600);
+});
+$('rb-live').addEventListener('change', () => rbShowScreen($('rb-screen').style.display === 'block'));
+
+async function rbProbe(mode) {
+  const host = $('rb-host').value.trim();
+  if (!host) return toast('Enter a community host');
+  $('rb-report').innerHTML = '<div class="empty">Running…</div>';
+  let r;
+  try {
+    r = await api('/api/remote-browser/probe', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ host, mode }),
+    });
+  } catch (e) {
+    $('rb-report').innerHTML = `<div class="empty">${esc(String(e.message || e).slice(0, 400))}</div>`;
+    return;
+  }
+  if (!r) return;
+  const colour = { VIABLE: 'var(--high)', BLOCKED_BY_CHALLENGE: 'var(--danger)',
+                   NO_BROWSER: 'var(--medium)', NEEDS_LOGIN: 'var(--medium)',
+                   FAILED: 'var(--danger)' }[r.verdict] || 'var(--muted)';
+  const steps = (r.steps || []).map(s =>
+    `<tr><td>${s.ok ? '✅' : '❌'}</td><td>${esc(s.name)}</td>
+     <td class="muted">${esc(s.detail || '')}</td></tr>`).join('');
+  $('rb-report').innerHTML = `
+    <div style="font-size:16px;font-weight:700;color:${colour}">${esc(r.verdict)}</div>
+    <p class="muted" style="margin:6px 0 12px">${esc(r.summary || '')}</p>
+    <table><tbody>${steps}</tbody></table>
+    <p class="muted" style="font-size:12px;margin-top:10px">
+      Environment: ${esc(r.environment?.platform || '')}
+      ${r.environment?.is_datacenter ? ' · datacenter (Railway)' : ' · local machine'}
+    </p>`;
+  await loadRemote();
+}
+
+$('rb-probe').addEventListener('click', () => rbProbe('environment'));
+$('rb-probe-auth').addEventListener('click', () => rbProbe('authenticated'));
+
+// --- Session replay experiment (Version B) ----------------------------
+const RP_RESULT_COLOR = {
+  ok: 'var(--high)', challenged: 'var(--danger)',
+  expired: 'var(--medium)', error: 'var(--danger)',
+};
+
+async function loadReplaySessions() {
+  const d = await api('/api/replay/sessions');
+  if (!d) return;
+  const rows = d.sessions || [];
+  if (!rows.length) {
+    $('rp-sessions').innerHTML = '<div class="empty">No stored sessions.</div>';
+    return;
+  }
+  $('rp-sessions').innerHTML = rows.map(r => {
+    const color = RP_RESULT_COLOR[r.last_result] || 'var(--muted)';
+    const badge = r.last_result
+      ? `<span class="pill" style="color:${color};background:color-mix(in srgb, ${color} 14%, transparent)">${esc(r.last_result)}</span>`
+      : '<span class="muted" style="font-size:12px">not tested</span>';
+    return `<div class="lead" style="margin-bottom:8px">
+      <div class="lead-head"><b>${esc(r.host)}</b> ${badge}
+        <span class="meta">${r.cookie_count} cookie(s)${r.member_label ? ' · ' + esc(r.member_label) : ''}</span></div>
+      ${r.last_detail ? `<div class="meta" style="margin-top:4px">${esc(r.last_detail)}</div>` : ''}
+      <div class="row" style="margin-top:8px">
+        <button class="ghost rp-test" data-host="${esc(r.host)}">Test replay</button>
+        <button class="ghost rp-del" data-host="${esc(r.host)}">Delete</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+$('rp-store').addEventListener('click', async () => {
+  const host = $('rp-host').value.trim();
+  const text = $('rp-cookies').value.trim();
+  if (!host || !text) return toast('Host and cookie JSON are both required');
+  let cookies;
+  try { cookies = JSON.parse(text); }
+  catch { return toast('Cookie box is not valid JSON'); }
+  try {
+    const r = await api('/api/replay/store', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ host, cookies }),
+    });
+    if (r) { $('rp-cookies').value = ''; toast(`Stored ${r.cookie_count} cookie(s) — encrypted`); loadReplaySessions(); }
+  } catch (e) { toast(String(e.message || e).slice(0, 200)); }
+});
+
+async function rpTest(host) {
+  toast('Replaying from server…');
+  try {
+    const r = await api('/api/replay/test', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ host }),
+    });
+    if (r) { toast(`${host}: ${r.result}`); loadReplaySessions(); }
+  } catch (e) { toast(String(e.message || e).slice(0, 200)); }
+}
+
+$('rp-test').addEventListener('click', () => {
+  const host = $('rp-host').value.trim();
+  if (!host) return toast('Enter a host (or store one first)');
+  rpTest(host);
+});
+
+document.addEventListener('click', async (ev) => {
+  const t = ev.target.closest('.rp-test'); const d = ev.target.closest('.rp-del');
+  if (t) rpTest(t.dataset.host);
+  if (d) {
+    await api('/api/replay/delete', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ host: d.dataset.host }),
+    });
+    loadReplaySessions();
+  }
+});
 </script>
 </body>
 </html>

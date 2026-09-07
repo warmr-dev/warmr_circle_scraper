@@ -149,11 +149,24 @@ def requirements_to_dict(req: "Requirements") -> dict:
     }
 
 
+def validate_requirements(data: dict) -> "Requirements":
+    """Validate a requirements dict, returning the model. Writes nothing.
+
+    Use this where the config is persisted somewhere other than the file (e.g.
+    the database on a read-only serverless filesystem).
+    """
+    return Requirements(**data)
+
+
 def save_requirements(data: dict, path: str | Path | None = None) -> "Requirements":
     """Validate a requirements dict and write it to YAML. Returns the reloaded model.
 
     Validation happens first (via the pydantic model), so an invalid edit is
     rejected before it can overwrite the file and break classification.
+
+    Note: this writes to the filesystem, which fails on a read-only serverless
+    deploy (``Errno 30``). The dashboard persists config in the database
+    instead; see ``circle_leads/web/app.py``. This remains for local/CLI use.
     """
     cfg_path = Path(path) if path else DEFAULT_CONFIG_PATH
     # Validate by constructing the model; raises on bad input.

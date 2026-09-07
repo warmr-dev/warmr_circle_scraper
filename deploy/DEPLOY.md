@@ -99,6 +99,36 @@ Vercel's serverless model (functions time out in seconds and hold no state).
 be to split the dashboard into a static SPA (Vercel) talking to the FastAPI API
 on Railway over CORS -- a real refactor, not a config change.
 
+### If you try Vercel anyway (build error: "does not define a top-level app")
+`main.py` at the repo root is the **CLI** entrypoint, not a FastAPI app, so
+Vercel's Python/FastAPI preset can't find an `app` instance there and the build
+fails immediately. A top-level `app.py` now exports a **lazy** ASGI app (see
+`app.py`; `tool.vercel.entrypoint = "app:app"` in `pyproject.toml`), so the
+build and cold-import succeed without env vars or a database. That fixes the
+*build* error, but does not make the app run correctly on Vercel:
+
+- To serve traffic, `DASHBOARD_PASSWORD` (8+ chars) must be set as a Vercel
+  **Environment Variable** (Runtime), or the first request raises.
+- Without `CIRCLE_LEADS_DB` pointing at an external Postgres (e.g. Supabase),
+  `Database(None)` tries to create a local `data/` dir, which fails on Vercel's
+  read-only filesystem.
+- Sessions (`SessionManager`) and the background job registry (`JobRegistry`)
+  are in-memory. They don't survive cold starts or get shared across concurrent
+  instances, and long jobs (search, harvest, feed reads) get killed when the
+  function's window ends.
+- Config edits from the dashboard are persisted in the **database**, not the
+  packaged `requirements.yaml` (which is read-only on Vercel: `/var/task` →
+  `Errno 30`). This is handled automatically; just make sure `CIRCLE_LEADS_DB`
+  is set.
+- The Playwright-based features (the local connector's ingest, the remote-
+  browser PoC, the replay experiment) **cannot run on Vercel at all** — no
+  browser, no persistent process. Those belong on the local connector /
+  Railway, never on serverless.
+
+In short: this unblocks the build error, but Vercel is still the wrong platform
+to actually run the dashboard on. Use Render/Railway above for anything beyond a
+quick experiment.
+
 ## The database
 
 - **Use Postgres.** Point `CIRCLE_LEADS_DB` at its connection URL

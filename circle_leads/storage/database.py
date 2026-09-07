@@ -80,7 +80,11 @@ class Database:
         additions = [
             ("communities", "watching", "BOOLEAN DEFAULT FALSE"),
             ("leads", "external_synced_at", "TIMESTAMP"),
+            ("circle_connections", "priority", "VARCHAR(16) DEFAULT 'normal'"),
+            ("circle_connections", "notes", "TEXT"),
         ]
+        # replay_sessions is a whole new table (Version B experiment); create_all
+        # handles it, so no per-column entry is needed here.
         try:
             insp = _inspect(self.engine)
             existing_tables = set(insp.get_table_names())
