@@ -31,6 +31,25 @@ def authenticate(host: str, *, timeout_seconds: int = 300) -> None:
     reader.login(timeout_seconds=timeout_seconds)
 
 
+def authenticate_with_credentials(
+    host: str, *, headless: bool = True, timeout_seconds: int = 120
+) -> None:
+    """Sign in to `host` using credentials from the environment.
+
+    The credentials never leave this machine and are never logged. If Circle
+    presents a Cloudflare or 2FA challenge, this raises so the caller can fall
+    back to an interactive login rather than trying to defeat it.
+    """
+    from circle_leads.connector.credentials import load_for_host
+
+    creds = load_for_host(host)  # raises CredentialsNotFound with a clear message
+    reader = BrowserFeedReader(host, headless=headless)
+    reader.login_with_credentials(
+        creds.email, creds.password,
+        headless=headless, timeout_seconds=timeout_seconds,
+    )
+
+
 def sync_community(
     host: str,
     backend: BackendClient,

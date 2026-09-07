@@ -15,6 +15,7 @@ dependencies = [
 [project.optional-dependencies]
 llm = ["anthropic>=0.40", "openai>=1.40"]
 browser = ["playwright>=1.40"]
+crypto = ["cryptography>=42.0"]  # optional at-rest encryption of stored credentials
 web = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.29",

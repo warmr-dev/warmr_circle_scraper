@@ -15,7 +15,9 @@ import time
 import click
 
 from circle_leads.connector.client import BackendClient, ConnectorConfig
-from circle_leads.connector.runner import authenticate, sync_community
+from circle_leads.connector.runner import (
+    authenticate, authenticate_with_credentials, sync_community,
+)
 
 
 def _client() -> BackendClient:
@@ -43,8 +45,31 @@ def pair_cmd(backend: str, code: str) -> None:
 
 @cli.command("login")
 @click.argument("host")
-def login_cmd(host: str) -> None:
-    """Open a browser so you can log into a private Circle community yourself."""
+@click.option("--from-env", is_flag=True,
+              help="Sign in with CIRCLE_EMAIL/CIRCLE_PASSWORD from your .env "
+                   "instead of typing it yourself. Stops if Circle challenges.")
+@click.option("--show-browser", is_flag=True,
+              help="With --from-env, run the login in a visible window.")
+def login_cmd(host: str, from_env: bool, show_browser: bool) -> None:
+    """Log into a private Circle community.
+
+    Default: opens a browser so you sign in yourself (nothing is stored).
+    With --from-env: uses credentials from your .env; they stay local and are
+    never logged. Circle may still require an interactive login if it presents
+    a Cloudflare or 2FA challenge.
+    """
+    if from_env:
+        from circle_leads.connector.credentials import CredentialsNotFound
+        from circle_leads.scraper.browser_reader import BrowserFeedReader
+
+        try:
+            authenticate_with_credentials(host, headless=not show_browser)
+        except CredentialsNotFound as exc:
+            raise click.ClickException(str(exc))
+        except (BrowserFeedReader.LoginChallenged,) as exc:
+            raise click.ClickException(str(exc))
+        click.echo(f"Signed in to {host} from .env. Session saved locally.")
+        return
     authenticate(host)
     click.echo(f"Signed in to {host}. Session saved to your local browser profile.")
 
