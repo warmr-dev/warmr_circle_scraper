@@ -50,6 +50,71 @@ def _enabled() -> bool:
     return os.environ.get("REMOTE_BROWSER_ENABLED", "").lower() == "true"
 
 
+def build_replay_router(require_auth, db) -> APIRouter:
+    """EXPERIMENT (Version B): store a captured Circle session and replay it
+    from the server. Built at the user's explicit request, overriding the
+    'no cookie replay' rule. Every route requires the dashboard session, and
+    stored cookies are encrypted at rest (CIRCLE_CRED_KEY)."""
+    from circle_leads.remote_browser.replay import (
+        has_session_cookie, parse_cookies, replay_session,
+    )
+    from circle_leads.remote_browser.session import RemoteBrowserUnavailable
+    from circle_leads.web.replay_store import (
+        ReplayKeyMissing, delete_session, list_sessions, load_cookies,
+        record_result, store_session,
+    )
+
+    router = APIRouter(prefix="/api/replay", tags=["replay-experiment"])
+
+    @router.get("/sessions")
+    def sessions(_: None = Depends(require_auth)) -> dict[str, Any]:
+        return {"enabled": _enabled(), "sessions": list_sessions(db)}
+
+    @router.post("/store")
+    def store(payload: dict, _: None = Depends(require_auth)) -> dict[str, Any]:
+        host = str((payload or {}).get("host") or "").strip().lower().replace("https://", "").strip("/")
+        if not host or "." not in host:
+            raise HTTPException(400, "A community host is required.")
+        try:
+            cookies = parse_cookies((payload or {}).get("cookies"))
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(400, f"Invalid cookie export: {exc}") from exc
+        if not has_session_cookie(cookies):
+            raise HTTPException(
+                400, "No Circle session cookie (_circle_session / "
+                     "remember_user_token) found in the export.")
+        try:
+            res = store_session(db, host, cookies)
+        except ReplayKeyMissing as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {"ok": True, **res}
+
+    @router.post("/test")
+    def test(payload: dict, _: None = Depends(require_auth)) -> dict[str, Any]:
+        """Replay the stored session for host and report the honest result."""
+        host = str((payload or {}).get("host") or "").strip().lower().replace("https://", "").strip("/")
+        try:
+            cookies = load_cookies(db, host)
+        except ReplayKeyMissing as exc:
+            raise HTTPException(400, str(exc)) from exc
+        if cookies is None:
+            raise HTTPException(404, f"No stored session for {host}.")
+        try:
+            result = replay_session(host, cookies)
+        except RemoteBrowserUnavailable as exc:
+            raise HTTPException(503, str(exc)) from exc
+        record_result(db, host, result.result, result.detail)
+        return result.as_dict()
+
+    @router.post("/delete")
+    def delete(payload: dict, _: None = Depends(require_auth)) -> dict[str, Any]:
+        host = str((payload or {}).get("host") or "").strip().lower().replace("https://", "").strip("/")
+        delete_session(db, host)
+        return {"ok": True}
+
+    return router
+
+
 def build_router(require_auth) -> APIRouter:
     router = APIRouter(prefix="/api/remote-browser", tags=["remote-browser"])
 

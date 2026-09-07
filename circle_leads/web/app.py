@@ -969,9 +969,13 @@ def create_app(db_url: str | None = None, config_path: str | None = None) -> Fas
     # Proof of concept: the Circle session originates in a browser that lives
     # here, so nothing is exported from another machine and replayed. Opt-in
     # via REMOTE_BROWSER_ENABLED; every route requires the dashboard session.
-    from circle_leads.web.remote_browser_api import build_router as _rb_router
+    from circle_leads.web.remote_browser_api import (
+        build_replay_router as _replay_router, build_router as _rb_router,
+    )
 
     app.include_router(_rb_router(require_auth))
+    # Version B experiment: cookie store + server-side replay (opt-in, encrypted).
+    app.include_router(_replay_router(require_auth, db))
 
     return app
 

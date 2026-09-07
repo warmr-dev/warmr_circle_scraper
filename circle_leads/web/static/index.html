@@ -493,6 +493,26 @@
       <h2 style="margin:0 0 6px">PoC report</h2>
       <div id="rb-report"><div class="empty">Run the PoC to see the verdict.</div></div>
     </div>
+
+    <div class="panel" style="border:1px dashed var(--medium)">
+      <h2 style="margin:0 0 2px">⚗️ Session replay <span class="muted" style="font-size:12px;font-weight:400">experiment — Version B</span></h2>
+      <span class="muted" style="font-size:13px">
+        Paste a cookie export from a browser where you're logged into Circle. It's
+        stored <b>encrypted</b> (needs <code>CIRCLE_CRED_KEY</code>) and replayed
+        from the server. Expect Cloudflare to re-challenge it — this measures whether
+        it works, it does not try to bypass anything.
+      </span>
+      <div class="row" style="margin-top:10px">
+        <input id="rp-host" placeholder="www.yourspinstate.com" style="flex:1;min-width:220px">
+      </div>
+      <textarea id="rp-cookies" placeholder='Paste the cookie JSON array here'
+                style="margin-top:8px;min-height:120px"></textarea>
+      <div class="row" style="margin-top:8px">
+        <button class="action" id="rp-store">Store (encrypted)</button>
+        <button class="action" id="rp-test">Test replay from server</button>
+      </div>
+      <div id="rp-sessions" style="margin-top:12px"><div class="empty">No stored sessions.</div></div>
+    </div>
   </section>
 </main>
 </div>
@@ -1179,6 +1199,7 @@ async function loadRemote() {
   const live = st.state !== 'stopped';
   rbShowScreen(live);
   if (live) rbTick();
+  loadReplaySessions();
 }
 
 function rbShowScreen(on) {
@@ -1284,6 +1305,82 @@ async function rbProbe(mode) {
 
 $('rb-probe').addEventListener('click', () => rbProbe('environment'));
 $('rb-probe-auth').addEventListener('click', () => rbProbe('authenticated'));
+
+// --- Session replay experiment (Version B) ----------------------------
+const RP_RESULT_COLOR = {
+  ok: 'var(--high)', challenged: 'var(--danger)',
+  expired: 'var(--medium)', error: 'var(--danger)',
+};
+
+async function loadReplaySessions() {
+  const d = await api('/api/replay/sessions');
+  if (!d) return;
+  const rows = d.sessions || [];
+  if (!rows.length) {
+    $('rp-sessions').innerHTML = '<div class="empty">No stored sessions.</div>';
+    return;
+  }
+  $('rp-sessions').innerHTML = rows.map(r => {
+    const color = RP_RESULT_COLOR[r.last_result] || 'var(--muted)';
+    const badge = r.last_result
+      ? `<span class="pill" style="color:${color};background:color-mix(in srgb, ${color} 14%, transparent)">${esc(r.last_result)}</span>`
+      : '<span class="muted" style="font-size:12px">not tested</span>';
+    return `<div class="lead" style="margin-bottom:8px">
+      <div class="lead-head"><b>${esc(r.host)}</b> ${badge}
+        <span class="meta">${r.cookie_count} cookie(s)${r.member_label ? ' · ' + esc(r.member_label) : ''}</span></div>
+      ${r.last_detail ? `<div class="meta" style="margin-top:4px">${esc(r.last_detail)}</div>` : ''}
+      <div class="row" style="margin-top:8px">
+        <button class="ghost rp-test" data-host="${esc(r.host)}">Test replay</button>
+        <button class="ghost rp-del" data-host="${esc(r.host)}">Delete</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+$('rp-store').addEventListener('click', async () => {
+  const host = $('rp-host').value.trim();
+  const text = $('rp-cookies').value.trim();
+  if (!host || !text) return toast('Host and cookie JSON are both required');
+  let cookies;
+  try { cookies = JSON.parse(text); }
+  catch { return toast('Cookie box is not valid JSON'); }
+  try {
+    const r = await api('/api/replay/store', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ host, cookies }),
+    });
+    if (r) { $('rp-cookies').value = ''; toast(`Stored ${r.cookie_count} cookie(s) — encrypted`); loadReplaySessions(); }
+  } catch (e) { toast(String(e.message || e).slice(0, 200)); }
+});
+
+async function rpTest(host) {
+  toast('Replaying from server…');
+  try {
+    const r = await api('/api/replay/test', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ host }),
+    });
+    if (r) { toast(`${host}: ${r.result}`); loadReplaySessions(); }
+  } catch (e) { toast(String(e.message || e).slice(0, 200)); }
+}
+
+$('rp-test').addEventListener('click', () => {
+  const host = $('rp-host').value.trim();
+  if (!host) return toast('Enter a host (or store one first)');
+  rpTest(host);
+});
+
+document.addEventListener('click', async (ev) => {
+  const t = ev.target.closest('.rp-test'); const d = ev.target.closest('.rp-del');
+  if (t) rpTest(t.dataset.host);
+  if (d) {
+    await api('/api/replay/delete', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ host: d.dataset.host }),
+    });
+    loadReplaySessions();
+  }
+});
 </script>
 </body>
 </html>

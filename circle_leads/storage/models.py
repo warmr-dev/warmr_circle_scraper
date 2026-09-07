@@ -418,3 +418,41 @@ class CircleConnection(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=utcnow, onupdate=utcnow
     )
+
+
+class ReplaySession(Base):
+    """EXPERIMENT (Version B): a stored Circle browser session for server-side
+    replay from Railway.
+
+    This exists at the user's explicit, on-record request, overriding the
+    original 'no cookie export/replay' rule. It is deliberately isolated:
+
+    - Cookie values are stored ENCRYPTED at rest (AES-GCM via CIRCLE_CRED_KEY).
+      Never store the plaintext blob.
+    - This is expected to be short-lived: Circle binds cf_clearance to the
+      original IP/device, so a replay from Railway's IP is re-challenged
+      quickly. ``last_result`` records what actually happened on each attempt.
+    - Nothing here is a Circle API credential; it is a captured member session.
+    """
+
+    __tablename__ = "replay_sessions"
+    __table_args__ = (UniqueConstraint("host", name="uq_replay_session_host"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    host: Mapped[str] = mapped_column(String(255), index=True)
+
+    # AES-GCM ciphertext of the cookies JSON. Plaintext is never persisted.
+    encrypted_cookies: Mapped[str] = mapped_column(Text)
+    # Non-sensitive metadata for the dashboard.
+    cookie_count: Mapped[int] = mapped_column(Integer, default=0)
+    member_label: Mapped[str | None] = mapped_column(String(255))
+
+    # Outcome of the most recent server-side replay attempt.
+    last_result: Mapped[str | None] = mapped_column(String(32))   # ok|challenged|expired|error
+    last_detail: Mapped[str | None] = mapped_column(Text)
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, onupdate=utcnow
+    )
