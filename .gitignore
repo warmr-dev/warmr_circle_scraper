@@ -21,4 +21,15 @@ data/
 *.sqlite3
 exports/
 circle-search.log
+harvest.log
 **/config/communities/member_feeds.yaml
+
+# Local Circle Connector — MUST stay on the local machine, never in Git.
+# The authenticated Circle browser session, profiles, and the connector API
+# token live here. Default location is ~/.circle-leads (outside the repo), but
+# these patterns also catch a profile/state dir pointed inside the repo.
+.circle-leads/
+circle_profiles/
+browser-profile/
+connector.json
+**/browser-profile/

@@ -92,6 +92,39 @@ setup, daily use, tuning, and troubleshooting.
 
 ---
 
+## Private communities: the Circle Connector
+
+Public/free communities are read directly with no login. For **private
+communities you are a member of**, use the **Circle Connector**: you log into
+each community yourself in a real browser on your own machine, and a small local
+process reads what your account can see and uploads only the normalized text to
+your Railway backend. Your Circle password, cookies, and session never leave your
+computer.
+
+```bash
+# On your computer, once:
+pip install 'circle-leads[browser]'
+playwright install chromium
+
+# Pair with your deployed backend (get the code from the dashboard's
+# "Circle Connector" tab → "Pair a local connector"):
+circle-connector pair --backend https://<your-app>.up.railway.app --code <CODE>
+
+# Add the community host in the dashboard, then log in yourself:
+circle-connector login altea.circle.so     # a browser opens; you sign in
+circle-connector run  altea.circle.so       # read + upload on a loop
+```
+
+Circle has no "list my communities" API, so you add each community host
+explicitly; spaces inside an authenticated community are discovered
+automatically. The connector accesses only content exposed to your authenticated
+browser session — spaces your account cannot access are not scraped.
+
+**Full walkthrough: [docs/connector.md](docs/connector.md)** — Railway deploy,
+env vars, pairing, session expiry, and the security model.
+
+---
+
 ## Architecture
 
 ```
