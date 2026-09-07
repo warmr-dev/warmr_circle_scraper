@@ -3,47 +3,76 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Circle Leads</title>
+<title>Warmr Leads</title>
 <style>
   :root {
-    --bg: #f6f7f9; --panel: #fff; --ink: #16181d; --muted: #6b7280;
-    --line: #e4e7ec; --accent: #2c5fd6; --soft: #eef1f6;
-    --high: #067647; --medium: #b54708; --low: #6b7280; --danger: #b42318;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #0f1115; --panel: #171a21; --ink: #e8eaed; --muted: #9aa1ad;
-      --line: #262a33; --accent: #6f9bff; --soft: #1e222b;
-      --high: #4ade80; --medium: #fbbf24; --low: #9aa1ad; --danger: #ff7b72;
-    }
+    --bg: #f7f8fa; --panel: #fff; --ink: #101828; --muted: #667085;
+    --line: #eaecf0; --accent: #ef4444; --accent-ink: #b42318;
+    --soft: #f9fafb; --soft2: #fef3f2;
+    --high: #067647; --medium: #b54708; --low: #667085; --danger: #b42318;
+    --sidebar: #fff; --shadow: 0 1px 2px rgba(16,24,40,.05);
+    --radius: 12px;
   }
   * { box-sizing: border-box; }
   body {
     margin: 0; background: var(--bg); color: var(--ink);
-    font: 14px/1.55 ui-sans-serif, -apple-system, "Segoe UI", Roboto, sans-serif;
+    font: 14px/1.55 "Inter", ui-sans-serif, -apple-system, "Segoe UI", Roboto, sans-serif;
   }
-  header {
-    display: flex; align-items: center; gap: 16px; padding: 12px 20px;
-    background: var(--panel); border-bottom: 1px solid var(--line);
-    position: sticky; top: 0; z-index: 10; flex-wrap: wrap;
+
+  /* --- App shell: fixed sidebar + scrolling content --- */
+  .app { display: flex; min-height: 100vh; }
+  .sidebar {
+    width: 236px; flex: 0 0 236px; background: var(--sidebar);
+    border-right: 1px solid var(--line); padding: 20px 14px;
+    display: flex; flex-direction: column; gap: 4px;
+    position: sticky; top: 0; height: 100vh; overflow-y: auto;
   }
-  header h1 { margin: 0; font-size: 16px; letter-spacing: -.01em; }
-  nav { display: flex; gap: 4px; margin-left: auto; flex-wrap: wrap; }
+  .brand {
+    display: flex; align-items: center; gap: 10px; padding: 4px 8px 20px;
+    font-size: 19px; font-weight: 800; letter-spacing: -.02em;
+  }
+  .brand .logo {
+    width: 30px; height: 30px; border-radius: 9px; display: grid; place-items: center;
+    background: linear-gradient(135deg, #ff8a4c, #ef4444); font-size: 17px;
+  }
+  nav { display: flex; flex-direction: column; gap: 2px; }
   nav button {
-    padding: 6px 13px; font: inherit; border-radius: 7px; cursor: pointer;
-    background: transparent; color: var(--muted); border: 1px solid transparent;
+    display: flex; align-items: center; gap: 11px; width: 100%; text-align: left;
+    padding: 9px 12px; font: inherit; border-radius: 8px; cursor: pointer;
+    background: transparent; color: var(--muted); border: 0; font-weight: 500;
   }
-  nav button:hover { background: var(--soft); }
+  nav button .ic { width: 18px; text-align: center; opacity: .85; font-size: 15px; }
+  nav button:hover { background: var(--soft); color: var(--ink); }
   nav button[aria-selected="true"] {
-    background: var(--soft); color: var(--ink); font-weight: 600;
-    border-color: var(--line);
+    background: var(--soft2); color: var(--accent-ink); font-weight: 600;
   }
-  main { padding: 20px; max-width: 1180px; margin: 0 auto; }
+  nav .sep { height: 1px; background: var(--line); margin: 10px 4px; }
+  #logout {
+    margin-top: auto; padding: 9px 12px; font: inherit; font-size: 13px;
+    color: var(--muted); background: transparent; border: 1px solid var(--line);
+    border-radius: 8px; cursor: pointer;
+  }
+  #logout:hover { background: var(--soft); color: var(--ink); }
+
+  main { flex: 1; min-width: 0; padding: 26px 32px; max-width: 1320px; }
+  .page-head { margin-bottom: 20px; }
+  .page-head h1 { margin: 0 0 4px; font-size: 22px; font-weight: 700; letter-spacing: -.02em; }
+  .page-head p { margin: 0; color: var(--muted); font-size: 14px; }
+
   .panel {
-    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
-    padding: 16px; margin-bottom: 14px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 18px; margin-bottom: 16px; box-shadow: var(--shadow);
   }
-  h2 { margin: 0 0 12px; font-size: 14px; letter-spacing: -.01em; }
+  h2 { margin: 0 0 12px; font-size: 15px; font-weight: 600; letter-spacing: -.01em; }
+
+  @media (max-width: 820px) {
+    .app { flex-direction: column; }
+    .sidebar { width: 100%; flex: none; height: auto; position: static;
+      flex-direction: row; flex-wrap: wrap; overflow-x: auto; }
+    nav { flex-direction: row; flex-wrap: wrap; }
+    #logout { margin: 0; }
+    main { padding: 18px; }
+  }
   .muted { color: var(--muted); }
   .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
   input, select, textarea {
@@ -85,10 +114,18 @@
   .level-success { color: var(--high); } .level-warning { color: var(--medium); }
   .level-error { color: var(--danger); } .level-info { color: var(--muted); }
 
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
-  .stat { background: var(--panel); border: 1px solid var(--line); border-radius: 9px; padding: 13px; }
-  .stat .n { font-size: 25px; font-weight: 700; letter-spacing: -.02em; }
-  .stat .k { font-size: 12px; color: var(--muted); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 16px; margin-bottom: 16px; }
+  .stat {
+    background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 18px 20px; box-shadow: var(--shadow); position: relative;
+  }
+  .stat .k { font-size: 13px; color: var(--muted); font-weight: 500; }
+  .stat .n { font-size: 32px; font-weight: 700; letter-spacing: -.03em; margin: 6px 0 2px; }
+  .stat .sub { font-size: 12px; color: var(--muted); }
+  .stat .ic {
+    position: absolute; top: 16px; right: 18px; color: var(--accent);
+    font-size: 16px; opacity: .8;
+  }
   .bar { display: flex; align-items: center; gap: 8px; margin: 5px 0; font-size: 13px; }
   .bar .track { flex: 1; display: block; height: 8px; background: var(--soft); border-radius: 99px; overflow: hidden; }
   .bar .fill { display: block; height: 8px; background: var(--accent); border-radius: 99px; min-width: 3px; }
@@ -105,22 +142,28 @@
 </style>
 </head>
 <body>
-<header>
-  <h1>Circle Leads</h1>
+<div class="app">
+<aside class="sidebar">
+  <div class="brand"><span class="logo">🔥</span> Warmr</div>
   <nav>
-    <button data-view="leads" aria-selected="true">Leads</button>
-    <button data-view="triage" aria-selected="false">Triage</button>
-    <button data-view="activity" aria-selected="false">Activity</button>
-    <button data-view="stats" aria-selected="false">Stats</button>
-    <button data-view="communities" aria-selected="false">Communities</button>
-    <button data-view="config" aria-selected="false">Config</button>
-    <button id="logout">Sign out</button>
+    <button data-view="leads" aria-selected="true"><span class="ic">🎯</span> Leads</button>
+    <button data-view="stats" aria-selected="false"><span class="ic">📊</span> Overview</button>
+    <button data-view="communities" aria-selected="false"><span class="ic">🌐</span> Communities</button>
+    <button data-view="activity" aria-selected="false"><span class="ic">📡</span> Activity</button>
+    <div class="sep"></div>
+    <button data-view="triage" aria-selected="false"><span class="ic">🔎</span> Triage</button>
+    <button data-view="config" aria-selected="false"><span class="ic">⚙️</span> Config</button>
   </nav>
-</header>
+  <button id="logout">Sign out</button>
+</aside>
 
 <main>
   <!-- LEADS -->
   <section id="view-leads">
+    <div class="page-head">
+      <h1>Leads</h1>
+      <p>Hiring intent found in public community feeds — people looking to hire developers.</p>
+    </div>
     <div class="panel">
       <div class="row">
         <input id="f-role" placeholder="Role, e.g. Flutter Developer" style="flex:1;min-width:180px">
@@ -145,6 +188,10 @@
 
   <!-- TRIAGE -->
   <section id="view-triage" hidden>
+    <div class="page-head">
+      <h1>Triage</h1>
+      <p>Paste posts from a community you've joined and classify them into leads.</p>
+    </div>
     <div class="panel">
       <h2>Paste community text</h2>
       <p class="muted" style="margin-top:-6px">
@@ -168,9 +215,13 @@
 
   <!-- ACTIVITY -->
   <section id="view-activity" hidden>
+    <div class="page-head">
+      <h1>Activity</h1>
+      <p>A live log of every search, community read, and classifier decision.</p>
+    </div>
     <div class="panel">
       <div class="row" style="margin-bottom:10px">
-        <h2 style="margin:0">Activity</h2>
+        <h2 style="margin:0">Recent events</h2>
         <select id="a-kind" style="margin-left:auto">
           <option value="">All events</option>
           <option value="harvest">Harvest runs</option>
@@ -189,6 +240,10 @@
 
   <!-- STATS -->
   <section id="view-stats" hidden>
+    <div class="page-head">
+      <h1>Overview</h1>
+      <p>Leads, communities, and classification at a glance.</p>
+    </div>
     <div class="grid" id="stat-cards"></div>
     <div class="panel"><h2>Leads per day (14 days)</h2><div class="spark" id="spark"></div></div>
     <div class="panel"><h2>By priority</h2><div id="by-priority"></div></div>
@@ -199,6 +254,10 @@
 
   <!-- CONFIG -->
   <section id="view-config" hidden>
+    <div class="page-head">
+      <h1>Config</h1>
+      <p>Search terms, thresholds, and the automatic harvest schedule.</p>
+    </div>
     <div class="panel">
       <h2>Automatic harvest schedule</h2>
       <p class="muted" style="margin-top:-6px">How often the background worker harvests leads. Change any time — no redeploy.</p>
@@ -309,6 +368,10 @@
 
   <!-- COMMUNITIES -->
   <section id="view-communities" hidden>
+    <div class="page-head">
+      <h1>Communities</h1>
+      <p>Discovered Circle communities. Subscribe (★) to poll one first on the fast lane.</p>
+    </div>
     <div class="panel">
       <h2 style="margin:0 0 2px">Find leads</h2>
       <span class="muted" style="font-size:13px">Discover public communities and read their public spaces for hiring posts — no login.</span>
@@ -330,6 +393,7 @@
     <div class="panel"><div id="communities-table"><div class="empty">Loading…</div></div></div>
   </section>
 </main>
+</div>
 
 <script>
 const $ = (id) => document.getElementById(id);
@@ -559,9 +623,14 @@ async function loadStats() {
   if (!data) return;
 
   $('stat-cards').innerHTML = [
-    ['Leads', data.leads], ['Posts read', data.posts],
-    ['Communities', data.communities], ['High priority', data.by_priority.HIGH || 0],
-  ].map(([k, n]) => `<div class="stat"><div class="n">${n}</div><div class="k">${k}</div></div>`).join('');
+    ['Leads', data.leads, '🎯', 'people looking to hire'],
+    ['Posts read', data.posts, '📄', 'classified from feeds'],
+    ['Communities', data.communities, '🌐', 'discovered'],
+    ['High priority', data.by_priority.HIGH || 0, '🔥', 'strongest hiring intent'],
+  ].map(([k, n, ic, sub]) =>
+    `<div class="stat"><span class="ic">${ic}</span>
+       <div class="k">${k}</div><div class="n">${n}</div>
+       <div class="sub">${sub}</div></div>`).join('');
 
   const max = Math.max(1, ...data.timeline.map(p => p.count));
   $('spark').innerHTML = data.timeline.map(p =>
