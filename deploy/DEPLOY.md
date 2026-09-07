@@ -139,6 +139,41 @@ quick experiment.
   needs Postgres.
 - The Dockerfile installs `psycopg[binary]` so the Postgres URL works out of the box.
 
+### Serverless (Vercel) + Supabase: avoid pooler exhaustion
+
+On Vercel each request may run in a fresh function instance. With Supabase's
+**session-mode pooler (port 5432)** each instance holds a connection, and the
+small pool (`pool_size: 15`) is exhausted fast:
+
+```
+FATAL: (EMAXCONNSESSION) max clients reached in session mode
+```
+
+To avoid it:
+
+1. **Use the transaction pooler (port 6543), not session mode (5432).** In
+   Supabase: Settings → Database → Connection string → **Transaction**. The URI
+   ends in `:6543/postgres` (it may add `?pgbouncer=true`). Set it as
+   `CIRCLE_LEADS_DB`.
+2. **Set `SKIP_DB_INIT=true`.** Otherwise every cold start opens a connection to
+   run `create_all()`. Create the tables once (below), then skip it.
+3. `DB_NULLPOOL=true` is optional — the code already uses `NullPool` when it
+   detects Vercel/Lambda, so a connection is closed after each request instead
+   of being held. This var just forces it anywhere.
+
+**Create the tables once** (locally, pointed at Supabase — do this before setting
+`SKIP_DB_INIT`):
+
+```bash
+CIRCLE_LEADS_DB='postgresql://postgres.<ref>:<pw>@aws-0-<region>.pooler.supabase.com:6543/postgres' \
+  python -c "from circle_leads.storage.database import Database; \
+Database('$CIRCLE_LEADS_DB'); print('tables created')"
+```
+
+None of this makes the browser features work on Vercel — the dashboard, API,
+leads and classifier work once the DB is reachable; the Playwright pieces still
+need the local connector.
+
 ## What is NOT deployed to the cloud
 
 - **The browser feed reader (`read-feed` / `read-all`)** for *private* communities
