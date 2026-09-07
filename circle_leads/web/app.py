@@ -673,10 +673,14 @@ def create_app(db_url: str | None = None, config_path: str | None = None) -> Fas
                 ).all()
             )
 
-            # Leads per day for the last fortnight.
+            # Leads and communities per day for the last fortnight (drives the
+            # Overview growth chart).
             cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=14)
             daily_rows = s.execute(
                 select(Lead.created_at).where(Lead.created_at >= cutoff)
+            ).all()
+            community_daily_rows = s.execute(
+                select(Community.discovered_at).where(Community.discovered_at >= cutoff)
             ).all()
 
         skills = Counter()
@@ -684,18 +688,23 @@ def create_app(db_url: str | None = None, config_path: str | None = None) -> Fas
             for skill in row or []:
                 skills[skill] += 1
 
-        daily = Counter(d[0].date().isoformat() for d in daily_rows if d[0])
-        timeline = [
-            {
-                "date": (
-                    datetime.now(timezone.utc).date() - timedelta(days=i)
-                ).isoformat(),
-                "count": 0,
-            }
-            for i in range(13, -1, -1)
-        ]
-        for point in timeline:
-            point["count"] = daily.get(point["date"], 0)
+        def daily_timeline(rows: list) -> list[dict[str, Any]]:
+            counts = Counter(d[0].date().isoformat() for d in rows if d[0])
+            points = [
+                {
+                    "date": (
+                        datetime.now(timezone.utc).date() - timedelta(days=i)
+                    ).isoformat(),
+                    "count": 0,
+                }
+                for i in range(13, -1, -1)
+            ]
+            for point in points:
+                point["count"] = counts.get(point["date"], 0)
+            return points
+
+        leads_timeline = daily_timeline(daily_rows)
+        communities_timeline = daily_timeline(community_daily_rows)
 
         return {
             "communities": communities,
@@ -706,7 +715,11 @@ def create_app(db_url: str | None = None, config_path: str | None = None) -> Fas
             "by_community": by_community,
             "top_skills": skills.most_common(10),
             "decided_by": decided,
-            "timeline": timeline,
+            # "timeline" kept for backward compatibility with older clients;
+            # new dashboards should use leads_timeline / communities_timeline.
+            "timeline": leads_timeline,
+            "leads_timeline": leads_timeline,
+            "communities_timeline": communities_timeline,
         }
 
     @app.get("/api/activity")

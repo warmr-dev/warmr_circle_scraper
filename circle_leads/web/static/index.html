@@ -10,6 +10,7 @@
     --line: #eaecf0; --accent: #ef4444; --accent-ink: #b42318;
     --soft: #f9fafb; --soft2: #fef3f2;
     --high: #067647; --medium: #b54708; --low: #667085; --danger: #b42318;
+    --info: #2970ff; --violet: #7a5af8;
     --sidebar: #fff; --shadow: 0 1px 2px rgba(16,24,40,.05);
     --radius: 12px;
   }
@@ -108,30 +109,64 @@
   .tag { font-size: 11.5px; padding: 2px 7px; border-radius: 5px; background: var(--soft); color: var(--muted); }
   .draft { margin-top: 9px; padding: 10px 11px; border: 1px dashed var(--line); border-radius: 7px; font-size: 13px; white-space: pre-wrap; }
 
-  table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  th, td { text-align: left; padding: 7px 9px; border-bottom: 1px solid var(--line); vertical-align: top; }
-  th { font-size: 11.5px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); font-weight: 600; }
+  .table-wrap { overflow-x: auto; margin: -4px -4px 0; padding: 4px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 640px; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  th {
+    font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted);
+    font-weight: 700; background: var(--soft); position: sticky; top: 0;
+  }
+  th:first-child, td:first-child { padding-left: 14px; }
+  tbody tr { transition: background .12s ease; }
+  tbody tr:hover { background: var(--soft); }
+  tbody tr:last-child td { border-bottom: 0; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .ellipsis { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; vertical-align: middle; }
+  .score-badge {
+    display: inline-flex; align-items: center; justify-content: center; min-width: 34px;
+    padding: 3px 8px; border-radius: 7px; font-weight: 700; font-size: 12.5px;
+    font-variant-numeric: tabular-nums;
+  }
   .level-success { color: var(--high); } .level-warning { color: var(--medium); }
   .level-error { color: var(--danger); } .level-info { color: var(--muted); }
 
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 16px; margin-bottom: 16px; }
   .stat {
     background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
-    padding: 18px 20px; box-shadow: var(--shadow); position: relative;
+    padding: 18px 20px; box-shadow: var(--shadow); position: relative; overflow: hidden;
   }
   .stat .k { font-size: 13px; color: var(--muted); font-weight: 500; }
   .stat .n { font-size: 32px; font-weight: 700; letter-spacing: -.03em; margin: 6px 0 2px; }
   .stat .sub { font-size: 12px; color: var(--muted); }
   .stat .ic {
-    position: absolute; top: 16px; right: 18px; color: var(--accent);
-    font-size: 16px; opacity: .8;
+    position: absolute; top: 14px; right: 14px; font-size: 17px; width: 36px; height: 36px;
+    border-radius: 10px; display: grid; place-items: center; opacity: .95;
   }
-  .bar { display: flex; align-items: center; gap: 8px; margin: 5px 0; font-size: 13px; }
+  .bar { display: flex; align-items: center; gap: 8px; margin: 8px 0; font-size: 13px; }
   .bar .track { flex: 1; display: block; height: 8px; background: var(--soft); border-radius: 99px; overflow: hidden; }
-  .bar .fill { display: block; height: 8px; background: var(--accent); border-radius: 99px; min-width: 3px; }
-  .bar .label { min-width: 108px; } .bar .val { min-width: 30px; text-align: right; color: var(--muted); }
-  .spark { display: flex; align-items: flex-end; gap: 3px; height: 54px; margin-top: 8px; }
-  .spark div { flex: 1; background: var(--accent); border-radius: 2px 2px 0 0; min-height: 2px; }
+  .bar .fill { display: block; height: 8px; border-radius: 99px; min-width: 3px; background: var(--accent); }
+  .bar .label { min-width: 108px; } .bar .val { min-width: 34px; text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+  /* --- Overview layout & charts ----------------------------------------- */
+  .overview-grid { display: grid; grid-template-columns: 2fr 1fr; gap: 16px; align-items: start; }
+  .overview-grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; align-items: start; }
+  .overview-grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
+  @media (max-width: 980px) {
+    .overview-grid, .overview-grid-3, .overview-grid-2 { grid-template-columns: 1fr; }
+  }
+  .chart-legend { display: flex; gap: 18px; flex-wrap: wrap; margin-top: 10px; }
+  .chart-legend .item { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--muted); }
+  .chart-legend .dot { width: 9px; height: 9px; border-radius: 99px; flex: none; }
+  .chart-empty { padding: 40px 0; text-align: center; color: var(--muted); font-size: 13px; }
+
+  .donut-row { display: flex; align-items: center; gap: 18px; }
+  .donut-row svg { flex: none; }
+  .legend { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+  .legend-row { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+  .legend-row .dot { width: 9px; height: 9px; border-radius: 99px; flex: none; }
+  .legend-row .legend-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .legend-row .legend-val { font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+
   [hidden] { display: none !important; }
   .empty { padding: 26px; text-align: center; color: var(--muted); }
   .toast {
@@ -146,13 +181,12 @@
 <aside class="sidebar">
   <div class="brand"><span class="logo">🔥</span> Warmr</div>
   <nav>
-    <button data-view="leads" aria-selected="true"><span class="ic">🎯</span> Leads</button>
-    <button data-view="stats" aria-selected="false"><span class="ic">📊</span> Overview</button>
+    <button data-view="stats" aria-selected="true"><span class="ic">📊</span> Overview</button>
+    <button data-view="leads" aria-selected="false"><span class="ic">🎯</span> Leads</button>
     <button data-view="communities" aria-selected="false"><span class="ic">🌐</span> Communities</button>
     <button data-view="connector" aria-selected="false"><span class="ic">🔌</span> Circle Connector</button>
     <button data-view="activity" aria-selected="false"><span class="ic">📡</span> Activity</button>
     <div class="sep"></div>
-    <button data-view="triage" aria-selected="false"><span class="ic">🔎</span> Triage</button>
     <button data-view="config" aria-selected="false"><span class="ic">⚙️</span> Config</button>
   </nav>
   <button id="logout">Sign out</button>
@@ -160,7 +194,7 @@
 
 <main>
   <!-- LEADS -->
-  <section id="view-leads">
+  <section id="view-leads" hidden>
     <div class="page-head">
       <h1>Leads</h1>
       <p>Hiring intent found in public community feeds — people looking to hire developers.</p>
@@ -185,33 +219,6 @@
       </div>
     </div>
     <div id="leads-list"><div class="empty">Loading…</div></div>
-  </section>
-
-  <!-- TRIAGE -->
-  <section id="view-triage" hidden>
-    <div class="page-head">
-      <h1>Triage</h1>
-      <p>Paste posts from a community you've joined and classify them into leads.</p>
-    </div>
-    <div class="panel">
-      <h2>Paste community text</h2>
-      <p class="muted" style="margin-top:-6px">
-        Open a community you've joined, copy the posts on screen, and paste them here.
-      </p>
-      <div class="row" style="margin-bottom:8px">
-        <input id="t-community" placeholder="Community slug" value="manual" style="flex:1;min-width:150px">
-        <input id="t-space" placeholder="Space (optional)" style="flex:1;min-width:140px">
-        <input id="t-url" placeholder="Thread URL (optional)" style="flex:2;min-width:180px">
-      </div>
-      <textarea id="t-text" placeholder="Dana Ops · 2h ago&#10;We need someone to build our app…"></textarea>
-      <div class="row" style="margin-top:9px">
-        <button class="action" id="t-run">Find leads</button>
-        <label class="muted" style="display:flex;gap:6px;align-items:center">
-          <input type="checkbox" id="t-llm" style="width:auto"> Use AI for ambiguous posts
-        </label>
-      </div>
-    </div>
-    <div id="triage-out"></div>
   </section>
 
   <!-- ACTIVITY -->
@@ -240,17 +247,41 @@
   </section>
 
   <!-- STATS -->
-  <section id="view-stats" hidden>
+  <section id="view-stats">
     <div class="page-head">
       <h1>Overview</h1>
       <p>Leads, communities, and classification at a glance.</p>
     </div>
     <div class="grid" id="stat-cards"></div>
-    <div class="panel"><h2>Leads per day (14 days)</h2><div class="spark" id="spark"></div></div>
-    <div class="panel"><h2>By priority</h2><div id="by-priority"></div></div>
+
+    <div class="overview-grid">
+      <div class="panel">
+        <h2>Growth — last 14 days</h2>
+        <div id="growth-chart"></div>
+        <div class="chart-legend" id="growth-legend"></div>
+      </div>
+      <div class="panel">
+        <h2>By priority</h2>
+        <div id="donut-priority"></div>
+      </div>
+    </div>
+
+    <div class="overview-grid-3">
+      <div class="panel">
+        <h2>By review status</h2>
+        <div id="donut-status"></div>
+      </div>
+      <div class="panel">
+        <h2>Decided by</h2>
+        <div id="donut-decided"></div>
+      </div>
+      <div class="panel">
+        <h2>Most requested skills</h2>
+        <div id="by-skill"></div>
+      </div>
+    </div>
+
     <div class="panel"><h2>By community</h2><div id="by-community"></div></div>
-    <div class="panel"><h2>Most requested skills</h2><div id="by-skill"></div></div>
-    <div class="panel"><h2>Decided by</h2><div id="by-decided"></div></div>
   </section>
 
   <!-- CONFIG -->
@@ -466,10 +497,10 @@ async function api(path, options) {
 }
 
 // --- Navigation -------------------------------------------------------
-const views = ['leads', 'triage', 'activity', 'stats', 'communities', 'connector', 'config'];
+const views = ['leads', 'activity', 'stats', 'communities', 'connector', 'config'];
 const loaders = {
   leads: loadLeads, activity: loadActivity, stats: loadStats,
-  communities: loadCommunities, config: loadConfig, triage: () => {},
+  communities: loadCommunities, config: loadConfig,
   connector: loadConnector,
 };
 
@@ -534,7 +565,7 @@ async function loadLeads() {
   if (!data) return;
   $('leads-list').innerHTML = data.leads.length
     ? data.leads.map(leadCard).join('')
-    : '<div class="empty">No leads match. Try the Triage tab to add some.</div>';
+    : '<div class="empty">No leads match those filters yet.</div>';
 }
 
 $('f-apply').addEventListener('click', loadLeads);
@@ -581,40 +612,6 @@ document.addEventListener('click', async (event) => {
   }
 });
 
-// --- Triage -----------------------------------------------------------
-$('t-run').addEventListener('click', async () => {
-  const text = $('t-text').value;
-  if (!text.trim()) { toast('Paste some text first'); return; }
-
-  $('t-run').disabled = true;
-  $('t-run').textContent = 'Reading…';
-  try {
-    const data = await api('/api/triage', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        text,
-        community: $('t-community').value || 'manual',
-        space: $('t-space').value,
-        url: $('t-url').value,
-        use_llm: $('t-llm').checked,
-      }),
-    });
-    if (!data) return;
-    const summary = `<div class="panel"><strong>Read ${data.total_posts} post(s)</strong>
-      <span class="muted"> — ${data.leads.length} lead(s), ${data.not_leads} not-lead,
-      ${data.filtered} filtered, ${data.already_seen} seen before</span></div>`;
-    $('triage-out').innerHTML = summary + (data.leads.length
-      ? data.leads.map(leadCard).join('')
-      : '<div class="empty">Nothing worth replying to in this batch.</div>');
-  } catch (err) {
-    $('triage-out').innerHTML = `<div class="panel level-error">${esc(err.message)}</div>`;
-  } finally {
-    $('t-run').disabled = false;
-    $('t-run').textContent = 'Find leads';
-  }
-});
-
 // --- Activity ---------------------------------------------------------
 // Build the small grey sub-line under an activity row from its detail JSON.
 function activityDetail(a) {
@@ -657,42 +654,184 @@ async function loadActivity() {
 $('a-refresh').addEventListener('click', loadActivity);
 $('a-kind').addEventListener('change', loadActivity);
 
-// --- Stats ------------------------------------------------------------
-function bars(target, entries) {
+// --- Stats / Overview charts -------------------------------------------
+function bars(target, entries, colorFor) {
   const items = Object.entries(entries || {}).filter(([, v]) => v);
   if (!items.length) { $(target).innerHTML = '<div class="muted">No data yet.</div>'; return; }
   const max = Math.max(...items.map(([, v]) => v));
-  $(target).innerHTML = items.sort((a, b) => b[1] - a[1]).map(([k, v]) => `
-    <div class="bar"><span class="label">${esc(k)}</span>
-      <span class="track"><span class="fill" style="width:${(v / max) * 100}%"></span></span>
+  $(target).innerHTML = items.sort((a, b) => b[1] - a[1]).map(([k, v], i) => `
+    <div class="bar"><span class="label ellipsis" title="${esc(k)}">${esc(k)}</span>
+      <span class="track"><span class="fill" style="width:${(v / max) * 100}%;background:${colorFor ? colorFor(k, i) : 'var(--accent)'}"></span></span>
       <span class="val">${v}</span></div>`).join('');
 }
+
+// Catmull-Rom -> cubic Bezier smoothing, so lines look like smooth curves
+// instead of sharp zig-zags between daily data points.
+function smoothPath(points) {
+  if (points.length < 2) return '';
+  let d = `M${points[0][0]},${points[0][1]}`;
+  for (let i = 0; i < points.length - 1; i++) {
+    const p0 = points[i === 0 ? i : i - 1];
+    const p1 = points[i];
+    const p2 = points[i + 1];
+    const p3 = points[i + 2 < points.length ? i + 2 : i + 1];
+    const c1x = p1[0] + (p2[0] - p0[0]) / 6, c1y = p1[1] + (p2[1] - p0[1]) / 6;
+    const c2x = p2[0] - (p3[0] - p1[0]) / 6, c2y = p2[1] - (p3[1] - p1[1]) / 6;
+    d += ` C${c1x},${c1y} ${c2x},${c2y} ${p2[0]},${p2[1]}`;
+  }
+  return d;
+}
+
+// Renders a smooth multi-series line/area chart into elId, given
+// categories (x-axis labels) and series = [{ name, color, values, area? }].
+function renderGrowthChart(elId, categories, series) {
+  const el = $(elId);
+  const allZero = series.every(s => s.values.every(v => !v));
+  if (!categories.length || allZero) {
+    el.innerHTML = '<div class="chart-empty">No data yet — numbers will appear here once leads and communities start coming in.</div>';
+    return;
+  }
+  const W = 760, H = 260, padL = 34, padR = 12, padT = 14, padB = 26;
+  const innerW = W - padL - padR, innerH = H - padT - padB;
+  const n = categories.length;
+  const maxV = Math.max(4, ...series.flatMap(s => s.values));
+  const xAt = (i) => padL + (n > 1 ? (innerW * i) / (n - 1) : innerW / 2);
+  const yAt = (v) => padT + innerH - (v / maxV) * innerH;
+
+  const steps = 4;
+  let grid = '';
+  for (let g = 0; g <= steps; g++) {
+    const val = Math.round((maxV / steps) * g);
+    const y = yAt(val);
+    grid += `<line x1="${padL}" y1="${y.toFixed(1)}" x2="${W - padR}" y2="${y.toFixed(1)}" stroke="var(--line)" stroke-dasharray="3,4"/>`;
+    grid += `<text x="${padL - 8}" y="${(y + 3).toFixed(1)}" font-size="10" text-anchor="end" fill="var(--muted)">${val}</text>`;
+  }
+
+  let xLabels = '';
+  categories.forEach((c, i) => {
+    if (n > 9 && i % 2 !== 0 && i !== n - 1) return;
+    xLabels += `<text x="${xAt(i).toFixed(1)}" y="${H - 6}" font-size="10" text-anchor="middle" fill="var(--muted)">${esc(c)}</text>`;
+  });
+
+  let defs = '<defs>';
+  let body = '';
+  series.forEach((s, si) => {
+    const pts = s.values.map((v, i) => [xAt(i), yAt(v)]);
+    const line = smoothPath(pts);
+    if (s.area) {
+      defs += `<linearGradient id="grad-${elId}-${si}" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="${s.color}" stop-opacity="0.30"/>
+        <stop offset="100%" stop-color="${s.color}" stop-opacity="0"/>
+      </linearGradient>`;
+      const base = padT + innerH;
+      body += `<path d="${line} L${pts[pts.length - 1][0].toFixed(1)},${base} L${pts[0][0].toFixed(1)},${base} Z" fill="url(#grad-${elId}-${si})" stroke="none"/>`;
+    }
+    body += `<path d="${line}" fill="none" stroke="${s.color}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>`;
+    body += pts.map(([x, y]) => `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="3.6" fill="#fff" stroke="${s.color}" stroke-width="2.2"/>`).join('');
+  });
+  defs += '</defs>';
+
+  el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" width="100%" height="260" preserveAspectRatio="none" role="img">${defs}${grid}${body}${xLabels}</svg>`;
+}
+
+// Renders a donut chart (SVG stroke-dasharray arcs) plus a legend list into
+// elId, from an object of { label: count }. colorFor(label, index) picks
+// each segment's color.
+function renderDonut(elId, entries, colorFor) {
+  const el = $(elId);
+  const items = Object.entries(entries || {}).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]);
+  const total = items.reduce((sum, [, v]) => sum + v, 0);
+  if (!total) { el.innerHTML = '<div class="muted">No data yet.</div>'; return; }
+
+  const r = 46, cx = 60, cy = 60, sw = 16;
+  const circumference = 2 * Math.PI * r;
+  let cumulative = 0;
+  const arcs = items.map(([label, val], i) => {
+    const color = colorFor(label, i);
+    const len = (val / total) * circumference;
+    const arc = `<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="${color}" stroke-width="${sw}"
+      stroke-dasharray="${len.toFixed(2)} ${(circumference - len).toFixed(2)}"
+      stroke-dashoffset="${(-cumulative).toFixed(2)}" transform="rotate(-90 ${cx} ${cy})"/>`;
+    cumulative += len;
+    return arc;
+  }).join('');
+
+  const legend = items.map(([label, val], i) => {
+    const color = colorFor(label, i);
+    const pct = Math.round((val / total) * 100);
+    return `<div class="legend-row"><span class="dot" style="background:${color}"></span>
+      <span class="legend-label" title="${esc(label)}">${esc(label)}</span>
+      <span class="legend-val">${val} <span class="muted">(${pct}%)</span></span></div>`;
+  }).join('');
+
+  el.innerHTML = `<div class="donut-row">
+    <svg viewBox="0 0 120 120" width="120" height="120">${arcs}
+      <text x="60" y="57" text-anchor="middle" font-size="22" font-weight="700" fill="var(--ink)">${total}</text>
+      <text x="60" y="73" text-anchor="middle" font-size="10" fill="var(--muted)">total</text>
+    </svg>
+    <div class="legend">${legend}</div>
+  </div>`;
+}
+
+const PRIORITY_COLOR = { HIGH: 'var(--high)', MEDIUM: 'var(--medium)', LOW: 'var(--low)' };
+const STATUS_COLOR = {
+  pending_review: 'var(--medium)', contacted: 'var(--info)', replied: 'var(--violet)',
+  won: 'var(--high)', rejected: 'var(--danger)',
+};
+const DECIDED_COLOR = { rule: 'var(--info)', llm: 'var(--violet)', ai: 'var(--violet)' };
+const PALETTE = ['var(--accent)', 'var(--info)', 'var(--violet)', 'var(--high)', 'var(--medium)', 'var(--low)'];
 
 async function loadStats() {
   const data = await api('/api/stats');
   if (!data) return;
 
   $('stat-cards').innerHTML = [
-    ['Leads', data.leads, '🎯', 'people looking to hire'],
-    ['Posts read', data.posts, '📄', 'classified from feeds'],
-    ['Communities', data.communities, '🌐', 'discovered'],
-    ['High priority', data.by_priority.HIGH || 0, '🔥', 'strongest hiring intent'],
-  ].map(([k, n, ic, sub]) =>
-    `<div class="stat"><span class="ic">${ic}</span>
+    ['Leads', data.leads, '🎯', 'people looking to hire', 'var(--accent)'],
+    ['Posts read', data.posts, '📄', 'classified from feeds', 'var(--info)'],
+    ['Communities', data.communities, '🌐', 'discovered', 'var(--violet)'],
+    ['High priority', data.by_priority.HIGH || 0, '🔥', 'strongest hiring intent', 'var(--high)'],
+  ].map(([k, n, ic, sub, color]) =>
+    `<div class="stat"><span class="ic" style="background:color-mix(in srgb, ${color} 16%, transparent);color:${color}">${ic}</span>
        <div class="k">${k}</div><div class="n">${n}</div>
        <div class="sub">${sub}</div></div>`).join('');
 
-  const max = Math.max(1, ...data.timeline.map(p => p.count));
-  $('spark').innerHTML = data.timeline.map(p =>
-    `<div style="height:${(p.count / max) * 100}%" title="${p.date}: ${p.count}"></div>`).join('');
+  const leadsTimeline = data.leads_timeline || data.timeline || [];
+  const communitiesTimeline = data.communities_timeline || [];
+  const categories = leadsTimeline.map(p => p.date.slice(5).replace('-', '/'));
+  renderGrowthChart('growth-chart', categories, [
+    { name: 'Leads', color: 'var(--accent)', area: true, values: leadsTimeline.map(p => p.count) },
+    { name: 'New communities', color: 'var(--info)', area: false, values: communitiesTimeline.map(p => p.count) },
+  ]);
+  $('growth-legend').innerHTML = `
+    <span class="item"><span class="dot" style="background:var(--accent)"></span>Leads</span>
+    <span class="item"><span class="dot" style="background:var(--info)"></span>New communities</span>`;
 
-  bars('by-priority', data.by_priority);
-  bars('by-community', data.by_community);
-  bars('by-skill', Object.fromEntries(data.top_skills || []));
-  bars('by-decided', data.decided_by);
+  renderDonut('donut-priority', data.by_priority, (k) => PRIORITY_COLOR[k] || 'var(--low)');
+  renderDonut('donut-status', data.by_status, (k) => STATUS_COLOR[k] || 'var(--low)');
+  renderDonut('donut-decided', data.decided_by, (k) => DECIDED_COLOR[k] || 'var(--low)');
+
+  bars('by-community', data.by_community, (_, i) => PALETTE[i % PALETTE.length]);
+  bars('by-skill', Object.fromEntries(data.top_skills || []), (_, i) => PALETTE[i % PALETTE.length]);
 }
 
 // --- Communities ------------------------------------------------------
+// access_status -> [label, color]. Colors are reused consistently with the
+// pill/badge styling used elsewhere (Leads priority, Connector states).
+const ACCESS_META = {
+  not_visited: ['Not visited', 'var(--muted)'],
+  visited: ['Visited', 'var(--info)'],
+  joined: ['Joined', 'var(--high)'],
+  pending_approval: ['Pending approval', 'var(--medium)'],
+  requires_manual_action: ['Needs action', 'var(--danger)'],
+  not_accessible: ['Not accessible', 'var(--danger)'],
+};
+
+function scoreColor(score) {
+  if (score >= 70) return 'var(--high)';
+  if (score >= 40) return 'var(--medium)';
+  return 'var(--low)';
+}
+
 async function loadCommunities() {
   const data = await api('/api/communities');
   if (!data) return;
@@ -701,43 +840,54 @@ async function loadCommunities() {
       '<div class="empty">No communities yet. Run <code>circle-leads search-watch</code>.</div>';
     return;
   }
-  $('communities-table').innerHTML = `<table>
-    <thead><tr><th>Community</th><th>Score</th><th>Found</th><th>Why</th><th>Watch</th><th>Status</th><th></th></tr></thead>
+  $('communities-table').innerHTML = `<div class="table-wrap"><table>
+    <thead><tr>
+      <th>Community</th><th>Price</th><th class="num">Score</th><th>Discovered</th>
+      <th>Why relevant</th><th>Watch</th><th>Status</th><th>Actions</th>
+    </tr></thead>
     <tbody>${data.communities.map(c => {
       const joined = c.access_status !== 'not_visited';
       const price = c.price_label || '';
       const isPaid = price.includes('$');
       const isFree = price.toLowerCase() === 'free';
-      const badge = isFree ? '<span class="tag" style="margin-left:6px;color:var(--high)">free</span>'
-        : isPaid ? `<span class="tag" style="margin-left:6px;color:var(--medium)">${esc(price)}</span>`
-        : '<span class="tag muted" style="margin-left:6px">price on site</span>';
-      const why = (c.relevance_reasons || []).filter(r => !r.startsWith('not:') && r !== 'paid').slice(0,4).join(', ');
+      const priceBadge = isFree
+        ? '<span class="pill" style="color:var(--high);background:color-mix(in srgb, var(--high) 14%, transparent)">Free</span>'
+        : isPaid
+        ? `<span class="pill" style="color:var(--medium);background:color-mix(in srgb, var(--medium) 14%, transparent)">${esc(price)}</span>`
+        : '<span class="muted" style="font-size:12px">On site</span>';
+      const why = (c.relevance_reasons || []).filter(r => !r.startsWith('not:') && r !== 'paid').slice(0, 4).join(', ');
+      const score = Math.round(c.relevance_score);
+      const sColor = scoreColor(score);
+      const [statusLabel, statusColor] = ACCESS_META[c.access_status] || ACCESS_META.not_visited;
+      const isCircle = c.url && c.url.includes('.circle.so') && !c.url.includes('discover');
       return `<tr>
-        <td><a href="${esc(c.url)}" target="_blank" rel="noopener">${esc(c.name || c.slug)} ↗</a>${badge}</td>
-        <td>${Math.round(c.relevance_score)}</td>
-        <td class="muted" title="${esc(c.discovered_at || '')}">${c.discovered_at ? esc(c.discovered_at.slice(0,10)) : '—'}</td>
-        <td class="muted">${esc(why || '—')}</td>
-        <td>${(c.url && c.url.includes('.circle.so') && !c.url.includes('discover'))
+        <td><a href="${esc(c.url)}" target="_blank" rel="noopener" class="ellipsis" style="max-width:220px">${esc(c.name || c.slug)} ↗</a></td>
+        <td>${priceBadge}</td>
+        <td class="num"><span class="score-badge" style="color:${sColor};background:color-mix(in srgb, ${sColor} 14%, transparent)">${score}</span></td>
+        <td class="muted" title="${esc(c.discovered_at || '')}">${c.discovered_at ? esc(c.discovered_at.slice(0, 10)) : '—'}</td>
+        <td class="muted ellipsis" title="${esc(why || '')}">${esc(why || '—')}</td>
+        <td>${isCircle
           ? `<button class="ghost watch-toggle" data-slug="${esc(c.slug)}"
                data-watching="${c.watching ? '1' : '0'}" aria-pressed="${!!c.watching}"
                title="Subscribe: poll this community first on the 5-min fast lane"
-               style="${c.watching ? 'color:var(--high);font-weight:600' : ''}">
+               style="${c.watching ? 'color:#b45309;border-color:#fde68a;background:#fffbeb;font-weight:600' : ''}">
                ${c.watching ? '★ Watching' : '☆ Watch'}</button>`
           : '<span class="muted">—</span>'}</td>
-        <td>${joined ? `<span class="pill HIGH">${esc(c.access_status)}</span>` : '<span class="muted">not visited</span>'}</td>
+        <td><span class="pill" style="color:${statusColor};background:color-mix(in srgb, ${statusColor} 14%, transparent)">${esc(statusLabel)}</span></td>
         <td>
-          <a class="ghost" href="${esc(c.url)}" target="_blank" rel="noopener"
-             style="text-decoration:none">Open &amp; join</a>
-          <button class="ghost mark-joined" data-slug="${esc(c.slug)}"
-             data-state="${joined ? 'not_visited' : 'joined'}"
-             aria-pressed="${joined}">${joined ? 'Undo' : 'Mark joined'}</button>
-          ${(c.url && c.url.includes('.circle.so') && !c.url.includes('discover'))
-            ? `<button class="ghost read-feed" data-host="${esc(c.url.replace('https://','').replace(/\/.*/,''))}"
-                 data-slug="${esc(c.slug)}" title="Read this community's feed (must be signed in)">Read feed</button>`
-            : ''}
+          <div class="row" style="gap:6px;flex-wrap:nowrap">
+            <a class="ghost" href="${esc(c.url)}" target="_blank" rel="noopener" style="text-decoration:none">Open</a>
+            <button class="ghost mark-joined" data-slug="${esc(c.slug)}"
+               data-state="${joined ? 'not_visited' : 'joined'}"
+               aria-pressed="${joined}">${joined ? 'Undo' : 'Mark joined'}</button>
+            ${isCircle
+              ? `<button class="ghost read-feed" data-host="${esc(c.url.replace('https://', '').replace(/\/.*/, ''))}"
+                   data-slug="${esc(c.slug)}" title="Read this community's feed (must be signed in)">Read feed</button>`
+              : ''}
+          </div>
         </td>
       </tr>`;
-    }).join('')}</tbody></table>`;
+    }).join('')}</tbody></table></div>`;
 }
 
 // --- Circle Connector (private communities) --------------------------
@@ -1033,7 +1183,7 @@ async function saveConfigOnly() {
   return resp.ok;
 }
 
-loadLeads();
+loadStats();
 pollJobs();
 </script>
 </body>
