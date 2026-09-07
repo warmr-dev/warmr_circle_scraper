@@ -18,7 +18,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from sqlalchemy import func, select
 
 from circle_leads.config.settings import (
-    load_requirements, requirements_to_dict, save_requirements,
+    load_requirements, requirements_to_dict,
 )
 from circle_leads.export.exporters import query_leads
 from circle_leads.storage.activity import log_activity, recent_activity
@@ -46,8 +46,28 @@ def create_app(db_url: str | None = None, config_path: str | None = None) -> Fas
 
     app = FastAPI(title="Circle Leads", docs_url=None, redoc_url=None)
     db = Database(db_url or os.environ.get("CIRCLE_LEADS_DB") or None)
-    requirements_holder = {"req": load_requirements(config_path)}
     config_file = config_path
+
+    def _load_effective_requirements():
+        """Packaged defaults, with any DB-stored dashboard edits merged on top.
+
+        Config is persisted in the DB (writable) rather than the packaged YAML
+        (read-only on serverless), so an override wins when present.
+        """
+        from circle_leads.config.settings import validate_requirements
+        from circle_leads.storage.settings_store import get_requirements_override
+        try:
+            override = get_requirements_override(db)
+        except Exception:  # noqa: BLE001 - a fresh/empty DB just means no override
+            override = None
+        if override:
+            try:
+                return validate_requirements(override)
+            except Exception:  # noqa: BLE001 - a bad stored blob must not brick startup
+                pass
+        return load_requirements(config_path)
+
+    requirements_holder = {"req": _load_effective_requirements()}
     sessions = SessionManager()
     jobs = JobRegistry()
 
@@ -957,13 +977,20 @@ def create_app(db_url: str | None = None, config_path: str | None = None) -> Fas
         payload.pop("llm_available", None)
         for locked in ("excluded_content", "rate_limit"):
             payload[locked] = current[locked]
+        # Persist to the DB (writable) rather than the packaged YAML, which is
+        # read-only on a serverless deploy (/var/task -> Errno 30).
+        from circle_leads.config.settings import validate_requirements
+        from circle_leads.storage.settings_store import set_requirements_override
         try:
-            new_req = save_requirements(payload, config_file)
+            new_req = validate_requirements(payload)
         except Exception as exc:  # noqa: BLE001 - report validation errors to UI
             raise HTTPException(400, f"Invalid config: {exc}")
+        # Store the canonical serialized form so it round-trips exactly.
+        canonical = requirements_to_dict(new_req)
+        set_requirements_override(db, canonical)
         requirements_holder["req"] = new_req
         log_activity_holder(kind="review", summary="Lead requirements updated via dashboard")
-        return {"ok": True, "config": requirements_to_dict(new_req)}
+        return {"ok": True, "config": canonical}
 
     # --- Remote browser (server-hosted interactive Chromium) --------------
     # Proof of concept: the Circle session originates in a browser that lives

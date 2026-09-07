@@ -133,3 +133,33 @@ def is_harvest_due(db: Database, *, now: datetime | None = None) -> bool:
 def mark_harvest_run(db: Database, *, now: datetime | None = None) -> None:
     now = now or datetime.now(timezone.utc).replace(tzinfo=None)
     set_setting(db, KEY_LAST_RUN, now.isoformat())
+
+
+# --- Lead requirements override (stored in the DB, not the file) -----------
+#
+# The packaged requirements.yaml is read-only on a serverless deploy
+# (/var/task, Errno 30). So dashboard edits are persisted here, in the DB, and
+# merged on top of the packaged defaults at load time.
+
+REQUIREMENTS_KEY = "requirements_override"
+
+
+def get_requirements_override(db: Database) -> dict | None:
+    """Return the stored requirements override dict, or None if unset."""
+    import json
+
+    raw = get_setting(db, REQUIREMENTS_KEY)
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else None
+    except (ValueError, TypeError):
+        return None
+
+
+def set_requirements_override(db: Database, data: dict) -> None:
+    """Persist the requirements override dict in the DB (writable on serverless)."""
+    import json
+
+    set_setting(db, REQUIREMENTS_KEY, json.dumps(data))
