@@ -17,6 +17,7 @@ Later runs reuse it silently until the login expires, then it prompts again.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Iterator
@@ -95,6 +96,118 @@ class BrowserFeedReader:
                 time.sleep(2)
             ctx.close()
             raise NotLoggedIn("Timed out waiting for login.")
+
+    class LoginChallenged(RuntimeError):
+        """Circle showed a bot/verification or 2FA wall during login."""
+
+    def login_with_credentials(
+        self, email: str, password: str, *, timeout_seconds: int = 120,
+        headless: bool = True,
+    ) -> None:
+        """Sign in by typing the given credentials into Circle's login page.
+
+        The user opted to store credentials instead of logging in by hand. This
+        types them locally into Circle's own form; they are never logged or
+        uploaded. If Circle presents a Cloudflare or 2FA challenge, this STOPS
+        and raises LoginChallenged rather than trying to defeat it.
+        """
+        # Reuse the remote-browser challenge detector so the policy is identical.
+        from circle_leads.remote_browser.session import detect_challenge
+
+        with self._sync_playwright() as pw:
+            ctx = pw.chromium.launch_persistent_context(
+                str(self.profile_dir), headless=headless
+            )
+            page = ctx.pages[0] if ctx.pages else ctx.new_page()
+            try:
+                # Circle routes unauthenticated members through /sign_in.
+                page.goto(f"{self.base}/sign_in?request_host={self.community_host}",
+                          wait_until="domcontentloaded", timeout=45_000)
+
+                # Already have a session in this profile? Nothing to do.
+                if self._is_logged_in_via(page):
+                    return
+
+                marker = detect_challenge(page.url, self._safe_content(page))
+                if marker:
+                    raise self.LoginChallenged(
+                        f"Circle presented a verification challenge ({marker}) before "
+                        "the login form. Stopping rather than trying to bypass it. "
+                        "Log in interactively instead: circle-connector login "
+                        f"{self.community_host}"
+                    )
+
+                self._fill_login_form(page, email, password)
+
+                # Wait for the session to become valid, watching for a challenge
+                # or a 2FA prompt that appears after submit.
+                deadline = time.time() + timeout_seconds
+                while time.time() < deadline:
+                    if self._is_logged_in_via(page):
+                        return
+                    marker = detect_challenge(page.url, self._safe_content(page))
+                    if marker:
+                        raise self.LoginChallenged(
+                            f"Circle presented a challenge ({marker}) after submitting "
+                            "the login. This account needs an interactive login: "
+                            f"circle-connector login {self.community_host}"
+                        )
+                    time.sleep(2)
+                raise NotLoggedIn(
+                    "Login submitted but no valid session appeared. Circle may "
+                    "require an email code or 2FA — log in interactively: "
+                    f"circle-connector login {self.community_host}"
+                )
+            finally:
+                ctx.close()
+
+    @staticmethod
+    def _safe_content(page) -> str:
+        try:
+            return page.content()
+        except Exception:
+            return ""
+
+    def _fill_login_form(self, page, email: str, password: str) -> None:
+        """Type credentials into Circle's login form. Never logs the values."""
+        # Circle's form fields are conventional; try the common selectors.
+        email_sel = (
+            "input[type='email'], input[name='user[email]'], "
+            "input[name='email'], input#email"
+        )
+        pass_sel = (
+            "input[type='password'], input[name='user[password]'], "
+            "input[name='password'], input#password"
+        )
+        try:
+            page.fill(email_sel, email, timeout=15_000)
+        except Exception as exc:  # noqa: BLE001
+            raise NotLoggedIn(
+                "Could not find the email field on Circle's login page. Log in "
+                f"interactively: circle-connector login {self.community_host}"
+            ) from exc
+        # Some Circle communities gate the password behind a "Continue" step.
+        if page.locator(pass_sel).count() == 0:
+            for label in ("Continue", "Next", "Sign in"):
+                btn = page.get_by_role("button", name=re.compile(label, re.I))
+                if btn.count():
+                    btn.first.click()
+                    break
+            page.wait_for_timeout(1500)
+        try:
+            page.fill(pass_sel, password, timeout=15_000)
+        except Exception as exc:  # noqa: BLE001
+            raise NotLoggedIn(
+                "Could not find the password field on Circle's login page. Log in "
+                f"interactively: circle-connector login {self.community_host}"
+            ) from exc
+        # Submit.
+        for label in ("Sign in", "Log in", "Continue"):
+            btn = page.get_by_role("button", name=re.compile(rf"^{label}$", re.I))
+            if btn.count():
+                btn.first.click()
+                return
+        page.keyboard.press("Enter")
 
     # Endpoints that return 200 only for a signed-in member. Communities expose
     # slightly different internal routes, so several are tried.

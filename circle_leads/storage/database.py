@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import logging
+import os
 import re
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -95,19 +97,45 @@ def _engine_kwargs(url: str) -> dict:
 class Database:
     def __init__(self, url: str | None = None):
         if url is None:
-            Path(DEFAULT_DB_PATH).parent.mkdir(parents=True, exist_ok=True)
-            url = f"sqlite:///{DEFAULT_DB_PATH}"
+            # No CIRCLE_LEADS_DB configured -> local SQLite. This fails on a
+            # read-only serverless filesystem (Vercel: /var/task, Errno 30).
+            # Rather than 500 the whole app on every request, fall back to a
+            # writable temp dir so it boots -- but that DB is per-instance and
+            # ephemeral, so make the misconfiguration loud instead of silent.
+            try:
+                Path(DEFAULT_DB_PATH).parent.mkdir(parents=True, exist_ok=True)
+                url = f"sqlite:///{DEFAULT_DB_PATH}"
+            except OSError:
+                import tempfile
+                fallback = Path(tempfile.gettempdir()) / "circle_leads.db"
+                logging.getLogger(__name__).error(
+                    "CIRCLE_LEADS_DB is not set and the default path %r is not "
+                    "writable (read-only filesystem). Falling back to the "
+                    "EPHEMERAL %s -- data will not persist. Set CIRCLE_LEADS_DB "
+                    "to a Postgres URL (e.g. Supabase) for real deployments.",
+                    DEFAULT_DB_PATH, fallback,
+                )
+                url = f"sqlite:///{fallback}"
         elif url.startswith("sqlite:///"):
             p = Path(url.replace("sqlite:///", "", 1))
             if p.parent and str(p.parent) not in ("", "."):
-                p.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    p.parent.mkdir(parents=True, exist_ok=True)
+                except OSError:
+                    pass  # dir may already exist or be unwritable; engine will surface it
         else:
             url = _normalize_db_url(url)
         self.url = url
         self.engine = create_engine(url, **_engine_kwargs(url))
         self._sessionmaker = sessionmaker(bind=self.engine, future=True)
-        Base.metadata.create_all(self.engine)
-        self._ensure_columns()
+
+        # Creating/altering schema on every cold start opens a connection and
+        # runs DDL per instance -- the connection storm that trips the pooler.
+        # Skip it when told the schema is already provisioned (SKIP_DB_INIT=true,
+        # the right setting for serverless once the tables exist).
+        if os.environ.get("SKIP_DB_INIT", "").lower() != "true":
+            Base.metadata.create_all(self.engine)
+            self._ensure_columns()
 
     def _ensure_columns(self) -> None:
         """Add columns introduced after a table was first created.
@@ -122,7 +150,11 @@ class Database:
         additions = [
             ("communities", "watching", "BOOLEAN DEFAULT FALSE"),
             ("leads", "external_synced_at", "TIMESTAMP"),
+            ("circle_connections", "priority", "VARCHAR(16) DEFAULT 'normal'"),
+            ("circle_connections", "notes", "TEXT"),
         ]
+        # replay_sessions is a whole new table (Version B experiment); create_all
+        # handles it, so no per-column entry is needed here.
         try:
             insp = _inspect(self.engine)
             existing_tables = set(insp.get_table_names())

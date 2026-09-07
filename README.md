@@ -123,6 +123,25 @@ browser session — spaces your account cannot access are not scraped.
 **Full walkthrough: [docs/connector.md](docs/connector.md)** — Railway deploy,
 env vars, pairing, session expiry, and the security model.
 
+### Why the browser is local and not on Railway
+
+Two questions get asked often enough to have written answers:
+
+- **"Can't we just use Circle's API as a member?"** No. There is no member
+  OAuth, no member personal-access token, and no endpoint listing the
+  communities you belong to. Verified against Circle's live OpenAPI specs —
+  `grep -ic oauth` returns 0 across all three, the member JWT is minted by an
+  *admin* and locked to one `community_id`.
+  → **[docs/circle_auth_investigation.md](docs/circle_auth_investigation.md)**
+
+- **"Can't the browser run on Railway, so I log in there instead?"** It was
+  built and measured. Circle serves an automated browser a Cloudflare
+  "Verifying you are a human" interstitial — reproduced on 4/4 communities,
+  *from a residential IP*, so it is anti-automation rather than anti-datacenter.
+  Railway would fare worse. The PoC stops and reports rather than trying to
+  defeat it.
+  → **[docs/remote_browser_poc.md](docs/remote_browser_poc.md)**
+
 ---
 
 ## Architecture

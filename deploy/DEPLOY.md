@@ -99,6 +99,36 @@ Vercel's serverless model (functions time out in seconds and hold no state).
 be to split the dashboard into a static SPA (Vercel) talking to the FastAPI API
 on Railway over CORS -- a real refactor, not a config change.
 
+### If you try Vercel anyway (build error: "does not define a top-level app")
+`main.py` at the repo root is the **CLI** entrypoint, not a FastAPI app, so
+Vercel's Python/FastAPI preset can't find an `app` instance there and the build
+fails immediately. A top-level `app.py` now exports a **lazy** ASGI app (see
+`app.py`; `tool.vercel.entrypoint = "app:app"` in `pyproject.toml`), so the
+build and cold-import succeed without env vars or a database. That fixes the
+*build* error, but does not make the app run correctly on Vercel:
+
+- To serve traffic, `DASHBOARD_PASSWORD` (8+ chars) must be set as a Vercel
+  **Environment Variable** (Runtime), or the first request raises.
+- Without `CIRCLE_LEADS_DB` pointing at an external Postgres (e.g. Supabase),
+  `Database(None)` tries to create a local `data/` dir, which fails on Vercel's
+  read-only filesystem.
+- Sessions (`SessionManager`) and the background job registry (`JobRegistry`)
+  are in-memory. They don't survive cold starts or get shared across concurrent
+  instances, and long jobs (search, harvest, feed reads) get killed when the
+  function's window ends.
+- Config edits from the dashboard are persisted in the **database**, not the
+  packaged `requirements.yaml` (which is read-only on Vercel: `/var/task` →
+  `Errno 30`). This is handled automatically; just make sure `CIRCLE_LEADS_DB`
+  is set.
+- The Playwright-based features (the local connector's ingest, the remote-
+  browser PoC, the replay experiment) **cannot run on Vercel at all** — no
+  browser, no persistent process. Those belong on the local connector /
+  Railway, never on serverless.
+
+In short: this unblocks the build error, but Vercel is still the wrong platform
+to actually run the dashboard on. Use Render/Railway above for anything beyond a
+quick experiment.
+
 ## The database
 
 - **Use Postgres.** Point `CIRCLE_LEADS_DB` at its connection URL
@@ -114,6 +144,41 @@ on Railway over CORS -- a real refactor, not a config change.
   `data/circle_leads.db` would be wiped on every redeploy. That's why the cloud
   needs Postgres.
 - The Dockerfile installs `psycopg[binary]` so the Postgres URL works out of the box.
+
+### Serverless (Vercel) + Supabase: avoid pooler exhaustion
+
+On Vercel each request may run in a fresh function instance. With Supabase's
+**session-mode pooler (port 5432)** each instance holds a connection, and the
+small pool (`pool_size: 15`) is exhausted fast:
+
+```
+FATAL: (EMAXCONNSESSION) max clients reached in session mode
+```
+
+To avoid it:
+
+1. **Use the transaction pooler (port 6543), not session mode (5432).** In
+   Supabase: Settings → Database → Connection string → **Transaction**. The URI
+   ends in `:6543/postgres` (it may add `?pgbouncer=true`). Set it as
+   `CIRCLE_LEADS_DB`.
+2. **Set `SKIP_DB_INIT=true`.** Otherwise every cold start opens a connection to
+   run `create_all()`. Create the tables once (below), then skip it.
+3. `DB_NULLPOOL=true` is optional — the code already uses `NullPool` when it
+   detects Vercel/Lambda, so a connection is closed after each request instead
+   of being held. This var just forces it anywhere.
+
+**Create the tables once** (locally, pointed at Supabase — do this before setting
+`SKIP_DB_INIT`):
+
+```bash
+CIRCLE_LEADS_DB='postgresql://postgres.<ref>:<pw>@aws-0-<region>.pooler.supabase.com:6543/postgres' \
+  python -c "from circle_leads.storage.database import Database; \
+Database('$CIRCLE_LEADS_DB'); print('tables created')"
+```
+
+None of this makes the browser features work on Vercel — the dashboard, API,
+leads and classifier work once the DB is reachable; the Playwright pieces still
+need the local connector.
 
 ## What is NOT deployed to the cloud
 

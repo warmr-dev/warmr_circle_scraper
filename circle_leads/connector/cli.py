@@ -15,7 +15,9 @@ import time
 import click
 
 from circle_leads.connector.client import BackendClient, ConnectorConfig
-from circle_leads.connector.runner import authenticate, sync_community
+from circle_leads.connector.runner import (
+    authenticate, authenticate_with_credentials, sync_community,
+)
 
 
 def _client() -> BackendClient:
@@ -43,8 +45,31 @@ def pair_cmd(backend: str, code: str) -> None:
 
 @cli.command("login")
 @click.argument("host")
-def login_cmd(host: str) -> None:
-    """Open a browser so you can log into a private Circle community yourself."""
+@click.option("--from-env", is_flag=True,
+              help="Sign in with CIRCLE_EMAIL/CIRCLE_PASSWORD from your .env "
+                   "instead of typing it yourself. Stops if Circle challenges.")
+@click.option("--show-browser", is_flag=True,
+              help="With --from-env, run the login in a visible window.")
+def login_cmd(host: str, from_env: bool, show_browser: bool) -> None:
+    """Log into a private Circle community.
+
+    Default: opens a browser so you sign in yourself (nothing is stored).
+    With --from-env: uses credentials from your .env; they stay local and are
+    never logged. Circle may still require an interactive login if it presents
+    a Cloudflare or 2FA challenge.
+    """
+    if from_env:
+        from circle_leads.connector.credentials import CredentialsNotFound
+        from circle_leads.scraper.browser_reader import BrowserFeedReader
+
+        try:
+            authenticate_with_credentials(host, headless=not show_browser)
+        except CredentialsNotFound as exc:
+            raise click.ClickException(str(exc))
+        except (BrowserFeedReader.LoginChallenged,) as exc:
+            raise click.ClickException(str(exc))
+        click.echo(f"Signed in to {host} from .env. Session saved locally.")
+        return
     authenticate(host)
     click.echo(f"Signed in to {host}. Session saved to your local browser profile.")
 
@@ -60,17 +85,41 @@ def sync_cmd(host: str, max_pages: int) -> None:
 
 
 @cli.command("run")
-@click.argument("hosts", nargs=-1, required=True)
+@click.argument("hosts", nargs=-1)
 @click.option("--interval", type=int, default=600, show_default=True,
               help="Seconds between sync cycles.")
 @click.option("--max-pages", type=int, default=5, show_default=True)
 def run_cmd(hosts, interval, max_pages) -> None:
-    """Loop: heartbeat + sync the given communities every --interval seconds."""
+    """Loop: heartbeat + sync every --interval seconds.
+
+    With no HOSTS, the connector asks the dashboard what to scan and follows
+    the priority you set there (VIP first; paused communities skipped). Pass
+    hosts explicitly to override that for a one-off run.
+    """
     client = _client()
-    click.echo(f"Connector running for {len(hosts)} community/communities. Ctrl-C to stop.")
+    if hosts:
+        click.echo(f"Connector running for {len(hosts)} community/communities. "
+                   "Ctrl-C to stop.")
+    else:
+        click.echo("Connector running from the dashboard worklist "
+                   "(VIP first). Ctrl-C to stop.")
+
     while True:
         client.heartbeat()
-        for host in hosts:
+
+        targets = list(hosts)
+        if not targets:
+            try:
+                work = client.worklist()
+                targets = [c["host"] for c in work]
+                if not targets:
+                    click.echo("  no communities to scan "
+                               "(add one in the dashboard, or un-pause it)")
+            except Exception as exc:  # noqa: BLE001 - backend blip; retry next cycle
+                click.echo(f"  could not fetch the worklist: "
+                           f"{exc.__class__.__name__}", err=True)
+
+        for host in targets:
             try:
                 result = sync_community(host, client, max_pages=max_pages)
                 click.echo(f"  {host}: {result.get('state')} "
