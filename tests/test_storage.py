@@ -150,3 +150,38 @@ def test_postgres_url_uses_psycopg_v3(url, expected_prefix, monkeypatch):
 
     d = dbmod.Database(url)
     assert d.url.startswith(expected_prefix)
+
+
+# --- Malformed DB URL sanitizing (Railway/Supabase env-var gotchas) --------
+
+import pytest as _pytest
+from circle_leads.storage.database import _sanitize_db_url
+
+
+@_pytest.mark.parametrize("raw,expected", [
+    # Empty port (unset $PORT) -> colon removed; this was the Railway crash.
+    ("postgresql://u:p@host:/db", "postgresql://u:p@host/db"),
+    ("postgres://u:p@host:/db", "postgres://u:p@host/db"),
+    ("postgresql://u:p@host:/db?sslmode=require",
+     "postgresql://u:p@host/db?sslmode=require"),
+    # Normal URL with a real port is untouched.
+    ("postgresql://u:p@host:5432/db", "postgresql://u:p@host:5432/db"),
+    # Whitespace / newlines / surrounding quotes are stripped.
+    ("  postgresql://u:p@host:5432/db\n", "postgresql://u:p@host:5432/db"),
+    ('"postgresql://u:p@host:/db"', "postgresql://u:p@host/db"),
+])
+def test_sanitize_db_url(raw, expected):
+    assert _sanitize_db_url(raw) == expected
+
+
+def test_empty_port_url_builds_engine(monkeypatch):
+    """The empty-port URL must no longer crash Database(); it builds an engine."""
+    from circle_leads.storage import database as dbmod
+    monkeypatch.setattr(dbmod.Base.metadata, "create_all", lambda *a, **k: None)
+    monkeypatch.setattr(dbmod.Database, "_ensure_columns", lambda self: None)
+    monkeypatch.setattr(
+        dbmod, "create_engine", lambda u, **k: type("E", (), {"url": u})()
+    )
+    # Would previously raise ValueError: invalid literal for int() with base 10.
+    d = dbmod.Database("postgresql://u:p@host:/circle")
+    assert d.url == "postgresql+psycopg://u:p@host/circle"
