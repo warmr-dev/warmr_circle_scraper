@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import re
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -83,10 +84,34 @@ class Database:
             elif url.startswith("postgres://"):  # some hosts use the short form
                 url = "postgresql+psycopg://" + url[len("postgres://"):]
         self.url = url
-        self.engine = create_engine(url, future=True)
+
+        # On serverless (Vercel), many short-lived function instances each open
+        # their own connections. A pooled engine + a per-instance connection
+        # exhausts a small Postgres pooler ("max clients reached", pool_size 15).
+        # NullPool closes each connection when done, so instances don't hold a
+        # slot open. Detect serverless by the presence of a Postgres URL running
+        # under a serverless runtime, or force it with DB_NULLPOOL=true.
+        engine_kwargs: dict = {"future": True, "pool_pre_ping": True}
+        is_postgres = url.startswith("postgresql")
+        serverless = bool(
+            os.environ.get("VERCEL") or os.environ.get("AWS_LAMBDA_FUNCTION_NAME")
+        )
+        force_nullpool = os.environ.get("DB_NULLPOOL", "").lower() == "true"
+        if is_postgres and (serverless or force_nullpool):
+            from sqlalchemy.pool import NullPool
+            engine_kwargs["poolclass"] = NullPool
+            engine_kwargs.pop("pool_pre_ping", None)  # not needed with NullPool
+
+        self.engine = create_engine(url, **engine_kwargs)
         self._sessionmaker = sessionmaker(bind=self.engine, future=True)
-        Base.metadata.create_all(self.engine)
-        self._ensure_columns()
+
+        # Creating/altering schema on every cold start opens a connection and
+        # runs DDL per instance -- the connection storm that trips the pooler.
+        # Skip it when told the schema is already provisioned (SKIP_DB_INIT=true,
+        # the right setting for serverless once the tables exist).
+        if os.environ.get("SKIP_DB_INIT", "").lower() != "true":
+            Base.metadata.create_all(self.engine)
+            self._ensure_columns()
 
     def _ensure_columns(self) -> None:
         """Add columns introduced after a table was first created.
