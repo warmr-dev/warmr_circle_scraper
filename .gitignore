@@ -33,3 +33,8 @@ circle_profiles/
 browser-profile/
 connector.json
 **/browser-profile/
+
+# Remote-browser profile (server-hosted Chromium PoC). Holds a live Circle
+# session if anyone ever logs in through it — never commit it.
+remote-profile/
+**/remote-profile/
