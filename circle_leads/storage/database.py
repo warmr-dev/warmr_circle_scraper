@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -46,12 +47,32 @@ def _sanitize_db_url(url: str) -> str:
 class Database:
     def __init__(self, url: str | None = None):
         if url is None:
-            Path(DEFAULT_DB_PATH).parent.mkdir(parents=True, exist_ok=True)
-            url = f"sqlite:///{DEFAULT_DB_PATH}"
+            # No CIRCLE_LEADS_DB configured -> local SQLite. This fails on a
+            # read-only serverless filesystem (Vercel: /var/task, Errno 30).
+            # Rather than 500 the whole app on every request, fall back to a
+            # writable temp dir so it boots -- but that DB is per-instance and
+            # ephemeral, so make the misconfiguration loud instead of silent.
+            try:
+                Path(DEFAULT_DB_PATH).parent.mkdir(parents=True, exist_ok=True)
+                url = f"sqlite:///{DEFAULT_DB_PATH}"
+            except OSError:
+                import tempfile
+                fallback = Path(tempfile.gettempdir()) / "circle_leads.db"
+                logging.getLogger(__name__).error(
+                    "CIRCLE_LEADS_DB is not set and the default path %r is not "
+                    "writable (read-only filesystem). Falling back to the "
+                    "EPHEMERAL %s -- data will not persist. Set CIRCLE_LEADS_DB "
+                    "to a Postgres URL (e.g. Supabase) for real deployments.",
+                    DEFAULT_DB_PATH, fallback,
+                )
+                url = f"sqlite:///{fallback}"
         elif url.startswith("sqlite:///"):
             p = Path(url.replace("sqlite:///", "", 1))
             if p.parent and str(p.parent) not in ("", "."):
-                p.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    p.parent.mkdir(parents=True, exist_ok=True)
+                except OSError:
+                    pass  # dir may already exist or be unwritable; engine will surface it
         else:
             url = _sanitize_db_url(url)
             # We ship psycopg (v3), but SQLAlchemy defaults a bare

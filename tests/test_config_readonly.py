@@ -93,3 +93,21 @@ def test_locked_safety_fields_are_not_overwritten(app_client, readonly_config):
     r = c.post("/api/config", json=cfg)
     assert r.status_code == 200
     assert r.json()["config"]["excluded_content"] == before  # unchanged
+
+
+def test_database_falls_back_when_default_path_is_unwritable(monkeypatch, tmp_path):
+    """No CIRCLE_LEADS_DB on a read-only FS must not crash the app (Vercel 500).
+
+    Regression: Database(None) called mkdir on a read-only path and raised
+    Errno 30, 500-ing every route. It now falls back to a temp DB and logs.
+    """
+    import circle_leads.storage.database as dbmod
+    # Point the default at an unwritable path (stand-in for a read-only /var/task).
+    monkeypatch.setattr(dbmod, "DEFAULT_DB_PATH", "/proc/nope/data/circle_leads.db")
+    monkeypatch.delenv("CIRCLE_LEADS_DB", raising=False)
+
+    db = dbmod.Database(None)          # must not raise
+    assert db.url.startswith("sqlite:///")
+    # It should be usable (a real, writable sqlite file).
+    with db.session() as s:
+        assert s is not None
