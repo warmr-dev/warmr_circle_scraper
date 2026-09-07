@@ -41,3 +41,7 @@ services:
         sync: false
       - key: OPENAI_API_KEY
         sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false          # Warmr project anon key (Vini ingest)
+      - key: VINI_API_SECRET
+        sync: false          # same secret as production x-vini-api-secret

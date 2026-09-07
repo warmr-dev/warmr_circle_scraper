@@ -229,6 +229,8 @@ class Lead(Base):
     )
     review_status: Mapped[str] = mapped_column(String(32), default="pending_review")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    # When this lead was POSTed to the production Vini ingest endpoint.
+    external_synced_at: Mapped[datetime | None] = mapped_column(DateTime)
 
     post: Mapped[Post] = relationship(back_populates="lead")
 

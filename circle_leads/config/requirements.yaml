@@ -2,54 +2,98 @@
 # Edit here or in the dashboard's Config tab, then re-run: circle-leads classify
 
 target_roles:
-- Backend Developer
-- Frontend Developer
-- Full Stack Developer
-- Flutter Developer
-- React Developer
-- Mobile Developer
-- Software Engineer
-- DevOps Engineer
-- Data Engineer
-- Machine Learning Engineer
-- Technical Cofounder
+- Founder
+- Co-founder
+- CEO
 - CTO
-- HR
-- AI
+- COO
+- CMO
+- CFO
+- CPO
+- Owner
+- Managing Director
+- General Manager
+- Head of Marketing
+- Head of Growth
+- Head of Sales
+- Head of Operations
+- Head of Product
+- Head of People
+- VP Marketing
+- VP Sales
+- VP Engineering
+- VP Operations
+- RevOps Manager
+- Procurement Manager
+- Hiring Manager
+- HR Manager
+- Office Manager
+- Marketing Manager
+- Operations Manager
+- Product Manager
+- Fractional CMO
+- Fractional CFO
+- Fractional CTO
 target_skills:
-- Python
-- Java
-- C++
-- Go
-- Rust
-- Flutter
-- Dart
-- React
-- React Native
-- Vue
-- Angular
-- Node.js
-- TypeScript
-- Django
-- FastAPI
-- Rails
-- Laravel
-- PostgreSQL
-- MySQL
-- MongoDB
-- AWS
-- GCP
-- Azure
-- Kubernetes
-- Docker
-- Terraform
-- Swift
-- Kotlin
-- Supabase
-- Firebase
-- Meta
-- Facebook
-- Amazon
+- Marketing
+- SEO
+- PPC
+- Paid Ads
+- Email Marketing
+- Content Marketing
+- Creative
+- Branding
+- Design
+- UI/UX
+- Web Development
+- Mobile Development
+- Shopify
+- Webflow
+- Software Development
+- CRM
+- HubSpot
+- Salesforce
+- Sales Outbound
+- Lead Generation
+- Data Analytics
+- BI
+- AI Consulting
+- LLM Integration
+- DevOps
+- Cloud
+- Security
+- Compliance
+- SOC2
+- Legal
+- Immigration
+- IP
+- Contracts
+- Accounting
+- Bookkeeping
+- Tax
+- Payroll
+- Benefits
+- Recruiting
+- Staffing
+- Wealth Management
+- Financial Advisor
+- Insurance
+- Real Estate
+- Commercial Lease
+- Office Space
+- Travel
+- Event Planning
+- Offsite
+- Healthcare
+- Wellness
+- Executive Coaching
+- Equipment Leasing
+- Education
+- Training
+- Cybersecurity
+- PR
+- Video Production
+- Copywriting
 exclude_job_seekers: true
 minimum_confidence: 0.6
 harvest_recency_days: 30
@@ -60,19 +104,88 @@ max_expanded_niches: 25
 llm_escalation_threshold: 55
 keywords:
   include:
-  - hiring
   - looking for
-  - need a developer
-  - need an engineer
-  - looking to hire
-  - developer wanted
-  - contractor needed
+  - looking for recommendations
+  - any recommendations
+  - need a
+  - needs a
+  - seeking a
+  - hiring a
+  - hire an agency
+  - find a vendor
   - agency needed
+  - vendor needed
+  - consultant needed
+  - partner needed
+  - contractor needed
+  - freelance
+  - fractional
+  - help with
+  - recommendations for
+  - who can recommend
+  - intro to
+  - looking to switch
+  - switching from
+  - current agency isn't
+  - vs
+  - alternatives to
+  - should we outsource
+  - thinking about outsourcing
+  - build vs buy
+  - migrating to
+  - implementing
+  - just raised
+  - Series A
+  - Series B
+  - opened an office
+  - launching in
+  - our site converts
+  - churn is
+  - spending too much on
+  - accountant keeps
+  - need to deploy
+  - cash to deploy
+  - RFP
+  - budget approved
+  - PM me if you know
+  - know anyone
   exclude:
   - looking for a job
   - open to work
   - seeking employment
   - available for hire
+  - job seeker
+  - resume
+  - CV
+  - technical co-founder
+  - looking for a co-founder
+  - side project
+  - just launched
+  - feedback welcome
+  - AMA
+  - I offer
+  - we offer
+  - hire me
+  - DM me for services
+  - our agency helps
+  - slots open for clients
+  - book recommendation
+  - podcast about
+  - meetup next
+  - conference speakers
+  - negotiate salary
+  - imposter syndrome
+  - channel guidelines
+  - bot integration
+  - full-stack engineer job
+  - senior engineer opening
+  - friend wants to get into
+  - where should they look for jobs
+  - link building
+  - backlinks
+  - guest post exchange
+  - niche edits
+  - link exchange
 scoring:
   hiring_intent: 40
   target_role_match: 20
