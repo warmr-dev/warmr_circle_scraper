@@ -9,8 +9,8 @@ from circle_leads.storage.database import Database, get_or_create_community
 
 
 @pytest.fixture
-def reqs():
-    return load_requirements()
+def reqs(dev_requirements):
+    return dev_requirements
 
 
 @pytest.fixture

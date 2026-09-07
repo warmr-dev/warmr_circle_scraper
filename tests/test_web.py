@@ -5,10 +5,22 @@ import pytest
 pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 
-from circle_leads.config.settings import load_requirements  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+from circle_leads.config.settings import load_requirements as _load_requirements  # noqa: E402
 from circle_leads.storage.database import Database  # noqa: E402
 from circle_leads.triage.pipeline import triage_text  # noqa: E402
 from circle_leads.web.auth import AuthNotConfigured, verify_password  # noqa: E402
+
+# Stable developer-targeting test config (not the live product config, which is
+# now retargeted to founders/CEOs). The web app is built with this via
+# create_app(config_path=...), and seed data is triaged with it, so these tests
+# assert dashboard behaviour on developer-hiring leads regardless of the live aim.
+_DEV_CONFIG = str(Path(__file__).parent / "fixtures" / "dev_requirements.yaml")
+
+
+def load_requirements(config_path=None):
+    return _load_requirements(config_path or _DEV_CONFIG)
 
 PASSWORD = "dashboard-test-pw"
 
@@ -33,7 +45,13 @@ def client(tmp_path, monkeypatch):
 
     from circle_leads.web.app import create_app
 
-    return TestClient(create_app(db_url=f"sqlite:///{db_path}"))
+    # Point the app at a PER-TEST COPY of the dev config, not the shared fixture
+    # file: the /api/config POST writes to its config_path, so a save-test must
+    # not corrupt the fixture other tests load.
+    import shutil
+    test_cfg = tmp_path / "requirements.yaml"
+    shutil.copy(_DEV_CONFIG, test_cfg)
+    return TestClient(create_app(db_url=f"sqlite:///{db_path}", config_path=str(test_cfg)))
 
 
 @pytest.fixture

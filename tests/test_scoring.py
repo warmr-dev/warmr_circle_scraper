@@ -7,9 +7,9 @@ from circle_leads.config.settings import load_requirements
 from circle_leads.scoring.lead_scoring import score_lead
 
 
-@pytest.fixture(scope="module")
-def reqs():
-    return load_requirements()
+@pytest.fixture
+def reqs(dev_requirements):
+    return dev_requirements
 
 
 def test_rich_recent_lead_scores_high(reqs):

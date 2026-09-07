@@ -33,9 +33,9 @@ Flutter 3.3 is out and the new rendering pipeline is genuinely faster.
 """
 
 
-@pytest.fixture(scope="module")
-def reqs():
-    return load_requirements()
+@pytest.fixture
+def reqs(dev_requirements):
+    return dev_requirements
 
 
 @pytest.fixture

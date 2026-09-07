@@ -10,9 +10,9 @@ from circle_leads.classifier.lead_classifier import classify, meets_requirements
 from circle_leads.config.settings import Requirements, load_requirements
 
 
-@pytest.fixture(scope="module")
-def reqs() -> Requirements:
-    return load_requirements()
+@pytest.fixture
+def reqs(dev_requirements):
+    return dev_requirements
 
 
 # --- Specification examples: leads -----------------------------------------

@@ -4,12 +4,24 @@ No network calls: a fake transport returns realistic Admin API v2 payloads,
 including the page/per_page/has_next_page envelope.
 """
 
+from pathlib import Path
+
 import pytest
 
-from circle_leads.config.settings import CommunityPermission, load_requirements
+from circle_leads.config.settings import CommunityPermission
+from circle_leads.config.settings import load_requirements as _load_requirements
 from circle_leads.export.exporters import query_leads, to_csv, to_json
 from circle_leads.pipeline import classify_pending, ingest_community
 from circle_leads.storage.database import Database
+
+# Use the stable developer-targeting test config, not the live product config
+# (which has been retargeted to founders/CEOs). Keeps these tests asserting
+# classifier/pipeline behaviour rather than the product's current aim.
+_DEV_CONFIG = Path(__file__).parent / "fixtures" / "dev_requirements.yaml"
+
+
+def load_requirements():
+    return _load_requirements(str(_DEV_CONFIG))
 
 SPACES = [
     {"id": 1, "name": "General Discussion", "slug": "general"},

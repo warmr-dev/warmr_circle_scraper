@@ -25,9 +25,9 @@ from circle_leads.storage.database import (
 )
 
 
-@pytest.fixture(scope="module")
-def reqs():
-    return load_requirements()
+@pytest.fixture
+def reqs(dev_requirements):
+    return dev_requirements
 
 
 # --- 4.1 phone_numbers must be excluded by default --------------------------
