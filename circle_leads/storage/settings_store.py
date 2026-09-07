@@ -49,23 +49,57 @@ def get_schedule(db: Database) -> str:
 
 
 def _schedule_hours(schedule: str) -> int | None:
-    """Hours for a schedule name, or a custom:<hours> value. None = off."""
+    """Hours for a schedule name, or a custom:<hours> value. None = off.
+
+    Kept for callers that think in whole hours; sub-hour schedules round up to
+    1 here. Use ``_schedule_minutes`` for the true (minute-granular) interval.
+    """
+    minutes = _schedule_minutes(schedule)
+    if minutes is None:
+        return None
+    return max(1, round(minutes / 60))
+
+
+def _schedule_minutes(schedule: str) -> int | None:
+    """Interval in minutes, or None for 'off'.
+
+    Accepts the named presets (in hours), ``custom:<hours>``, and a minute form
+    ``custom:<n>m`` / ``every_5min`` for near-real-time polling.
+    """
+    if schedule in ("every_5min", "every_5m"):
+        return 5
+    if schedule in ("every_15min", "every_15m"):
+        return 15
     if schedule.startswith("custom:"):
+        raw = schedule.split(":", 1)[1].strip().lower()
         try:
-            hours = int(schedule.split(":", 1)[1])
+            if raw.endswith("m"):
+                minutes = int(raw[:-1])
+            elif raw.endswith("h"):
+                minutes = int(raw[:-1]) * 60
+            else:
+                minutes = int(raw) * 60  # bare number = hours (back-compat)
         except (ValueError, IndexError):
             return None
-        return hours if hours > 0 else None
-    return SCHEDULE_INTERVALS.get(schedule)
+        return minutes if minutes > 0 else None
+    hours = SCHEDULE_INTERVALS.get(schedule)
+    return hours * 60 if hours is not None else None
+
+
+_NAMED_SCHEDULES = set(SCHEDULE_INTERVALS) | {"every_5min", "every_15min"}
 
 
 def set_schedule(db: Database, schedule: str) -> None:
     if schedule.startswith("custom:"):
-        if _schedule_hours(schedule) is None:
-            raise ValueError(f"Invalid custom schedule {schedule!r}; use custom:<hours>")
-    elif schedule not in SCHEDULE_INTERVALS:
+        if _schedule_minutes(schedule) is None:
+            raise ValueError(
+                f"Invalid custom schedule {schedule!r}; use custom:<hours> or "
+                f"custom:<n>m (e.g. custom:5m)"
+            )
+    elif schedule not in _NAMED_SCHEDULES:
         raise ValueError(
-            f"Unknown schedule {schedule!r}; choose from {sorted(SCHEDULE_INTERVALS)} or custom:<hours>"
+            f"Unknown schedule {schedule!r}; choose from {sorted(_NAMED_SCHEDULES)} "
+            f"or custom:<hours> / custom:<n>m"
         )
     set_setting(db, KEY_SCHEDULE, schedule)
 
@@ -86,14 +120,14 @@ def is_harvest_due(db: Database, *, now: datetime | None = None) -> bool:
     the interval against the recorded last-run time.
     """
     schedule = get_schedule(db)
-    hours = _schedule_hours(schedule)
-    if hours is None:
+    minutes = _schedule_minutes(schedule)
+    if minutes is None:
         return False  # 'off'
     now = now or datetime.now(timezone.utc).replace(tzinfo=None)
     last = _parse_ts(get_setting(db, KEY_LAST_RUN))
     if last is None:
         return True  # never run
-    return now - last >= timedelta(hours=hours)
+    return now - last >= timedelta(minutes=minutes)
 
 
 def mark_harvest_run(db: Database, *, now: datetime | None = None) -> None:

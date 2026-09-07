@@ -516,16 +516,47 @@ def create_app(db_url: str | None = None, config_path: str | None = None) -> Fas
 
         mark_harvest_run(db)
 
+        # On a fast (sub-hourly) schedule, run a light "read only" lane: don't
+        # web-search every few minutes (slow + Exa cost), just re-read known
+        # communities for new posts. Conditional 304s make that nearly free.
+        # Bypass the re-check skip window so a 5-minute tick actually re-reads.
+        # A full discovery search still runs on the first tick and about once a
+        # day, so new communities are still found.
+        from circle_leads.storage.settings_store import (
+            _schedule_minutes, get_schedule, get_setting, set_setting,
+        )
+        import datetime as _dt
+
+        minutes = _schedule_minutes(get_schedule(db)) or 999999
+        fast_lane = minutes < 60
+        do_search = True
+        if fast_lane:
+            last_search = get_setting(db, "harvest_last_search")
+            do_search = not last_search
+            if last_search:
+                try:
+                    prev = _dt.datetime.fromisoformat(last_search)
+                    do_search = (_dt.datetime.utcnow() - prev) >= _dt.timedelta(hours=24)
+                except ValueError:
+                    do_search = True
+
         def run(job):
             from circle_leads.harvest import harvest
-            res = harvest(db, requirements(), verbose_log=True,
-                          use_llm=bool(_os.environ.get("OPENAI_API_KEY")))
+            res = harvest(
+                db, requirements(), verbose_log=True,
+                use_llm=bool(_os.environ.get("OPENAI_API_KEY")),
+                search=do_search,
+                force_recheck=fast_lane,   # fast lane ignores the 6h skip window
+            )
+            if do_search:
+                set_setting(db, "harvest_last_search", _dt.datetime.utcnow().isoformat())
             job.result = {"new": res.new_communities, "read": res.communities_read,
                           "leads": res.leads_found}
-            job.detail = f"Scheduled harvest: {res.leads_found} lead(s)"
+            lane = "fast read" if fast_lane else "full"
+            job.detail = f"Scheduled harvest ({lane}): {res.leads_found} lead(s)"
 
         jobs.start("harvest", "Scheduled harvest (tick)", run)
-        return {"ran": True}
+        return {"ran": True, "fast_lane": fast_lane, "searched": do_search}
 
     @app.get("/api/schedule")
     def api_schedule(_: None = Depends(require_auth)) -> dict[str, Any]:

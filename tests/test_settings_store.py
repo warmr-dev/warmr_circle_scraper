@@ -86,3 +86,51 @@ def test_invalid_custom_schedule_rejected(db):
         set_schedule(db, "custom:abc")
     with pytest.raises(ValueError):
         set_schedule(db, "custom:0")
+
+
+# --- Sub-hourly (near-real-time) schedules ---------------------------------
+
+from circle_leads.storage.settings_store import _schedule_minutes, set_schedule
+
+
+def test_schedule_minutes_named_and_custom():
+    assert _schedule_minutes("every_5min") == 5
+    assert _schedule_minutes("every_15min") == 15
+    assert _schedule_minutes("hourly") == 60
+    assert _schedule_minutes("daily") == 1440
+    assert _schedule_minutes("off") is None
+    assert _schedule_minutes("custom:5m") == 5
+    assert _schedule_minutes("custom:90m") == 90
+    assert _schedule_minutes("custom:2h") == 120
+    assert _schedule_minutes("custom:3") == 180  # bare number = hours (back-compat)
+    assert _schedule_minutes("custom:0m") is None
+    assert _schedule_minutes("nonsense") is None
+
+
+def test_five_minute_schedule_due_logic(tmp_path):
+    from datetime import datetime, timedelta, timezone
+    from circle_leads.storage.database import Database
+    from circle_leads.storage.settings_store import (
+        is_harvest_due, mark_harvest_run,
+    )
+
+    db = Database("sqlite:///" + str(tmp_path / "s.db"))
+    set_schedule(db, "every_5min")
+    assert is_harvest_due(db) is True  # never run
+
+    mark_harvest_run(db)
+    assert is_harvest_due(db) is False  # just ran
+
+    # Due again after 5 minutes.
+    now = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(minutes=6)
+    assert is_harvest_due(db, now=now) is True
+
+
+def test_set_schedule_accepts_minute_forms(tmp_path):
+    from circle_leads.storage.database import Database
+    db = Database("sqlite:///" + str(tmp_path / "s.db"))
+    set_schedule(db, "every_5min")     # no raise
+    set_schedule(db, "custom:10m")     # no raise
+    import pytest
+    with pytest.raises(ValueError):
+        set_schedule(db, "custom:0m")
