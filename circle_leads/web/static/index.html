@@ -390,6 +390,17 @@
       </div>
       <div id="jobs-strip" class="muted" style="margin-top:10px;font-size:13px"></div>
     </div>
+
+    <div class="panel">
+      <h2 style="margin:0 0 2px">Add a community by link</h2>
+      <span class="muted" style="font-size:13px">Paste a Circle community URL. We check its public API and add it. Members-only ones are saved too — sign in locally to read those.</span>
+      <div class="row" style="margin-top:10px">
+        <input id="c-add-url" placeholder="https://your-community.circle.so" style="flex:1;min-width:280px">
+        <button class="action" id="c-add">Add &amp; check</button>
+      </div>
+      <div id="c-add-result" class="muted" style="margin-top:8px;font-size:13px"></div>
+    </div>
+
     <div class="panel"><div id="communities-table"><div class="empty">Loading…</div></div></div>
   </section>
 </main>
@@ -745,6 +756,31 @@ $('c-harvest').addEventListener('click', async () => {
   } finally {
     $('c-harvest').disabled = false;
     $('c-harvest').textContent = 'Find leads';
+  }
+});
+
+$('c-add').addEventListener('click', async () => {
+  const url = $('c-add-url').value.trim();
+  if (!url) { $('c-add-result').textContent = 'Paste a community URL first.'; return; }
+  $('c-add').disabled = true;
+  $('c-add').textContent = 'Checking…';
+  $('c-add-result').textContent = '';
+  try {
+    const res = await fetch('/api/communities/add', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) { $('c-add-result').textContent = data.detail || 'Could not add that URL.'; return; }
+    const mark = data.readable ? '✅' : (data.spaces_found ? '🔒' : '⚠️');
+    $('c-add-result').innerHTML = `${mark} <b>${esc(data.name)}</b> — ${esc(data.note)}`;
+    $('c-add-url').value = '';
+    loadCommunities();
+  } catch {
+    $('c-add-result').textContent = 'Could not reach the server.';
+  } finally {
+    $('c-add').disabled = false;
+    $('c-add').textContent = 'Add & check';
   }
 });
 

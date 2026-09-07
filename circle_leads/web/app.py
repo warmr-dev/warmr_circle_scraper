@@ -201,6 +201,88 @@ def create_app(db_url: str | None = None, config_path: str | None = None) -> Fas
             )
         return {"ok": True, "watching": watching}
 
+    @app.post("/api/communities/add")
+    def add_community(payload: dict, _: None = Depends(require_auth)) -> dict[str, Any]:
+        """Add a Circle community by URL and check if it's readable.
+
+        Paste any community link (https://<slug>.circle.so or a custom domain).
+        We probe its PUBLIC JSON API: if spaces are readable, it's saved ready
+        to harvest. If it's members-only, it's still saved, but reading it needs
+        the LOCAL browser sign-in flow (`circle-leads read-feed <host> --login`),
+        where you log in yourself -- the server never handles your credentials.
+        """
+        import re as _re
+        from urllib.parse import urlparse
+        from circle_leads.scraper.public_reader import PublicReader
+        from circle_leads.storage.database import get_or_create_community
+        from circle_leads.storage.models import AccessState, PermissionStatus
+
+        raw = str(payload.get("url") or "").strip()
+        if not raw:
+            raise HTTPException(400, "No URL supplied.")
+        if "://" not in raw:
+            raw = "https://" + raw
+        host = (urlparse(raw).hostname or "").lower().strip()
+        if not host or "." not in host:
+            raise HTTPException(400, "That doesn't look like a community URL.")
+        # login.circle.so / discover.circle.so aren't communities themselves.
+        if host in ("login.circle.so", "discover.circle.so", "app.circle.so",
+                    "community.circle.so", "circle.so", "www.circle.so"):
+            raise HTTPException(400, f"{host} is not a community — paste the community's own URL.")
+
+        slug = host.split(".")[0]
+        url = f"https://{host}"
+
+        # Probe the public API: reachable? readable spaces? real name?
+        readable = False
+        spaces_found = 0
+        real_name = None
+        try:
+            reader = PublicReader(host)
+            spaces = reader.list_spaces()
+            spaces_found = len(spaces)
+            real_name = reader.community_name()
+            for sp in spaces[:6]:
+                ok, recs = reader.read_space(sp.id, max_pages=1, since=None)
+                if ok and recs:
+                    readable = True
+                    break
+        except Exception:  # noqa: BLE001 - unreachable is a valid, reported result
+            pass
+
+        with db.session() as s:
+            c = get_or_create_community(
+                s, slug=slug, url=url,
+                name=real_name or slug,
+                discovery_source="dashboard:add-by-link",
+                access_status=AccessState.NOT_VISITED.value,
+                permission_status=PermissionStatus.CANDIDATE.value,
+            )
+            if real_name and (not c.name or c.name == slug):
+                c.name = real_name
+            log_activity(
+                s, kind="review", community=slug,
+                summary=(
+                    f"Added {host} by link — "
+                    + ("public spaces readable" if readable
+                       else f"{spaces_found} space(s), members-only" if spaces_found
+                       else "not publicly reachable")
+                ),
+                detail={"url": url, "spaces_found": spaces_found, "readable": readable},
+            )
+
+        if readable:
+            note = "Public spaces are readable — it'll be harvested on the next run."
+        elif spaces_found:
+            note = ("Saved, but its spaces are members-only. To read it, sign in "
+                    "yourself locally: circle-leads read-feed " + host + " --login")
+        else:
+            note = ("Saved, but the public API wasn't reachable (login wall or "
+                    "bot-check). If you're a member, read it locally: "
+                    "circle-leads read-feed " + host + " --login")
+        return {"ok": True, "slug": slug, "name": real_name or slug,
+                "readable": readable, "spaces_found": spaces_found, "note": note}
+
     # --- Triage -----------------------------------------------------------
 
     @app.post("/api/triage")
