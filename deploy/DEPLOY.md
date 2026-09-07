@@ -1,4 +1,4 @@
-# Deploying Circle Leads
+# Deploying Warmr Circle
 
 ## Short answer
 
@@ -134,6 +134,12 @@ quick experiment.
 - **Use Postgres.** Point `CIRCLE_LEADS_DB` at its connection URL
   (`postgresql://user:pass@host:5432/dbname`). The storage layer is SQLAlchemy,
   so only the URL changes — no code changes.
+- **Supabase:** prefer the **transaction-mode** pooler (port **6543**, host
+  `*.pooler.supabase.com`). Session mode (the same host on port 5432) allows
+  only ~15 clients and fails with `EMAXCONNSESSION` / "max clients reached"
+  as soon as SQLAlchemy's default pool plus a leftover deploy fills it. If
+  you paste the session-mode URL, the app rewrites it to port 6543 and keeps
+  a pool of 3 connections.
 - **SQLite does not survive** on these platforms (ephemeral disks), so a local
   `data/circle_leads.db` would be wiped on every redeploy. That's why the cloud
   needs Postgres.

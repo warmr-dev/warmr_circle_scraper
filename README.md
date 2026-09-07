@@ -1,4 +1,4 @@
-# Circle Lead Discovery
+# Warmr Circle
 
 Finds posts where **someone wants to hire** across Circle.so communities you are
 authorized to read, and filters out **people looking for work**.

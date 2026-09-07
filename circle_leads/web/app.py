@@ -40,12 +40,20 @@ STATIC_DIR = Path(__file__).parent / "static"
 REVIEW_STATUSES = {"pending_review", "contacted", "replied", "rejected", "won"}
 
 
-def create_app(db_url: str | None = None, config_path: str | None = None) -> FastAPI:
+def create_app(
+    db_url: str | None = None,
+    config_path: str | None = None,
+    db: Database | None = None,
+) -> FastAPI:
     # Fail fast and loudly rather than serving other people's posts openly.
     get_password()
 
-    app = FastAPI(title="Circle Leads", docs_url=None, redoc_url=None)
-    db = Database(db_url or os.environ.get("CIRCLE_LEADS_DB") or None)
+    app = FastAPI(title="Warmr Circle", docs_url=None, redoc_url=None)
+    # Reuse a caller-supplied Database (the CLI already opened one) so a
+    # Render/Railway start does not open a second SQLAlchemy pool against
+    # the same Supabase session-mode cap.
+    db = db or Database(db_url or os.environ.get("CIRCLE_LEADS_DB") or None)
+    requirements_holder = {"req": load_requirements(config_path)}
     config_file = config_path
 
     def _load_effective_requirements():
@@ -782,10 +790,14 @@ def create_app(db_url: str | None = None, config_path: str | None = None) -> Fas
                 ).all()
             )
 
-            # Leads per day for the last fortnight.
+            # Leads and communities per day for the last fortnight (drives the
+            # Overview growth chart).
             cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=14)
             daily_rows = s.execute(
                 select(Lead.created_at).where(Lead.created_at >= cutoff)
+            ).all()
+            community_daily_rows = s.execute(
+                select(Community.discovered_at).where(Community.discovered_at >= cutoff)
             ).all()
 
         skills = Counter()
@@ -793,18 +805,23 @@ def create_app(db_url: str | None = None, config_path: str | None = None) -> Fas
             for skill in row or []:
                 skills[skill] += 1
 
-        daily = Counter(d[0].date().isoformat() for d in daily_rows if d[0])
-        timeline = [
-            {
-                "date": (
-                    datetime.now(timezone.utc).date() - timedelta(days=i)
-                ).isoformat(),
-                "count": 0,
-            }
-            for i in range(13, -1, -1)
-        ]
-        for point in timeline:
-            point["count"] = daily.get(point["date"], 0)
+        def daily_timeline(rows: list) -> list[dict[str, Any]]:
+            counts = Counter(d[0].date().isoformat() for d in rows if d[0])
+            points = [
+                {
+                    "date": (
+                        datetime.now(timezone.utc).date() - timedelta(days=i)
+                    ).isoformat(),
+                    "count": 0,
+                }
+                for i in range(13, -1, -1)
+            ]
+            for point in points:
+                point["count"] = counts.get(point["date"], 0)
+            return points
+
+        leads_timeline = daily_timeline(daily_rows)
+        communities_timeline = daily_timeline(community_daily_rows)
 
         return {
             "communities": communities,
@@ -815,7 +832,11 @@ def create_app(db_url: str | None = None, config_path: str | None = None) -> Fas
             "by_community": by_community,
             "top_skills": skills.most_common(10),
             "decided_by": decided,
-            "timeline": timeline,
+            # "timeline" kept for backward compatibility with older clients;
+            # new dashboards should use leads_timeline / communities_timeline.
+            "timeline": leads_timeline,
+            "leads_timeline": leads_timeline,
+            "communities_timeline": communities_timeline,
         }
 
     @app.get("/api/activity")
@@ -1007,11 +1028,16 @@ def create_app(db_url: str | None = None, config_path: str | None = None) -> Fas
     return app
 
 
-def run(host: str = "127.0.0.1", port: int = 8000, db_url: str | None = None) -> None:
+def run(
+    host: str = "127.0.0.1",
+    port: int = 8000,
+    db_url: str | None = None,
+    db: Database | None = None,
+) -> None:
     import uvicorn
 
     try:
-        app = create_app(db_url=db_url)
+        app = create_app(db_url=db_url, db=db)
     except AuthNotConfigured as exc:
         raise SystemExit(f"\n{exc}\n")
 
@@ -1021,5 +1047,5 @@ def run(host: str = "127.0.0.1", port: int = 8000, db_url: str | None = None) ->
             "machine.\n  It serves other people's posts. Use a tunnel or a "
             "firewall rather than a public bind.\n"
         )
-    print(f"\n  Circle Leads dashboard → http://{host}:{port}\n")
+    print(f"\n  Warmr Circle dashboard → http://{host}:{port}\n")
     uvicorn.run(app, host=host, port=port, log_level="warning")

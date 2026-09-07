@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterator
 
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, make_url, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -45,6 +45,55 @@ def _sanitize_db_url(url: str) -> str:
     return url
 
 
+def _normalize_db_url(url: str) -> str:
+    """Driver prefix + Supabase pooler port. Session-mode pooler (port 5432
+    on ``*.pooler.supabase.com``) allows only ~15 clients in total — one
+    SQLAlchemy default pool fills that alone, and a Render restart leaves
+    the old sessions held until they time out. Transaction mode (6543) is
+    the pooler meant for app servers.
+    """
+    url = _sanitize_db_url(url)
+    if url.startswith("postgresql://"):
+        url = "postgresql+psycopg://" + url[len("postgresql://"):]
+    elif url.startswith("postgres://"):
+        url = "postgresql+psycopg://" + url[len("postgres://"):]
+    try:
+        parsed = make_url(url)
+    except Exception:  # noqa: BLE001 - leave a still-unparseable URL alone
+        return url
+    host = parsed.host or ""
+    if "pooler.supabase.com" in host and (parsed.port is None or parsed.port == 5432):
+        parsed = parsed.set(port=6543)
+        url = parsed.render_as_string(hide_password=False)
+    return url
+
+
+def _engine_kwargs(url: str) -> dict:
+    """Keep the Postgres pool tiny so we stay under Supabase/Render limits."""
+    if url.startswith("sqlite"):
+        return {"future": True}
+    kwargs: dict = {
+        "future": True,
+        "pool_pre_ping": True,
+        "pool_recycle": 300,
+        # Default SQLAlchemy is pool_size=5 + max_overflow=10 = 15 connections,
+        # which is exactly the Supabase session-pooler cap (EMAXCONNSESSION).
+        "pool_size": 2,
+        "max_overflow": 1,
+        "pool_timeout": 30,
+    }
+    try:
+        parsed = make_url(url)
+    except Exception:  # noqa: BLE001
+        parsed = None
+    host = (parsed.host or "") if parsed is not None else ""
+    port = parsed.port if parsed is not None else None
+    if "pooler.supabase.com" in host or port == 6543:
+        # Transaction-mode PgBouncer cannot use prepared statements.
+        kwargs["connect_args"] = {"prepare_threshold": None}
+    return kwargs
+
+
 class Database:
     def __init__(self, url: str | None = None):
         if url is None:
@@ -75,34 +124,9 @@ class Database:
                 except OSError:
                     pass  # dir may already exist or be unwritable; engine will surface it
         else:
-            url = _sanitize_db_url(url)
-            # We ship psycopg (v3), but SQLAlchemy defaults a bare
-            # "postgresql://" URL to psycopg2. Point it at the v3 driver so a
-            # standard Postgres URL (e.g. from Supabase/Render) works as-is.
-            if url.startswith("postgresql://"):
-                url = "postgresql+psycopg://" + url[len("postgresql://"):]
-            elif url.startswith("postgres://"):  # some hosts use the short form
-                url = "postgresql+psycopg://" + url[len("postgres://"):]
+            url = _normalize_db_url(url)
         self.url = url
-
-        # On serverless (Vercel), many short-lived function instances each open
-        # their own connections. A pooled engine + a per-instance connection
-        # exhausts a small Postgres pooler ("max clients reached", pool_size 15).
-        # NullPool closes each connection when done, so instances don't hold a
-        # slot open. Detect serverless by the presence of a Postgres URL running
-        # under a serverless runtime, or force it with DB_NULLPOOL=true.
-        engine_kwargs: dict = {"future": True, "pool_pre_ping": True}
-        is_postgres = url.startswith("postgresql")
-        serverless = bool(
-            os.environ.get("VERCEL") or os.environ.get("AWS_LAMBDA_FUNCTION_NAME")
-        )
-        force_nullpool = os.environ.get("DB_NULLPOOL", "").lower() == "true"
-        if is_postgres and (serverless or force_nullpool):
-            from sqlalchemy.pool import NullPool
-            engine_kwargs["poolclass"] = NullPool
-            engine_kwargs.pop("pool_pre_ping", None)  # not needed with NullPool
-
-        self.engine = create_engine(url, **engine_kwargs)
+        self.engine = create_engine(url, **_engine_kwargs(url))
         self._sessionmaker = sessionmaker(bind=self.engine, future=True)
 
         # Creating/altering schema on every cold start opens a connection and

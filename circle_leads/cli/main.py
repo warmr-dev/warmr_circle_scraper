@@ -1070,13 +1070,13 @@ def stats_cmd(ctx):
 @click.option("--port", type=int, default=8000, show_default=True)
 @click.pass_context
 def dashboard_cmd(ctx, host, port):
-    """Open the web dashboard: leads, triage, activity and stats.
+    """Open the Warmr Circle web dashboard: leads, activity and stats.
 
     Requires DASHBOARD_PASSWORD in your environment (put it in .env).
     """
     from circle_leads.web.app import run
 
-    run(host=host, port=port, db_url=ctx.obj["db"].url)
+    run(host=host, port=port, db=ctx.obj["db"])
 
 
 
