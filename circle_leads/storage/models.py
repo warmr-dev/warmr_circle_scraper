@@ -301,3 +301,85 @@ class ScrapeRun(Base):
     items_updated: Mapped[int] = mapped_column(Integer, default=0)
     leads_found: Mapped[int] = mapped_column(Integer, default=0)
     error: Mapped[str | None] = mapped_column(Text)
+
+
+class ConnectionState(str, enum.Enum):
+    """Auth state of a private-community connection, driven by the local
+    connector. Deliberately distinguishes 'logged in' from 'can access the
+    community' from 'session expired' -- these are separately detectable and
+    must not be conflated (per the connector spec)."""
+
+    NOT_CONNECTED = "not_connected"          # host added, never authenticated
+    AUTHENTICATION_REQUIRED = "authentication_required"  # needs (re)login
+    AUTHENTICATING = "authenticating"        # a login window is open
+    CONNECTED = "connected"                  # logged in AND community readable
+    SESSION_EXPIRED = "session_expired"      # was connected, session lapsed
+    ACCESS_DENIED = "access_denied"          # logged in but not a member
+    ERROR = "error"                          # unexpected failure
+
+
+class Connector(Base):
+    """A paired local Circle Connector (runs on the user's own computer).
+
+    The connector holds the browser session locally; Railway only ever knows
+    this record. Pairing: the dashboard mints a one-time code, the connector
+    exchanges it for a long-lived token whose HASH is stored here (never the
+    token itself). No Circle credentials, cookies, or profiles are stored.
+    """
+
+    __tablename__ = "connectors"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str | None] = mapped_column(String(255))  # e.g. "Yer's laptop"
+
+    # One-time pairing code (short-lived); cleared once claimed.
+    pairing_code: Mapped[str | None] = mapped_column(String(64), index=True)
+    pairing_expires_at: Mapped[datetime | None] = mapped_column(DateTime)
+    paired: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+
+    # SHA-256 of the connector's API token. The token itself is shown once at
+    # pairing and never persisted server-side.
+    token_hash: Mapped[str | None] = mapped_column(String(64), index=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime)  # heartbeat
+    agent_info: Mapped[str | None] = mapped_column(String(255))  # OS/version, non-sensitive
+
+
+class CircleConnection(Base):
+    """A private Circle community the user connects via the local connector.
+
+    Tracks only NON-sensitive state: the host, the auth state, and counts. The
+    authenticated browser session lives exclusively in the connector's local
+    Playwright profile -- never here, never on Railway.
+    """
+
+    __tablename__ = "circle_connections"
+    __table_args__ = (UniqueConstraint("host", name="uq_circle_connection_host"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    connector_id: Mapped[int | None] = mapped_column(
+        ForeignKey("connectors.id"), index=True
+    )
+    # Optional link to the discovered Community row (created on first sync).
+    community_id: Mapped[int | None] = mapped_column(
+        ForeignKey("communities.id"), index=True
+    )
+
+    host: Mapped[str] = mapped_column(String(255), index=True)  # altea.circle.so
+    name: Mapped[str | None] = mapped_column(String(512))       # display name
+    member_label: Mapped[str | None] = mapped_column(String(255))  # who you're signed in as
+
+    state: Mapped[str] = mapped_column(
+        String(32), default=ConnectionState.NOT_CONNECTED.value, index=True
+    )
+    state_detail: Mapped[str | None] = mapped_column(Text)
+
+    spaces_total: Mapped[int] = mapped_column(Integer, default=0)
+    spaces_readable: Mapped[int] = mapped_column(Integer, default=0)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    last_sync_at: Mapped[datetime | None] = mapped_column(DateTime)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, onupdate=utcnow
+    )

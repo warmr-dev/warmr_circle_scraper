@@ -149,6 +149,7 @@
     <button data-view="leads" aria-selected="true"><span class="ic">🎯</span> Leads</button>
     <button data-view="stats" aria-selected="false"><span class="ic">📊</span> Overview</button>
     <button data-view="communities" aria-selected="false"><span class="ic">🌐</span> Communities</button>
+    <button data-view="connector" aria-selected="false"><span class="ic">🔌</span> Circle Connector</button>
     <button data-view="activity" aria-selected="false"><span class="ic">📡</span> Activity</button>
     <div class="sep"></div>
     <button data-view="triage" aria-selected="false"><span class="ic">🔎</span> Triage</button>
@@ -403,6 +404,43 @@
 
     <div class="panel"><div id="communities-table"><div class="empty">Loading…</div></div></div>
   </section>
+
+  <!-- CIRCLE CONNECTOR (private communities) -->
+  <section id="view-connector" hidden>
+    <div class="page-head">
+      <h1>Circle Connector</h1>
+      <p>Read private communities you're a member of. You log into Circle yourself on your own computer — your session and password never leave your machine.</p>
+    </div>
+
+    <div class="panel">
+      <h2>Local connector</h2>
+      <div id="connector-status" class="muted" style="font-size:13px">Loading…</div>
+      <div class="row" style="margin-top:10px">
+        <button class="action" id="conn-pair">Pair a local connector</button>
+      </div>
+      <div id="conn-pair-out" class="muted" style="margin-top:8px;font-size:13px"></div>
+    </div>
+
+    <div class="panel">
+      <h2 style="margin:0 0 2px">Private communities</h2>
+      <span class="muted" style="font-size:13px">Add a private community host. Then run <code>circle-connector login &lt;host&gt;</code> locally to sign in yourself.</span>
+      <div class="row" style="margin-top:10px">
+        <input id="conn-host" placeholder="altea.circle.so" style="flex:1;min-width:260px">
+        <button class="action" id="conn-add">Add community</button>
+      </div>
+      <div id="connections-table" style="margin-top:12px"><div class="empty">No private communities yet.</div></div>
+    </div>
+
+    <div class="panel" style="background:var(--soft2)">
+      <h2 style="margin:0 0 6px">How it works</h2>
+      <ol class="muted" style="font-size:13px;margin:0;padding-left:18px;line-height:1.7">
+        <li>Pair a local connector (one-time code above → <code>circle-connector pair</code>).</li>
+        <li>Add each private community host here.</li>
+        <li>Run <code>circle-connector login &lt;host&gt;</code> — a browser opens, you sign in.</li>
+        <li>Run <code>circle-connector run &lt;host&gt;</code> — it reads what your account can see and uploads only the text. No cookies, no password, no session ever reach this server.</li>
+      </ol>
+    </div>
+  </section>
 </main>
 </div>
 
@@ -428,10 +466,11 @@ async function api(path, options) {
 }
 
 // --- Navigation -------------------------------------------------------
-const views = ['leads', 'triage', 'activity', 'stats', 'communities', 'config'];
+const views = ['leads', 'triage', 'activity', 'stats', 'communities', 'connector', 'config'];
 const loaders = {
   leads: loadLeads, activity: loadActivity, stats: loadStats,
   communities: loadCommunities, config: loadConfig, triage: () => {},
+  connector: loadConnector,
 };
 
 document.querySelectorAll('nav button[data-view]').forEach(btn => {
@@ -700,6 +739,71 @@ async function loadCommunities() {
       </tr>`;
     }).join('')}</tbody></table>`;
 }
+
+// --- Circle Connector (private communities) --------------------------
+const CONN_STATE = {
+  connected: ['Connected', 'var(--high)', '✓'],
+  authentication_required: ['Authentication required', 'var(--medium)', '⚠'],
+  session_expired: ['Session expired — re-authenticate', 'var(--medium)', '⚠'],
+  authenticating: ['Authenticating…', 'var(--muted)', '…'],
+  access_denied: ['Access denied', 'var(--danger)', '✗'],
+  not_connected: ['Not connected — log in locally', 'var(--muted)', '○'],
+  error: ['Error', 'var(--danger)', '✗'],
+};
+
+async function loadConnector() {
+  // Connector online status
+  const cs = await api('/api/connectors');
+  if (cs) {
+    const online = (cs.connectors || []).filter(c => c.online);
+    $('connector-status').innerHTML = cs.connectors.length
+      ? `${online.length} online / ${cs.connectors.length} paired` +
+        cs.connectors.map(c => ` · <b>${esc(c.name || 'connector')}</b> ${c.online ? '🟢 online' : '⚪ offline'}`).join('')
+      : 'No connector paired yet. Pair one below, then run it on your computer.';
+  }
+  // Private community connections
+  const data = await api('/api/connections');
+  if (!data) return;
+  if (!data.connections.length) {
+    $('connections-table').innerHTML = '<div class="empty">No private communities yet. Add one above.</div>';
+    return;
+  }
+  $('connections-table').innerHTML = data.connections.map(c => {
+    const [label, color, icon] = CONN_STATE[c.state] || CONN_STATE.not_connected;
+    return `<div class="lead" style="margin-bottom:8px">
+      <div class="lead-head">
+        <b>${esc(c.name || c.host)}</b>
+        <span class="meta">${esc(c.host)}</span>
+        <span class="pill" style="color:${color};background:color-mix(in srgb, ${color} 14%, transparent)">${icon} ${esc(label)}</span>
+      </div>
+      <div class="meta">${c.member_label ? 'as ' + esc(c.member_label) + ' · ' : ''}${c.spaces_readable}/${c.spaces_total} space(s) readable${c.last_sync_at ? ' · synced ' + esc(c.last_sync_at.replace('T',' ').slice(0,16)) : ''}</div>
+      <div style="margin-top:8px"><button class="ghost conn-remove" data-host="${esc(c.host)}">Remove</button></div>
+    </div>`;
+  }).join('');
+}
+
+$('conn-pair').addEventListener('click', async () => {
+  const r = await api('/api/connector/pair', { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' });
+  if (!r) return;
+  $('conn-pair-out').innerHTML =
+    `Pairing code: <b style="font-size:16px;letter-spacing:1px">${esc(r.pairing_code)}</b> ` +
+    `(expires in ${r.expires_in_minutes} min). On your computer run:<br>` +
+    `<code>circle-connector pair --backend ${esc(location.origin)} --code ${esc(r.pairing_code)}</code>`;
+});
+
+$('conn-add').addEventListener('click', async () => {
+  const host = $('conn-host').value.trim();
+  if (!host) return;
+  const r = await api('/api/connections/add', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ host }) });
+  if (r) { $('conn-host').value = ''; toast('Community added — log in locally next'); loadConnector(); }
+});
+
+document.addEventListener('click', async (event) => {
+  const rm = event.target.closest('.conn-remove');
+  if (!rm) return;
+  await api(`/api/connections/${encodeURIComponent(rm.dataset.host)}/remove`, { method: 'POST' });
+  toast('Removed'); loadConnector();
+});
 
 // --- Triggered jobs (search / read) ----------------------------------
 let jobPollTimer = null;

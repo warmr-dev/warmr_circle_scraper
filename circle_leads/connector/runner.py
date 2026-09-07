@@ -1,0 +1,96 @@
+"""Orchestrates one connector cycle for a private Circle community.
+
+For a host the user provided:
+  1. Check the local browser session (never touches Circle credentials).
+  2. If not logged in -> report AUTHENTICATION_REQUIRED (and, interactively,
+     open a window for the user to log in themselves).
+  3. If logged in -> enumerate accessible spaces, read their posts locally,
+     normalize, and upload ONLY the normalized records to Railway.
+  4. Report the connection state at each step so the dashboard reflects reality.
+
+The three facts the spec insists stay separate are tracked separately:
+  session valid  ->  community accessible  ->  spaces readable  ->  content sent
+"""
+
+from __future__ import annotations
+
+import logging
+
+from circle_leads.connector.client import BackendClient
+from circle_leads.scraper.browser_reader import (
+    BrowserFeedReader, BrowserNotAvailable, NotLoggedIn, fetch_space_posts,
+)
+from circle_leads.storage.models import ConnectionState
+
+logger = logging.getLogger(__name__)
+
+
+def authenticate(host: str, *, timeout_seconds: int = 300) -> None:
+    """Open a visible browser so the user logs into `host` themselves."""
+    reader = BrowserFeedReader(host, headless=False)
+    reader.login(timeout_seconds=timeout_seconds)
+
+
+def sync_community(
+    host: str,
+    backend: BackendClient,
+    *,
+    excluded_content: list[str] | None = None,
+    max_pages: int = 5,
+) -> dict:
+    """Run one read+upload cycle for a connected community. Reports state to
+    the backend throughout. Returns a summary dict."""
+    host = host.replace("https://", "").strip("/")
+    try:
+        reader = BrowserFeedReader(host, headless=True)
+    except BrowserNotAvailable as exc:
+        backend.report_connection(host=host, state=ConnectionState.ERROR.value,
+                                  state_detail=str(exc))
+        return {"host": host, "state": "error", "error": str(exc)}
+
+    # 1. Session valid?  (logged-in-ness is distinct from access)
+    if not reader.status():
+        backend.report_connection(
+            host=host, state=ConnectionState.AUTHENTICATION_REQUIRED.value,
+            state_detail="No valid local session — please authenticate.",
+        )
+        return {"host": host, "state": "authentication_required"}
+
+    # 2 + 3. Enumerate spaces the account can access.
+    try:
+        spaces = reader.list_spaces()
+    except NotLoggedIn:
+        backend.report_connection(host=host, state=ConnectionState.SESSION_EXPIRED.value,
+                                  state_detail="Session expired mid-sync.")
+        return {"host": host, "state": "session_expired"}
+
+    if not spaces:
+        # Logged in but no readable spaces -> access is denied/empty.
+        backend.report_connection(host=host, state=ConnectionState.ACCESS_DENIED.value,
+                                  state_detail="No spaces visible to this account.")
+        return {"host": host, "state": "access_denied", "spaces": 0}
+
+    # 4. Read + normalize + upload each space's posts.
+    total_posts = 0
+    readable_spaces = 0
+    for sp in spaces:
+        try:
+            records = fetch_space_posts(
+                reader, sp["id"], excluded_content=excluded_content, max_pages=max_pages
+            )
+        except NotLoggedIn:
+            backend.report_connection(host=host, state=ConnectionState.SESSION_EXPIRED.value)
+            return {"host": host, "state": "session_expired", "posts": total_posts}
+        if not records:
+            continue
+        readable_spaces += 1
+        total_posts += len(records)
+        backend.ingest(host, records)  # normalized records only
+
+    backend.report_connection(
+        host=host, state=ConnectionState.CONNECTED.value,
+        spaces_total=len(spaces), spaces_readable=readable_spaces,
+    )
+    return {"host": host, "state": "connected",
+            "spaces_total": len(spaces), "spaces_readable": readable_spaces,
+            "posts": total_posts}

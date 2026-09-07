@@ -283,6 +283,169 @@ def create_app(db_url: str | None = None, config_path: str | None = None) -> Fas
         return {"ok": True, "slug": slug, "name": real_name or slug,
                 "readable": readable, "spaces_found": spaces_found, "note": note}
 
+    # --- Local Circle Connector (private communities) ---------------------
+    #
+    # The connector runs on the USER's computer, holds the authenticated Circle
+    # browser session locally, and uploads only normalized content. Railway
+    # never sees Circle credentials/cookies/profiles. Two auth surfaces:
+    #   * dashboard (human, cookie) manages pairing + connections
+    #   * connector (bearer token from pairing) sends heartbeat + content
+
+    def require_connector(request: Request):
+        from circle_leads.web.connector_auth import verify_connector_token
+        auth = request.headers.get("Authorization", "")
+        token = auth[7:] if auth.lower().startswith("bearer ") else ""
+        c = verify_connector_token(db, token)
+        if c is None:
+            raise HTTPException(401, "Invalid or unpaired connector token")
+        return c
+
+    @app.post("/api/connector/pair")
+    def connector_pair(payload: dict, _: None = Depends(require_auth)) -> dict[str, Any]:
+        """Dashboard action: mint a one-time pairing code to enter in the connector."""
+        from circle_leads.web.connector_auth import create_pairing
+        return create_pairing(db, name=(payload or {}).get("name"))
+
+    @app.post("/api/connector/claim")
+    def connector_claim(payload: dict) -> dict[str, Any]:
+        """Connector action (no session): exchange a pairing code for a token."""
+        from circle_leads.web.connector_auth import claim_pairing
+        result = claim_pairing(
+            db, str((payload or {}).get("code") or ""),
+            agent_info=str((payload or {}).get("agent_info") or "")[:255] or None,
+        )
+        if result is None:
+            raise HTTPException(400, "Invalid or expired pairing code.")
+        return result
+
+    @app.post("/api/connector/heartbeat")
+    def connector_heartbeat(connector=Depends(require_connector)) -> dict[str, Any]:
+        """Connector liveness ping. Updates last_seen (done in verify)."""
+        return {"ok": True, "connector_id": connector.id}
+
+    @app.get("/api/connectors")
+    def list_connectors(_: None = Depends(require_auth)) -> dict[str, Any]:
+        from circle_leads.storage.models import Connector
+        import datetime as _dt
+        now = _dt.datetime.utcnow()
+        with db.session() as s:
+            rows = s.scalars(select(Connector).where(Connector.paired.is_(True))).all()
+            out = []
+            for c in rows:
+                online = bool(c.last_seen_at and (now - c.last_seen_at).total_seconds() < 120)
+                out.append({
+                    "id": c.id, "name": c.name, "agent_info": c.agent_info,
+                    "online": online,
+                    "last_seen_at": c.last_seen_at.isoformat() if c.last_seen_at else None,
+                })
+            return {"connectors": out}
+
+    @app.post("/api/connector/connections")
+    def upsert_connection(payload: dict, connector=Depends(require_connector)) -> dict[str, Any]:
+        """Connector reports a private community's auth state + space counts.
+
+        Carries only non-sensitive fields (host, state, name, counts). No cookies,
+        no session, no profile data.
+        """
+        from circle_leads.storage.models import CircleConnection, ConnectionState
+        host = str(payload.get("host") or "").strip().lower().replace("https://", "").strip("/")
+        if not host or "." not in host:
+            raise HTTPException(400, "A community host is required.")
+        state = str(payload.get("state") or ConnectionState.NOT_CONNECTED.value)
+        valid = {s.value for s in ConnectionState}
+        if state not in valid:
+            raise HTTPException(400, f"Unknown state {state!r}.")
+        with db.session() as s:
+            conn = s.scalar(select(CircleConnection).where(CircleConnection.host == host))
+            if conn is None:
+                conn = CircleConnection(host=host)
+                s.add(conn)
+            conn.connector_id = connector.id
+            conn.state = state
+            conn.state_detail = (payload.get("state_detail") or None)
+            if payload.get("name"):
+                conn.name = str(payload["name"])[:512]
+            if payload.get("member_label"):
+                conn.member_label = str(payload["member_label"])[:255]
+            if payload.get("spaces_total") is not None:
+                conn.spaces_total = int(payload["spaces_total"])
+            if payload.get("spaces_readable") is not None:
+                conn.spaces_readable = int(payload["spaces_readable"])
+            import datetime as _dt
+            if state == ConnectionState.CONNECTED.value:
+                conn.last_sync_at = _dt.datetime.utcnow()
+        return {"ok": True, "host": host, "state": state}
+
+    @app.post("/api/connector/ingest")
+    def connector_ingest(payload: dict, connector=Depends(require_connector)) -> dict[str, Any]:
+        """Connector uploads normalized posts from a private community; we
+        classify + store them exactly like any other source. The records are
+        already normalized text -- no Circle session ever reaches here."""
+        host = str(payload.get("host") or "").strip().lower().replace("https://", "").strip("/")
+        records = payload.get("records") or []
+        if not host:
+            raise HTTPException(400, "host is required.")
+        if not isinstance(records, list) or not records:
+            return {"ok": True, "leads": 0, "posts": 0, "note": "no records"}
+        slug = host.split(".")[0]
+        from circle_leads.triage.pipeline import triage_records
+        res = triage_records(
+            db, records, requirements(), community=slug,
+            source_url=f"https://{host}",
+            use_llm=bool(os.environ.get("OPENAI_API_KEY")),
+        )
+        log_activity_holder(
+            kind="ingest", level="success" if res.leads else "info",
+            community=slug,
+            summary=f"Connector ingest from {host}: {len(res.leads)} lead(s) from {res.total_posts} post(s)",
+            detail={"host": host, "connector_id": connector.id},
+            items_seen=res.total_posts, leads_found=len(res.leads),
+        )
+        return {"ok": True, "leads": len(res.leads), "posts": res.total_posts}
+
+    @app.get("/api/connections")
+    def list_connections(_: None = Depends(require_auth)) -> dict[str, Any]:
+        from circle_leads.storage.models import CircleConnection
+        with db.session() as s:
+            rows = s.scalars(
+                select(CircleConnection).order_by(CircleConnection.host)
+            ).all()
+            return {"connections": [
+                {"id": c.id, "host": c.host, "name": c.name,
+                 "member_label": c.member_label, "state": c.state,
+                 "state_detail": c.state_detail,
+                 "spaces_total": c.spaces_total, "spaces_readable": c.spaces_readable,
+                 "last_sync_at": c.last_sync_at.isoformat() if c.last_sync_at else None}
+                for c in rows
+            ]}
+
+    @app.post("/api/connections/add")
+    def add_connection(payload: dict, _: None = Depends(require_auth)) -> dict[str, Any]:
+        """Dashboard: register a private community host to monitor. The actual
+        login happens locally in the connector; this just creates the record."""
+        from circle_leads.storage.models import CircleConnection, ConnectionState
+        host = str(payload.get("host") or "").strip().lower().replace("https://", "").strip("/")
+        if not host or "." not in host:
+            raise HTTPException(400, "Enter a community host, e.g. altea.circle.so")
+        with db.session() as s:
+            conn = s.scalar(select(CircleConnection).where(CircleConnection.host == host))
+            if conn is None:
+                conn = CircleConnection(host=host, state=ConnectionState.NOT_CONNECTED.value)
+                s.add(conn)
+            log_activity(s, kind="review", community=host.split(".")[0],
+                         summary=f"Private community {host} added (awaiting local login)")
+        return {"ok": True, "host": host}
+
+    @app.post("/api/connections/{host}/remove")
+    def remove_connection(host: str, _: None = Depends(require_auth)) -> dict[str, Any]:
+        from circle_leads.storage.models import CircleConnection
+        host = host.strip().lower()
+        with db.session() as s:
+            conn = s.scalar(select(CircleConnection).where(CircleConnection.host == host))
+            if conn is not None:
+                s.delete(conn)
+        return {"ok": True}
+
     # --- Triage -----------------------------------------------------------
 
     @app.post("/api/triage")

@@ -168,6 +168,40 @@ class BrowserFeedReader:
         except Exception:
             return None
 
+    def list_spaces(self) -> list[dict]:
+        """Enumerate the spaces this member can access, via the logged-in browser.
+
+        Uses ``/internal_api/spaces`` -- the same call Circle's web app makes to
+        render the sidebar -- so it returns exactly the spaces your account can
+        see, no more. Raises NotLoggedIn if the session isn't valid.
+        """
+        with self._sync_playwright() as pw:
+            ctx = pw.chromium.launch_persistent_context(
+                str(self.profile_dir), headless=self.headless
+            )
+            page = ctx.pages[0] if ctx.pages else ctx.new_page()
+            page.goto(self.base, wait_until="domcontentloaded")
+            if not self._is_logged_in_via(page):
+                ctx.close()
+                raise NotLoggedIn(
+                    f"No valid session for {self.community_host}. Run login first."
+                )
+            payload = self._fetch_json(page, "/internal_api/spaces")
+            ctx.close()
+        records = (
+            payload.get("records") if isinstance(payload, dict) else payload
+        ) or []
+        out = []
+        for sp in records:
+            if isinstance(sp, dict) and sp.get("id") is not None:
+                out.append({
+                    "id": str(sp["id"]),
+                    "slug": str(sp.get("slug") or ""),
+                    "name": str(sp.get("name") or sp.get("slug") or ""),
+                    "space_type": sp.get("space_type") or sp.get("post_type"),
+                })
+        return out
+
     def list_posts(
         self, space_id: str | int, *, per_page: int = 20, max_pages: int = 10
     ) -> list[dict]:
