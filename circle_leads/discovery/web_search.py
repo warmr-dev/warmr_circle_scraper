@@ -50,6 +50,18 @@ DEFAULT_QUERY_TEMPLATES = [
     "{q} mastermind or membership community on circle.so",
     "{q} slack alternative community for founders and builders",
     "{q} paid community for entrepreneurs and startups",
+    # Fuzzy / related-topic coverage: hiring intent phrased many ways, and the
+    # community *types* a hirer gathers in -- not just the literal niche term.
+    "hire a {q} community",
+    "need a {q} online community",
+    "looking for {q} community or group",
+    "{q} founders community",
+    "{q} community",
+    "free {q} community",
+    "free online community for {q}",
+    "{q} entrepreneurs community to find talent",
+    "{q} indie hackers or makers community",
+    "where do people who hire {q} hang out online",
 ]
 
 # Keyword-engine queries that target circle.so subdomains directly. Run as a
@@ -64,6 +76,13 @@ SITE_QUERY_TEMPLATES = [
     '{q} circle.so members hiring OR recruiting',
     '{q} "we are looking for" OR "we need" developer circle.so',
     'inurl:circle.so {q} founders OR startup OR builders',
+    # Broader net: any circle.so property, the platform's fingerprint, and
+    # free-community phrasing so we catch communities that never say "hire".
+    'inurl:circle.so {q}',
+    '"powered by circle" {q}',
+    '{q} "free community" circle.so',
+    '{q} founders OR builders OR makers circle.so',
+    'site:circle.so {q} "looking for" OR "need help" OR "anyone know"',
 ]
 
 # Public directories worth fetching directly (no search key needed).

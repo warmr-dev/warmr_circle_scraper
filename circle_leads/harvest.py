@@ -103,7 +103,22 @@ def _niches_from_config(requirements) -> list[str]:
     cap = getattr(requirements, "max_search_niches", 12)
     if cap and cap > 0:
         niches = niches[:cap]
-    return niches or DEFAULT_NICHES
+    niches = niches or list(DEFAULT_NICHES)
+
+    # Optionally broaden with an LLM so discovery isn't limited to the exact
+    # terms typed -- related roles, skills, and community types a hirer gathers
+    # in. Gated by config; degrades to the seeds when no key is available.
+    if getattr(requirements, "expand_search_with_ai", False):
+        try:
+            from circle_leads.discovery.query_expander import expand_niches
+
+            max_total = getattr(requirements, "max_expanded_niches", 25) or 25
+            extra = max(0, max_total - len(niches))
+            if extra > 0:
+                niches = expand_niches(niches, max_extra=extra)[:max_total]
+        except Exception:  # noqa: BLE001 - expansion is best-effort
+            pass
+    return niches
 
 
 def _existing_community_urls(db: Database, *, limit: int) -> list[str]:

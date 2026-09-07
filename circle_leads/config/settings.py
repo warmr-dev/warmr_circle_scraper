@@ -63,6 +63,11 @@ class Requirements(BaseModel):
     # How many of your target roles/skills to search each harvest. More = more
     # coverage but more Exa calls (each niche runs ~18 searches). 0 = all.
     max_search_niches: int = 12
+    # Use an LLM (when a key is set) to expand your roles/skills into related
+    # niches before searching, so discovery isn't limited to the exact terms.
+    expand_search_with_ai: bool = True
+    # Cap on the total niches after AI expansion (bounds search cost/time).
+    max_expanded_niches: int = 25
     llm_escalation_threshold: int = 55
     keywords: Keywords = Field(default_factory=Keywords)
     scoring: ScoringWeights = Field(default_factory=ScoringWeights)
@@ -113,6 +118,8 @@ def requirements_to_dict(req: "Requirements") -> dict:
         "harvest_recency_days": req.harvest_recency_days,
         "harvest_all_spaces": req.harvest_all_spaces,
         "max_search_niches": req.max_search_niches,
+        "expand_search_with_ai": req.expand_search_with_ai,
+        "max_expanded_niches": req.max_expanded_niches,
         "llm_escalation_threshold": req.llm_escalation_threshold,
         "keywords": {
             "include": list(req.keywords.include),

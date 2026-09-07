@@ -55,6 +55,8 @@ minimum_confidence: 0.6
 harvest_recency_days: 30
 harvest_all_spaces: false
 max_search_niches: 12
+expand_search_with_ai: true
+max_expanded_niches: 25
 llm_escalation_threshold: 55
 keywords:
   include:
