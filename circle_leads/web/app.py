@@ -323,6 +323,30 @@ def create_app(db_url: str | None = None, config_path: str | None = None) -> Fas
         """Connector liveness ping. Updates last_seen (done in verify)."""
         return {"ok": True, "connector_id": connector.id}
 
+    @app.get("/api/connector/worklist")
+    def connector_worklist(connector=Depends(require_connector)) -> dict[str, Any]:
+        """The communities this connector should scan, highest priority first.
+
+        This is what makes the dashboard the control plane: the connector asks
+        the server what to work on instead of being handed a host list on the
+        command line. PAUSED communities are withheld entirely.
+        """
+        from circle_leads.storage.models import (
+            CircleConnection, ConnectionPriority, SCAN_ORDER,
+        )
+        with db.session() as s:
+            rows = s.scalars(
+                select(CircleConnection).where(
+                    CircleConnection.priority != ConnectionPriority.PAUSED.value
+                )
+            ).all()
+            rows = sorted(rows, key=lambda c: (SCAN_ORDER.get(c.priority, 1), c.host))
+            return {"communities": [
+                {"host": c.host, "priority": c.priority, "state": c.state,
+                 "last_sync_at": c.last_sync_at.isoformat() if c.last_sync_at else None}
+                for c in rows
+            ]}
+
     @app.get("/api/connectors")
     def list_connectors(_: None = Depends(require_auth)) -> dict[str, Any]:
         from circle_leads.storage.models import Connector
@@ -403,38 +427,103 @@ def create_app(db_url: str | None = None, config_path: str | None = None) -> Fas
         )
         return {"ok": True, "leads": len(res.leads), "posts": res.total_posts}
 
+    def _clean_host(raw: Any) -> str:
+        """Normalize a community host, or raise if it isn't one."""
+        host = (str(raw or "").strip().lower()
+                .replace("https://", "").replace("http://", "").strip("/"))
+        host = host.split("/")[0]  # tolerate a pasted deep link
+        if not host or "." not in host:
+            raise HTTPException(400, "Enter a community host, e.g. altea.circle.so")
+        return host
+
+    def _connection_dict(c) -> dict[str, Any]:
+        return {
+            "id": c.id, "host": c.host, "name": c.name,
+            "member_label": c.member_label, "state": c.state,
+            "state_detail": c.state_detail,
+            "priority": c.priority, "notes": c.notes,
+            "spaces_total": c.spaces_total, "spaces_readable": c.spaces_readable,
+            "last_sync_at": c.last_sync_at.isoformat() if c.last_sync_at else None,
+        }
+
     @app.get("/api/connections")
     def list_connections(_: None = Depends(require_auth)) -> dict[str, Any]:
-        from circle_leads.storage.models import CircleConnection
+        """List connected private communities in scan order: VIP first."""
+        from circle_leads.storage.models import CircleConnection, SCAN_ORDER
         with db.session() as s:
-            rows = s.scalars(
-                select(CircleConnection).order_by(CircleConnection.host)
-            ).all()
-            return {"connections": [
-                {"id": c.id, "host": c.host, "name": c.name,
-                 "member_label": c.member_label, "state": c.state,
-                 "state_detail": c.state_detail,
-                 "spaces_total": c.spaces_total, "spaces_readable": c.spaces_readable,
-                 "last_sync_at": c.last_sync_at.isoformat() if c.last_sync_at else None}
-                for c in rows
-            ]}
+            rows = s.scalars(select(CircleConnection)).all()
+            # Sort in Python so the ordering matches SCAN_ORDER exactly rather
+            # than the alphabetical accident of the stored string.
+            rows = sorted(rows, key=lambda c: (SCAN_ORDER.get(c.priority, 1), c.host))
+            return {"connections": [_connection_dict(c) for c in rows]}
 
     @app.post("/api/connections/add")
     def add_connection(payload: dict, _: None = Depends(require_auth)) -> dict[str, Any]:
         """Dashboard: register a private community host to monitor. The actual
         login happens locally in the connector; this just creates the record."""
-        from circle_leads.storage.models import CircleConnection, ConnectionState
-        host = str(payload.get("host") or "").strip().lower().replace("https://", "").strip("/")
-        if not host or "." not in host:
-            raise HTTPException(400, "Enter a community host, e.g. altea.circle.so")
+        from circle_leads.storage.models import (
+            CircleConnection, ConnectionPriority, ConnectionState,
+        )
+        host = _clean_host(payload.get("host"))
+        priority = str(payload.get("priority") or ConnectionPriority.NORMAL.value).lower()
+        if priority not in ConnectionPriority.values():
+            raise HTTPException(400, f"Unknown priority {priority!r}.")
         with db.session() as s:
             conn = s.scalar(select(CircleConnection).where(CircleConnection.host == host))
+            created = conn is None
             if conn is None:
                 conn = CircleConnection(host=host, state=ConnectionState.NOT_CONNECTED.value)
                 s.add(conn)
+            # Re-adding an existing host updates its settings rather than
+            # silently ignoring what you typed.
+            conn.priority = priority
+            if payload.get("name"):
+                conn.name = str(payload["name"])[:512]
+            if payload.get("notes") is not None:
+                conn.notes = str(payload["notes"])[:2000] or None
+            log_activity(
+                s, kind="review", community=host.split(".")[0],
+                summary=(f"Private community {host} "
+                         f"{'added' if created else 'updated'} "
+                         f"({priority}; awaiting local login)"),
+            )
+        return {"ok": True, "host": host, "priority": priority, "created": created}
+
+    @app.post("/api/connections/{host}/priority")
+    def set_connection_priority(
+        host: str, payload: dict, _: None = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Set a community's scan priority (vip / normal / low / paused)."""
+        from circle_leads.storage.models import CircleConnection, ConnectionPriority
+        host = _clean_host(host)
+        priority = str((payload or {}).get("priority") or "").lower()
+        if priority not in ConnectionPriority.values():
+            raise HTTPException(
+                400, f"priority must be one of {sorted(ConnectionPriority.values())}."
+            )
+        with db.session() as s:
+            conn = s.scalar(select(CircleConnection).where(CircleConnection.host == host))
+            if conn is None:
+                raise HTTPException(404, f"{host} is not a connected community.")
+            conn.priority = priority
             log_activity(s, kind="review", community=host.split(".")[0],
-                         summary=f"Private community {host} added (awaiting local login)")
-        return {"ok": True, "host": host}
+                         summary=f"{host} scan priority set to {priority}")
+        return {"ok": True, "host": host, "priority": priority}
+
+    @app.post("/api/connections/{host}/notes")
+    def set_connection_notes(
+        host: str, payload: dict, _: None = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Attach a private note to a community (why it matters, who you know)."""
+        from circle_leads.storage.models import CircleConnection
+        host = _clean_host(host)
+        notes = str((payload or {}).get("notes") or "")[:2000]
+        with db.session() as s:
+            conn = s.scalar(select(CircleConnection).where(CircleConnection.host == host))
+            if conn is None:
+                raise HTTPException(404, f"{host} is not a connected community.")
+            conn.notes = notes or None
+        return {"ok": True, "host": host, "notes": notes or None}
 
     @app.post("/api/connections/{host}/remove")
     def remove_connection(host: str, _: None = Depends(require_auth)) -> dict[str, Any]:

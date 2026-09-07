@@ -426,8 +426,18 @@
       <h2 style="margin:0 0 2px">Private communities</h2>
       <span class="muted" style="font-size:13px">Add a private community host. Then run <code>circle-connector login &lt;host&gt;</code> locally to sign in yourself.</span>
       <div class="row" style="margin-top:10px">
-        <input id="conn-host" placeholder="altea.circle.so" style="flex:1;min-width:260px">
+        <input id="conn-host" placeholder="altea.circle.so" style="flex:1;min-width:220px">
+        <select id="conn-priority" title="Scan priority">
+          <option value="vip">⭐ VIP — scan first</option>
+          <option value="normal" selected>Normal</option>
+          <option value="low">Low — scan last</option>
+          <option value="paused">Paused — don't scan</option>
+        </select>
         <button class="action" id="conn-add">Add community</button>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <input id="conn-notes" placeholder="Note (optional) — why this community matters"
+               style="flex:1;min-width:260px">
       </div>
       <div id="connections-table" style="margin-top:12px"><div class="empty">No private communities yet.</div></div>
     </div>
@@ -818,9 +828,17 @@ async function loadConnector() {
         <b>${esc(c.name || c.host)}</b>
         <span class="meta">${esc(c.host)}</span>
         <span class="pill" style="color:${color};background:color-mix(in srgb, ${color} 14%, transparent)">${icon} ${esc(label)}</span>
+        ${prioPill(c.priority)}
       </div>
       <div class="meta">${c.member_label ? 'as ' + esc(c.member_label) + ' · ' : ''}${c.spaces_readable}/${c.spaces_total} space(s) readable${c.last_sync_at ? ' · synced ' + esc(c.last_sync_at.replace('T',' ').slice(0,16)) : ''}</div>
-      <div style="margin-top:8px"><button class="ghost conn-remove" data-host="${esc(c.host)}">Remove</button></div>
+      ${c.notes ? `<div class="meta" style="margin-top:4px;font-style:italic">${esc(c.notes)}</div>` : ''}
+      <div class="row" style="margin-top:8px">
+        <select class="conn-prio" data-host="${esc(c.host)}" title="Scan priority">
+          ${PRIORITIES.map(([v, lbl]) =>
+            `<option value="${v}"${c.priority === v ? ' selected' : ''}>${lbl}</option>`).join('')}
+        </select>
+        <button class="ghost conn-remove" data-host="${esc(c.host)}">Remove</button>
+      </div>
     </div>`;
   }).join('');
 }
@@ -834,11 +852,55 @@ $('conn-pair').addEventListener('click', async () => {
     `<code>circle-connector pair --backend ${esc(location.origin)} --code ${esc(r.pairing_code)}</code>`;
 });
 
+// Scan priority: VIP communities are read first, paused ones are skipped.
+const PRIORITIES = [
+  ['vip', '⭐ VIP'], ['normal', 'Normal'], ['low', 'Low'], ['paused', '⏸ Paused'],
+];
+const PRIO_STYLE = {
+  vip:    ['⭐ VIP',    'var(--high)'],
+  low:    ['Low',       'var(--muted)'],
+  paused: ['⏸ Paused',  'var(--medium)'],
+};
+function prioPill(p) {
+  const style = PRIO_STYLE[p];      // 'normal' needs no pill — it's the default
+  if (!style) return '';
+  const [label, color] = style;
+  return `<span class="pill" style="color:${color};background:color-mix(in srgb, ${color} 14%, transparent)">${label}</span>`;
+}
+
+// Changing the dropdown on a row updates its priority immediately.
+document.addEventListener('change', async (ev) => {
+  const sel = ev.target.closest('.conn-prio');
+  if (!sel) return;
+  const host = sel.dataset.host;
+  try {
+    await api(`/api/connections/${encodeURIComponent(host)}/priority`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ priority: sel.value }),
+    });
+    toast(`${host} → ${sel.value}`);
+    loadConnector();
+  } catch (e) { toast(String(e.message || e).slice(0, 160)); }
+});
+
 $('conn-add').addEventListener('click', async () => {
   const host = $('conn-host').value.trim();
-  if (!host) return;
-  const r = await api('/api/connections/add', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ host }) });
-  if (r) { $('conn-host').value = ''; toast('Community added — log in locally next'); loadConnector(); }
+  if (!host) return toast('Enter a community host');
+  const priority = $('conn-priority').value;
+  const notes = $('conn-notes').value.trim();
+  let r;
+  try {
+    r = await api('/api/connections/add', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ host, priority, notes }),
+    });
+  } catch (e) { return toast(String(e.message || e).slice(0, 160)); }
+  if (r) {
+    $('conn-host').value = '';
+    $('conn-notes').value = '';
+    toast(r.created ? 'Community added — log in locally next' : 'Community updated');
+    loadConnector();
+  }
 });
 
 document.addEventListener('click', async (event) => {

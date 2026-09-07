@@ -80,6 +80,8 @@ class Database:
         additions = [
             ("communities", "watching", "BOOLEAN DEFAULT FALSE"),
             ("leads", "external_synced_at", "TIMESTAMP"),
+            ("circle_connections", "priority", "VARCHAR(16) DEFAULT 'normal'"),
+            ("circle_connections", "notes", "TEXT"),
         ]
         try:
             insp = _inspect(self.engine)

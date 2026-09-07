@@ -60,17 +60,41 @@ def sync_cmd(host: str, max_pages: int) -> None:
 
 
 @cli.command("run")
-@click.argument("hosts", nargs=-1, required=True)
+@click.argument("hosts", nargs=-1)
 @click.option("--interval", type=int, default=600, show_default=True,
               help="Seconds between sync cycles.")
 @click.option("--max-pages", type=int, default=5, show_default=True)
 def run_cmd(hosts, interval, max_pages) -> None:
-    """Loop: heartbeat + sync the given communities every --interval seconds."""
+    """Loop: heartbeat + sync every --interval seconds.
+
+    With no HOSTS, the connector asks the dashboard what to scan and follows
+    the priority you set there (VIP first; paused communities skipped). Pass
+    hosts explicitly to override that for a one-off run.
+    """
     client = _client()
-    click.echo(f"Connector running for {len(hosts)} community/communities. Ctrl-C to stop.")
+    if hosts:
+        click.echo(f"Connector running for {len(hosts)} community/communities. "
+                   "Ctrl-C to stop.")
+    else:
+        click.echo("Connector running from the dashboard worklist "
+                   "(VIP first). Ctrl-C to stop.")
+
     while True:
         client.heartbeat()
-        for host in hosts:
+
+        targets = list(hosts)
+        if not targets:
+            try:
+                work = client.worklist()
+                targets = [c["host"] for c in work]
+                if not targets:
+                    click.echo("  no communities to scan "
+                               "(add one in the dashboard, or un-pause it)")
+            except Exception as exc:  # noqa: BLE001 - backend blip; retry next cycle
+                click.echo(f"  could not fetch the worklist: "
+                           f"{exc.__class__.__name__}", err=True)
+
+        for host in targets:
             try:
                 result = sync_community(host, client, max_pages=max_pages)
                 click.echo(f"  {host}: {result.get('state')} "

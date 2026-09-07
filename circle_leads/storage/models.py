@@ -318,6 +318,33 @@ class ConnectionState(str, enum.Enum):
     ERROR = "error"                          # unexpected failure
 
 
+class ConnectionPriority(str, enum.Enum):
+    """How eagerly a connected private community is scanned.
+
+    Ordering matters: the scan queue sorts by ``SCAN_ORDER`` so VIP communities
+    are read first, and PAUSED ones are skipped without deleting the connection.
+    """
+
+    VIP = "vip"          # scan first, on the fast lane
+    NORMAL = "normal"    # the default
+    LOW = "low"          # scan last, when there's room
+    PAUSED = "paused"    # keep the record, but never scan
+
+    @classmethod
+    def values(cls) -> set[str]:
+        return {p.value for p in cls}
+
+
+# Sort key for the scan queue: lower runs earlier. PAUSED is filtered out
+# before sorting, so its rank only matters for a stable display order.
+SCAN_ORDER = {
+    ConnectionPriority.VIP.value: 0,
+    ConnectionPriority.NORMAL.value: 1,
+    ConnectionPriority.LOW.value: 2,
+    ConnectionPriority.PAUSED.value: 3,
+}
+
+
 class Connector(Base):
     """A paired local Circle Connector (runs on the user's own computer).
 
@@ -369,6 +396,14 @@ class CircleConnection(Base):
     host: Mapped[str] = mapped_column(String(255), index=True)  # altea.circle.so
     name: Mapped[str | None] = mapped_column(String(512))       # display name
     member_label: Mapped[str | None] = mapped_column(String(255))  # who you're signed in as
+
+    # How this community is treated by the scan queue. VIP communities are
+    # scanned first and more often; PAUSED ones are skipped entirely without
+    # losing the record (and its login) the way removing them would.
+    priority: Mapped[str] = mapped_column(
+        String(16), default=ConnectionPriority.NORMAL.value, index=True
+    )
+    notes: Mapped[str | None] = mapped_column(Text)  # your own reminder, e.g. why it matters
 
     state: Mapped[str] = mapped_column(
         String(32), default=ConnectionState.NOT_CONNECTED.value, index=True
