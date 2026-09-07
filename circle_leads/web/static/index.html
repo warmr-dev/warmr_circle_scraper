@@ -443,6 +443,18 @@ document.addEventListener('click', async (event) => {
     loadCommunities();
     return;
   }
+  const watchBtn = event.target.closest('.watch-toggle');
+  if (watchBtn) {
+    const nowWatching = watchBtn.dataset.watching !== '1';
+    await api(`/api/communities/${watchBtn.dataset.slug}/watch`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ watching: nowWatching }),
+    });
+    toast(nowWatching ? 'Subscribed — polled first on fast lane' : 'Unsubscribed');
+    loadCommunities();
+    return;
+  }
   const status = event.target.closest('[data-status]');
   if (status) {
     await api(`/api/leads/${status.dataset.id}/status`, {
@@ -571,7 +583,7 @@ async function loadCommunities() {
     return;
   }
   $('communities-table').innerHTML = `<table>
-    <thead><tr><th>Community</th><th>Score</th><th>Found</th><th>Why</th><th>Status</th><th></th></tr></thead>
+    <thead><tr><th>Community</th><th>Score</th><th>Found</th><th>Why</th><th>Watch</th><th>Status</th><th></th></tr></thead>
     <tbody>${data.communities.map(c => {
       const joined = c.access_status !== 'not_visited';
       const price = c.price_label || '';
@@ -586,6 +598,13 @@ async function loadCommunities() {
         <td>${Math.round(c.relevance_score)}</td>
         <td class="muted" title="${esc(c.discovered_at || '')}">${c.discovered_at ? esc(c.discovered_at.slice(0,10)) : '—'}</td>
         <td class="muted">${esc(why || '—')}</td>
+        <td>${(c.url && c.url.includes('.circle.so') && !c.url.includes('discover'))
+          ? `<button class="ghost watch-toggle" data-slug="${esc(c.slug)}"
+               data-watching="${c.watching ? '1' : '0'}" aria-pressed="${!!c.watching}"
+               title="Subscribe: poll this community first on the 5-min fast lane"
+               style="${c.watching ? 'color:var(--high);font-weight:600' : ''}">
+               ${c.watching ? '★ Watching' : '☆ Watch'}</button>`
+          : '<span class="muted">—</span>'}</td>
         <td>${joined ? `<span class="pill HIGH">${esc(c.access_status)}</span>` : '<span class="muted">not visited</span>'}</td>
         <td>
           <a class="ghost" href="${esc(c.url)}" target="_blank" rel="noopener"

@@ -48,6 +48,37 @@ class Database:
         self.engine = create_engine(url, future=True)
         self._sessionmaker = sessionmaker(bind=self.engine, future=True)
         Base.metadata.create_all(self.engine)
+        self._ensure_columns()
+
+    def _ensure_columns(self) -> None:
+        """Add columns introduced after a table was first created.
+
+        create_all() makes missing tables but never alters an existing one, so
+        a new field on an old DB (SQLite or Postgres) needs a tiny migration.
+        Each entry is idempotent: added only if the column isn't already there.
+        """
+        from sqlalchemy import inspect as _inspect, text as _text
+
+        # (table, column, DDL type + default) -- keep in sync with the models.
+        additions = [
+            ("communities", "watching", "BOOLEAN DEFAULT FALSE"),
+        ]
+        try:
+            insp = _inspect(self.engine)
+            existing_tables = set(insp.get_table_names())
+        except Exception:  # noqa: BLE001 - not a real/inspectable engine; skip
+            return
+        with self.engine.begin() as conn:
+            for table, column, ddl in additions:
+                if table not in existing_tables:
+                    continue
+                cols = {c["name"] for c in insp.get_columns(table)}
+                if column in cols:
+                    continue
+                try:
+                    conn.execute(_text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}"))
+                except Exception:  # noqa: BLE001 - a racing add or dialect quirk
+                    pass
 
     @contextmanager
     def session(self) -> Iterator[Session]:

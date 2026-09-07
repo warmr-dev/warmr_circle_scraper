@@ -56,22 +56,30 @@ class HarvestResult:
     errors: list[str] = field(default_factory=list)
 
 
-def _community_hosts(db: Database, *, limit: int) -> list[tuple[str, str, object]]:
-    """Return (host, slug, last_synced_at) for readable community subdomains.
+def _community_hosts(
+    db: Database, *, limit: int, watched_only: bool = False
+) -> list[tuple[str, str, object, bool]]:
+    """Return (host, slug, last_synced_at, watching) for readable subdomains.
 
-    Every known community is returned -- both freshly discovered ones and ones
-    read before. The last-synced time is the incremental watermark: a
-    previously-read community is only re-read for posts newer than that.
+    Watched ("subscribed") communities come first, then the rest by score, so
+    the fast lane services subscriptions before sweeping others. With
+    ``watched_only`` the sweep is dropped entirely -- only the watchlist.
+    The last-synced time is the incremental watermark: a previously-read
+    community is only re-read for posts newer than that.
     """
     with db.session() as s:
-        stmt = select(Community).order_by(Community.relevance_score.desc())
+        stmt = select(Community).order_by(
+            Community.watching.desc(), Community.relevance_score.desc()
+        )
         rows = list(s.scalars(stmt).all())
         out = []
         for c in rows:
             if not is_subdomain_community(c.url):
                 continue  # Discover listings can't be read; only subdomains
+            if watched_only and not c.watching:
+                continue
             host = c.url.replace("https://", "").replace("http://", "").strip("/")
-            out.append((host, c.slug, c.last_synced_at))
+            out.append((host, c.slug, c.last_synced_at, bool(c.watching)))
             if len(out) >= limit:
                 break
         return out
@@ -130,6 +138,7 @@ def harvest(
     all_spaces: bool = False,
     min_recheck_hours: float = 6.0,
     force_recheck: bool = False,
+    watched_only: bool = False,
 ) -> HarvestResult:
     """Discover public communities and read their public spaces for leads.
 
@@ -166,8 +175,8 @@ def harvest(
     recency_cutoff = (
         datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=recency_days)
     )
-    hosts = _community_hosts(db, limit=max_communities)
-    for host, slug, last_synced in hosts:
+    hosts = _community_hosts(db, limit=max_communities, watched_only=watched_only)
+    for host, slug, last_synced, watching in hosts:
         if only_new and last_synced is not None:
             continue  # caller asked to read only never-seen communities
         # Skip a community we re-checked very recently: re-reading it again this

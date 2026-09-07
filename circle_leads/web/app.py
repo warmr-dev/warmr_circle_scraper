@@ -185,6 +185,22 @@ def create_app(db_url: str | None = None, config_path: str | None = None) -> Fas
                          summary=f"Community {slug} marked {new_state}")
         return {"ok": True, "state": new_state}
 
+    @app.post("/api/communities/{slug}/watch")
+    def set_watch(slug: str, payload: dict, _: None = Depends(require_auth)) -> dict[str, Any]:
+        """Subscribe/unsubscribe a community. Watched ones are polled first on
+        the fast (5-min) harvest lane, so their new posts surface within minutes."""
+        watching = bool(payload.get("watching", True))
+        with db.session() as s:
+            c = s.scalar(select(Community).where(Community.slug == slug))
+            if c is None:
+                raise HTTPException(404, "Community not found")
+            c.watching = watching
+            log_activity(
+                s, kind="review", community=slug,
+                summary=f"Community {slug} {'subscribed (watching)' if watching else 'unsubscribed'}",
+            )
+        return {"ok": True, "watching": watching}
+
     # --- Triage -----------------------------------------------------------
 
     @app.post("/api/triage")
@@ -474,6 +490,7 @@ def create_app(db_url: str | None = None, config_path: str | None = None) -> Fas
                             c.discovered_at.isoformat() if c.discovered_at else None
                         ),
                         "relevant": c.relevant,
+                        "watching": bool(c.watching),
                         "access_status": c.access_status,
                         "permission_status": c.permission_status,
                         "last_synced_at": (

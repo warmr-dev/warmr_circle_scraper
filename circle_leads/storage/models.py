@@ -103,6 +103,10 @@ class Community(Base):
     ingestion_route: Mapped[str | None] = mapped_column(String(64))
     notes: Mapped[str | None] = mapped_column(Text)
 
+    # Watchlist: a "subscribed" community is polled first on the fast (5-min)
+    # harvest lane, so its new posts surface within minutes.
+    watching: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+
     last_synced_at: Mapped[datetime | None] = mapped_column(DateTime)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=utcnow, onupdate=utcnow
