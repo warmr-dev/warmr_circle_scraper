@@ -40,12 +40,19 @@ STATIC_DIR = Path(__file__).parent / "static"
 REVIEW_STATUSES = {"pending_review", "contacted", "replied", "rejected", "won"}
 
 
-def create_app(db_url: str | None = None, config_path: str | None = None) -> FastAPI:
+def create_app(
+    db_url: str | None = None,
+    config_path: str | None = None,
+    db: Database | None = None,
+) -> FastAPI:
     # Fail fast and loudly rather than serving other people's posts openly.
     get_password()
 
     app = FastAPI(title="Warmr Circle", docs_url=None, redoc_url=None)
-    db = Database(db_url or os.environ.get("CIRCLE_LEADS_DB") or None)
+    # Reuse a caller-supplied Database (the CLI already opened one) so a
+    # Render/Railway start does not open a second SQLAlchemy pool against
+    # the same Supabase session-mode cap.
+    db = db or Database(db_url or os.environ.get("CIRCLE_LEADS_DB") or None)
     requirements_holder = {"req": load_requirements(config_path)}
     config_file = config_path
     sessions = SessionManager()
@@ -892,11 +899,16 @@ def create_app(db_url: str | None = None, config_path: str | None = None) -> Fas
     return app
 
 
-def run(host: str = "127.0.0.1", port: int = 8000, db_url: str | None = None) -> None:
+def run(
+    host: str = "127.0.0.1",
+    port: int = 8000,
+    db_url: str | None = None,
+    db: Database | None = None,
+) -> None:
     import uvicorn
 
     try:
-        app = create_app(db_url=db_url)
+        app = create_app(db_url=db_url, db=db)
     except AuthNotConfigured as exc:
         raise SystemExit(f"\n{exc}\n")
 

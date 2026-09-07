@@ -1076,7 +1076,7 @@ def dashboard_cmd(ctx, host, port):
     """
     from circle_leads.web.app import run
 
-    run(host=host, port=port, db_url=ctx.obj["db"].url)
+    run(host=host, port=port, db=ctx.obj["db"])
 
 
 

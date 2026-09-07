@@ -174,6 +174,31 @@ def test_sanitize_db_url(raw, expected):
     assert _sanitize_db_url(raw) == expected
 
 
+def test_supabase_session_pooler_rewrites_to_transaction_port(monkeypatch):
+    """Session-mode :5432 on the Supabase pooler is rewritten to :6543."""
+    from circle_leads.storage import database as dbmod
+
+    captured = {}
+
+    def fake_engine(u, **k):
+        captured["url"] = u
+        captured["kwargs"] = k
+        return type("E", (), {"url": u})()
+
+    monkeypatch.setattr(dbmod.Base.metadata, "create_all", lambda *a, **k: None)
+    monkeypatch.setattr(dbmod.Database, "_ensure_columns", lambda self: None)
+    monkeypatch.setattr(dbmod, "create_engine", fake_engine)
+
+    d = dbmod.Database(
+        "postgresql://u:p@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres"
+    )
+    assert d.url.startswith("postgresql+psycopg://")
+    assert ":6543/" in d.url
+    assert captured["kwargs"]["pool_size"] == 2
+    assert captured["kwargs"]["max_overflow"] == 1
+    assert captured["kwargs"]["connect_args"]["prepare_threshold"] is None
+
+
 def test_empty_port_url_builds_engine(monkeypatch):
     """The empty-port URL must no longer crash Database(); it builds an engine."""
     from circle_leads.storage import database as dbmod
