@@ -21,6 +21,7 @@ from sqlalchemy import select
 from circle_leads.classifier.ai_classifier import LlmBackend, make_backend
 from circle_leads.classifier.lead_classifier import classify, meets_requirements
 from circle_leads.config.settings import Requirements
+from circle_leads.export.vini_ingest import push_leads_by_ids
 from circle_leads.scoring.lead_scoring import score_lead
 from circle_leads.storage.activity import log_activity
 from circle_leads.storage.database import (
@@ -182,6 +183,8 @@ def _triage_posts(
         else:
             logger.warning("Semantic classification requested but no LLM key is set.")
 
+    pending_external_ids: list[int] = []
+
     with db.session() as s:
         comm = get_or_create_community(
             s,
@@ -307,6 +310,11 @@ def _triage_posts(
             lead.location = extracted.get("location")
             lead.urgency = extracted.get("urgency")
             s.add(lead)
+            s.flush()
+            # New non-duplicate leads go to production; already-synced rows are
+            # skipped inside the push helper.
+            if duplicate_lead_id is None and lead.external_synced_at is None:
+                pending_external_ids.append(lead.id)
 
             payload: dict[str, Any] = {
                 "community": community,
@@ -330,7 +338,7 @@ def _triage_posts(
                 "decided_by": lead.decided_by,
                 "posted_label": raw.posted_label,
                 "published_at": published.isoformat() if published else None,
-                "url": source_url,
+                "url": (raw.meta or {}).get("url") or source_url,
                 "is_duplicate": duplicate_lead_id is not None,
             }
 
@@ -364,6 +372,28 @@ def _triage_posts(
         result.leads.append(payload)
 
     result.leads.sort(key=lambda x: x["lead_score"], reverse=True)
+
+    if pending_external_ids:
+        with db.session() as s:
+            push = push_leads_by_ids(s, pending_external_ids)
+            if push.sent or push.errors:
+                log_activity(
+                    s,
+                    kind="export",
+                    level="error" if push.errors else "success",
+                    community=community,
+                    summary=(
+                        f"Vini ingest: sent {push.sent}/{push.attempted} lead(s)"
+                        + (f" — {push.errors[0]}" if push.errors else "")
+                    ),
+                    detail={
+                        "sent": push.sent,
+                        "attempted": push.attempted,
+                        "skipped": push.skipped,
+                        "errors": "; ".join(push.errors[:3]),
+                    },
+                    leads_found=push.sent,
+                )
 
     with db.session() as s:
         log_activity(

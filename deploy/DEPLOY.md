@@ -101,7 +101,8 @@ Env:   CIRCLE_LEADS_DB, DASHBOARD_PASSWORD, DASHBOARD_SECRET_KEY,
 
 Never commit `.env`. In the cloud, set every key as a platform env var:
 `DASHBOARD_PASSWORD`, `DASHBOARD_SECRET_KEY`, `EXA_API_KEY`, `OPENAI_API_KEY`,
-`CIRCLE_LEADS_DB`. The `.gitignore` already excludes `.env`.
+`CIRCLE_LEADS_DB`, `SUPABASE_ANON_KEY`, `VINI_API_SECRET`.
+The `.gitignore` already excludes `.env`.
 
 ## Out Plane worker (with dashboard-controlled schedule)
 

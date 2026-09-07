@@ -26,10 +26,16 @@ from circle_leads.discovery.discover_communities import (
     load_from_file,
 )
 from circle_leads.export.exporters import query_leads, to_csv, to_json
+from circle_leads.export.vini_ingest import (
+    load_vini_ingest_config,
+    push_leads_by_ids,
+    push_unsynced_leads,
+)
 from circle_leads.pipeline import classify_pending, discover, ingest_community
 from circle_leads.storage.database import Database, purge_community, purge_expired
 from circle_leads.storage.models import Community, Lead, Post
 from circle_leads.triage.pipeline import triage_text
+from sqlalchemy import select
 
 DEFAULT_PERMISSIONS_DIR = "circle_leads/config/communities"
 
@@ -820,6 +826,47 @@ def export_cmd(ctx, fmt, output, min_score, priority, community, extended):
     path = Path(output) if output else Path("exports") / f"leads.{fmt}"
     written = to_csv(rows, path, extended=extended) if fmt == "csv" else to_json(rows, path)
     click.echo(f"Exported {len(rows)} lead(s) to {written}")
+
+
+@cli.command("push-leads")
+@click.option("--limit", type=int, default=100, show_default=True,
+              help="Max unsynced leads to send in one call.")
+@click.option("--force", is_flag=True,
+              help="Resend even if already marked synced (by id selection only).")
+@click.pass_context
+def push_leads_cmd(ctx, limit, force):
+    """POST unsynced LEADs to the production Vini ingest endpoint.
+
+    Requires SUPABASE_ANON_KEY and VINI_API_SECRET. New leads are pushed
+    automatically after classify/triage; use this to retry failures.
+    """
+    cfg = load_vini_ingest_config()
+    if not cfg.enabled:
+        raise click.ClickException(
+            "Set SUPABASE_ANON_KEY and VINI_API_SECRET to push leads."
+        )
+
+    with ctx.obj["db"].session() as s:
+        if force:
+            ids = list(
+                s.scalars(
+                    select(Lead.id)
+                    .where(Lead.classification == "LEAD")
+                    .where(Lead.duplicate_of_id.is_(None))
+                    .order_by(Lead.id.asc())
+                    .limit(limit)
+                ).all()
+            )
+            result = push_leads_by_ids(s, ids, config=cfg, force=True)
+        else:
+            result = push_unsynced_leads(s, limit=limit, config=cfg)
+
+    if result.errors:
+        raise click.ClickException("; ".join(result.errors))
+    click.echo(
+        f"Vini ingest: sent {result.sent}, skipped {result.skipped}, "
+        f"attempted {result.attempted}."
+    )
 
 
 # --- Manual triage ----------------------------------------------------------

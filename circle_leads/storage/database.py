@@ -62,6 +62,7 @@ class Database:
         # (table, column, DDL type + default) -- keep in sync with the models.
         additions = [
             ("communities", "watching", "BOOLEAN DEFAULT FALSE"),
+            ("leads", "external_synced_at", "TIMESTAMP"),
         ]
         try:
             insp = _inspect(self.engine)

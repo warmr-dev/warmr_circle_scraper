@@ -29,6 +29,7 @@ from circle_leads.classifier.lead_classifier import classify, meets_requirements
 from circle_leads.config.settings import CommunityPermission, Requirements
 from circle_leads.discovery.discover_communities import DiscoveredCommunity
 from circle_leads.discovery.validate_community import assess_relevance, check_public_access
+from circle_leads.export.vini_ingest import push_leads_by_ids
 from circle_leads.scoring.lead_scoring import score_lead
 from circle_leads.scraper import chat_scraper, comments_scraper, community_scraper, posts_scraper
 from circle_leads.scraper.pagination import AccessDeniedError, ApiError, CircleClient, QuotaTracker
@@ -373,6 +374,7 @@ def classify_pending(
             logger.warning("Semantic classification requested but no LLM key is set.")
 
     stats = {"classified": 0, "leads": 0, "not_leads": 0, "duplicates": 0, "filtered": 0}
+    pending_external_ids: list[int] = []
 
     with db.session() as s:
         # Select ids only: the ORM objects would be detached once this session
@@ -447,6 +449,21 @@ def classify_pending(
             lead.location = extracted.get("location")
             lead.urgency = extracted.get("urgency")
             s.add(lead)
+            s.flush()
+            if duplicate_lead_id is None and lead.external_synced_at is None:
+                pending_external_ids.append(lead.id)
             stats["leads"] += 1
+
+    if pending_external_ids:
+        with db.session() as s:
+            push = push_leads_by_ids(s, pending_external_ids)
+            if push.errors:
+                logger.error(
+                    "Vini ingest failed for %d lead(s): %s",
+                    push.attempted,
+                    "; ".join(push.errors[:3]),
+                )
+            elif push.sent:
+                logger.info("Vini ingest sent %d lead(s)", push.sent)
 
     return stats
