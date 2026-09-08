@@ -181,8 +181,9 @@ def test_store_session_cookie_strips_name_prefix_and_encrypts(monkeypatch):
     c = _dash(monkeypatch)
     c.post("/api/connections/add", json={"host": "x.circle.so"})
     r = c.post("/api/connections/x.circle.so/session",
-               json={"session_cookie": "_circle_session=SECRETVALUE"})
-    assert r.status_code == 200 and r.json()["cookies"] == 1
+               json={"session_cookie": "_circle_session=SECRETVALUE",
+                     "user_session_identifier": "USI_VALUE"})
+    assert r.status_code == 200 and r.json()["cookies"] == 2
     # It's listed as a stored session (metadata only; the blob is encrypted).
     sessions = c.get("/api/replay/sessions").json()["sessions"]
     assert any(s["host"] == "x.circle.so" for s in sessions)
@@ -197,7 +198,7 @@ def test_store_session_refuses_without_encryption_key(monkeypatch):
     c.post("/login", data={"password": "testpassword"})
     c.post("/api/connections/add", json={"host": "x.circle.so"})
     r = c.post("/api/connections/x.circle.so/session",
-               json={"session_cookie": "v"})
+               json={"session_cookie": "v", "user_session_identifier": "u"})
     assert r.status_code == 400
     assert "CIRCLE_CRED_KEY" in r.json()["detail"]
 
@@ -215,3 +216,30 @@ def test_scan_endpoints_require_auth(monkeypatch):
     anon = _TC(create_app(db_url="sqlite:///" + _tempfile.mktemp(suffix=".db")))
     assert anon.post("/api/connections/x.circle.so/session", json={}).status_code == 401
     assert anon.post("/api/connections/x.circle.so/scan").status_code == 401
+
+
+def test_store_session_requires_both_cookies(monkeypatch):
+    """Circle needs _circle_session AND user_session_identifier together."""
+    c = _dash(monkeypatch)
+    c.post("/api/connections/add", json={"host": "x.circle.so"})
+    # only _circle_session -> rejected, names the missing one
+    r = c.post("/api/connections/x.circle.so/session",
+               json={"session_cookie": "s"})
+    assert r.status_code == 400
+    assert "user_session_identifier" in r.json()["detail"]
+
+
+def test_store_session_accepts_full_cookie_json_export(monkeypatch):
+    """The easy path: paste the whole cookie export; both are extracted."""
+    c = _dash(monkeypatch)
+    c.post("/api/connections/add", json={"host": "x.circle.so"})
+    export = [
+        {"domain": "x.circle.so", "name": "_circle_session", "value": "S"},
+        {"domain": "x.circle.so", "name": "user_session_identifier", "value": "U"},
+        {"domain": "x.circle.so", "name": "cf_clearance", "value": "CF"},  # ignored
+        {"domain": ".x.circle.so", "name": "_ga", "value": "A"},           # ignored
+    ]
+    import json
+    r = c.post("/api/connections/x.circle.so/session", json={"cookies": json.dumps(export)})
+    assert r.status_code == 200
+    assert r.json()["cookies"] == 2   # only the two session cookies stored

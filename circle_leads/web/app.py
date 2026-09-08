@@ -530,26 +530,52 @@ def create_app(
         returned to the frontend. One cookie per community (Circle scopes the
         session per subdomain).
         """
+        import json as _json
         from circle_leads.web.replay_store import ReplayKeyMissing, store_session
+        from circle_leads.scraper.member_api_reader import SESSION_COOKIE_NAMES
+
         host = _clean_host(host)
-        session = str((payload or {}).get("session_cookie") or "").strip()
-        if not session:
-            raise HTTPException(400, "Paste the _circle_session cookie value.")
-        # Accept either the bare value or a "name=value" paste.
-        if session.startswith("_circle_session="):
-            session = session.split("=", 1)[1]
-        cookies = [{"domain": host, "name": "_circle_session", "value": session,
-                    "path": "/", "secure": True, "session": True}]
-        remember = str((payload or {}).get("remember_token") or "").strip()
-        if remember:
-            cookies.append({"domain": host, "name": "remember_user_token",
-                            "value": remember, "path": "/", "secure": True})
+        # Reading a Circle community needs BOTH _circle_session AND
+        # user_session_identifier (verified live). Accept the easiest input: a
+        # full cookie-export JSON array, or individual values.
+        raw = (payload or {}).get("cookies")
+        got: dict[str, str] = {}
+        if raw:
+            data = raw
+            if isinstance(raw, str):
+                try:
+                    data = _json.loads(raw)
+                except (ValueError, TypeError):
+                    raise HTTPException(400, "cookies must be a JSON array export.")
+            if isinstance(data, list):
+                for c in data:
+                    if isinstance(c, dict) and c.get("name") in SESSION_COOKIE_NAMES:
+                        got[c["name"]] = str(c.get("value") or "")
+        # Fall back to explicit fields.
+        for field_name, cookie_name in (
+            ("session_cookie", "_circle_session"),
+            ("user_session_identifier", "user_session_identifier"),
+            ("remember_token", "remember_user_token"),
+        ):
+            val = str((payload or {}).get(field_name) or "").strip()
+            if val:
+                got[cookie_name] = val.split("=", 1)[1] if "=" in val and val.startswith(cookie_name) else val
+
+        if "_circle_session" not in got:
+            raise HTTPException(400, "Missing _circle_session. Paste the cookie export JSON.")
+        if "user_session_identifier" not in got:
+            raise HTTPException(
+                400, "Missing user_session_identifier -- Circle needs BOTH it and "
+                "_circle_session. Paste the full cookie export so both are captured.")
+
+        cookies = [{"domain": host, "name": n, "value": v, "path": "/",
+                    "secure": True, "session": True} for n, v in got.items()]
         try:
             store_session(db, host, cookies)
         except ReplayKeyMissing as exc:
             raise HTTPException(400, str(exc)) from exc
         log_activity_holder(kind="review", community=host.split(".")[0],
-                            summary=f"Session cookie stored for {host} (encrypted)")
+                            summary=f"Session cookies stored for {host} (encrypted)")
         return {"ok": True, "host": host, "cookies": len(cookies)}
 
     @app.post("/api/connections/{host}/scan")
