@@ -477,13 +477,20 @@ def create_app(
     @app.get("/api/connections")
     def list_connections(_: None = Depends(require_auth)) -> dict[str, Any]:
         """List connected private communities in scan order: VIP first."""
-        from circle_leads.storage.models import CircleConnection, SCAN_ORDER
+        from circle_leads.storage.models import CircleConnection, ReplaySession, SCAN_ORDER
         with db.session() as s:
             rows = s.scalars(select(CircleConnection)).all()
-            # Sort in Python so the ordering matches SCAN_ORDER exactly rather
-            # than the alphabetical accident of the stored string.
+            # Which communities have a stored session cookie?
+            hosts_with_session = {
+                r.host for r in s.scalars(select(ReplaySession)).all()
+            }
             rows = sorted(rows, key=lambda c: (SCAN_ORDER.get(c.priority, 1), c.host))
-            return {"connections": [_connection_dict(c) for c in rows]}
+            out = []
+            for c in rows:
+                d = _connection_dict(c)
+                d["has_session"] = c.host in hosts_with_session
+                out.append(d)
+            return {"connections": out}
 
     @app.post("/api/connections/add")
     def add_connection(payload: dict, _: None = Depends(require_auth)) -> dict[str, Any]:
@@ -697,7 +704,22 @@ def create_app(
             conn = s.scalar(select(CircleConnection).where(CircleConnection.host == host))
             if conn is not None:
                 s.delete(conn)
+        # Also drop any stored session cookie for this host -- removing a
+        # community should not leave its credential behind.
+        from circle_leads.web.replay_store import delete_session
+        delete_session(db, host)
         return {"ok": True}
+
+    @app.post("/api/connections/{host}/session/clear")
+    def clear_connection_session(host: str, _: None = Depends(require_auth)) -> dict[str, Any]:
+        """Delete just the stored session cookie for a community (e.g. a dead
+        one), keeping the community itself."""
+        from circle_leads.web.replay_store import delete_session
+        host = _clean_host(host)
+        delete_session(db, host)
+        log_activity_holder(kind="review", community=host.split(".")[0],
+                            summary=f"Session cookie cleared for {host}")
+        return {"ok": True, "host": host}
 
     # --- Triage -----------------------------------------------------------
 

@@ -243,3 +243,45 @@ def test_store_session_accepts_full_cookie_json_export(monkeypatch):
     r = c.post("/api/connections/x.circle.so/session", json={"cookies": json.dumps(export)})
     assert r.status_code == 200
     assert r.json()["cookies"] == 2   # only the two session cookies stored
+
+
+def test_connection_reports_has_session_flag(monkeypatch):
+    c = _dash(monkeypatch)
+    c.post("/api/connections/add", json={"host": "a.circle.so"})
+    assert c.get("/api/connections").json()["connections"][0]["has_session"] is False
+    import json
+    export = [{"domain": "a.circle.so", "name": "_circle_session", "value": "S"},
+              {"domain": "a.circle.so", "name": "user_session_identifier", "value": "U"}]
+    c.post("/api/connections/a.circle.so/session", json={"cookies": json.dumps(export)})
+    assert c.get("/api/connections").json()["connections"][0]["has_session"] is True
+
+
+def test_clear_session_keeps_the_community(monkeypatch):
+    c = _dash(monkeypatch)
+    c.post("/api/connections/add", json={"host": "a.circle.so"})
+    import json
+    export = [{"domain": "a.circle.so", "name": "_circle_session", "value": "S"},
+              {"domain": "a.circle.so", "name": "user_session_identifier", "value": "U"}]
+    c.post("/api/connections/a.circle.so/session", json={"cookies": json.dumps(export)})
+    c.post("/api/connections/a.circle.so/session/clear")
+    conns = c.get("/api/connections").json()["connections"]
+    assert len(conns) == 1 and conns[0]["has_session"] is False   # community stays
+
+
+def test_removing_a_community_drops_its_stored_session(monkeypatch):
+    c = _dash(monkeypatch)
+    c.post("/api/connections/add", json={"host": "a.circle.so"})
+    import json
+    export = [{"domain": "a.circle.so", "name": "_circle_session", "value": "S"},
+              {"domain": "a.circle.so", "name": "user_session_identifier", "value": "U"}]
+    c.post("/api/connections/a.circle.so/session", json={"cookies": json.dumps(export)})
+    c.post("/api/connections/a.circle.so/remove")
+    assert c.get("/api/replay/sessions").json()["sessions"] == []   # no orphan credential
+
+
+def test_clear_session_requires_auth(monkeypatch):
+    monkeypatch.setenv("DASHBOARD_PASSWORD", "testpassword")
+    monkeypatch.setenv("DASHBOARD_SECRET_KEY", "k")
+    from circle_leads.web.app import create_app
+    anon = _TC(create_app(db_url="sqlite:///" + _tempfile.mktemp(suffix=".db")))
+    assert anon.post("/api/connections/a.circle.so/session/clear").status_code == 401

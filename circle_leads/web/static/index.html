@@ -185,7 +185,10 @@
     <button data-view="leads" aria-selected="false"><span class="ic">🎯</span> Leads</button>
     <button data-view="communities" aria-selected="false"><span class="ic">🌐</span> Communities</button>
     <button data-view="connector" aria-selected="false"><span class="ic">🔌</span> Circle Connector</button>
-    <button data-view="remote" aria-selected="false"><span class="ic">🖥️</span> Remote Browser</button>
+    <!-- Remote Browser + Session Replay: proven non-working (Cloudflare-blocked).
+         Hidden from the dashboard; the cookie-based HTTP path on the Circle
+         Connector tab is the working route. Code kept for the PoC record. -->
+    <button data-view="remote" aria-selected="false" hidden><span class="ic">🖥️</span> Remote Browser</button>
     <button data-view="activity" aria-selected="false"><span class="ic">📡</span> Activity</button>
     <div class="sep"></div>
     <button data-view="config" aria-selected="false"><span class="ic">⚙️</span> Config</button>
@@ -474,13 +477,18 @@
     </div>
 
     <div class="panel" style="background:var(--soft2)">
-      <h2 style="margin:0 0 6px">How it works</h2>
+      <h2 style="margin:0 0 6px">How it works — cloud scan with your session cookie</h2>
       <ol class="muted" style="font-size:13px;margin:0;padding-left:18px;line-height:1.7">
-        <li>Pair a local connector (one-time code above → <code>circle-connector pair</code>).</li>
-        <li>Add each private community host here.</li>
-        <li>Run <code>circle-connector login &lt;host&gt;</code> — a browser opens, you sign in.</li>
-        <li>Run <code>circle-connector run &lt;host&gt;</code> — it reads what your account can see and uploads only the text. No cookies, no password, no session ever reach this server.</li>
+        <li><b>Add each community</b> host above (one row per community).</li>
+        <li><b>Log into that community</b> in your browser, and export its cookies (a cookie-export extension, or DevTools → Application → Cookies).</li>
+        <li><b>Paste the cookie JSON</b> into that community's “Add session cookie” box. You need both <code>_circle_session</code> and <code>user_session_identifier</code> — pasting the whole export captures them. Stored <b>encrypted</b>; never shown again.</li>
+        <li>Press <b>Scan now</b> — the server reads your community over HTTPS and pulls leads. No browser needed after this; runs from the cloud.</li>
+        <li>Each community needs <b>its own cookie</b> (Circle scopes sessions per community). Cookies expire — re-paste when a scan reports the session expired, and use <b>Clear cookie</b> to drop a dead one.</li>
       </ol>
+      <div class="muted" style="font-size:12px;margin-top:8px">
+        Requires <code>CIRCLE_CRED_KEY</code> set on the server (the cookie-encryption key).
+        The older local connector (<code>circle-connector</code>) still works too, but this needs no local process.
+      </div>
     </div>
   </section>
 
@@ -1002,11 +1010,30 @@ async function loadConnector() {
       </div>
       <div class="meta">${c.member_label ? 'as ' + esc(c.member_label) + ' · ' : ''}${c.spaces_readable}/${c.spaces_total} space(s) readable${c.last_sync_at ? ' · synced ' + esc(c.last_sync_at.replace('T',' ').slice(0,16)) : ''}</div>
       ${c.notes ? `<div class="meta" style="margin-top:4px;font-style:italic">${esc(c.notes)}</div>` : ''}
+      <div style="margin-top:8px">
+        ${c.has_session
+          ? `<span class="pill" style="color:var(--high);background:color-mix(in srgb, var(--high) 14%, transparent)">🔑 session stored</span>`
+          : `<span class="meta">No session cookie yet — paste one below to scan from the cloud.</span>`}
+      </div>
+      <details class="conn-cookie" style="margin-top:8px">
+        <summary style="cursor:pointer;font-size:13px;color:var(--accent-ink)">${c.has_session ? 'Update' : 'Add'} session cookie</summary>
+        <div class="muted" style="font-size:12px;margin:6px 0">
+          Log into <b>${esc(c.host)}</b> in your browser, export its cookies (or the two below),
+          and paste the JSON here. Needs <code>_circle_session</code> + <code>user_session_identifier</code>.
+          Stored encrypted; never leaves the server.
+        </div>
+        <textarea class="conn-cookie-json" data-host="${esc(c.host)}" placeholder='Paste cookie export JSON for ${esc(c.host)}' style="min-height:80px;font-size:12px"></textarea>
+        <div class="row" style="margin-top:6px">
+          <button class="ghost conn-save-cookie" data-host="${esc(c.host)}">Save cookie</button>
+        </div>
+      </details>
       <div class="row" style="margin-top:8px">
+        ${c.has_session ? `<button class="action conn-scan" data-host="${esc(c.host)}">Scan now (HTTP)</button>` : ''}
         <select class="conn-prio" data-host="${esc(c.host)}" title="Scan priority">
           ${PRIORITIES.map(([v, lbl]) =>
             `<option value="${v}"${c.priority === v ? ' selected' : ''}>${lbl}</option>`).join('')}
         </select>
+        ${c.has_session ? `<button class="ghost conn-clear-session" data-host="${esc(c.host)}" title="Delete a dead/expired cookie">Clear cookie</button>` : ''}
         <button class="ghost conn-remove" data-host="${esc(c.host)}">Remove</button>
       </div>
     </div>`;
@@ -1075,9 +1102,55 @@ $('conn-add').addEventListener('click', async () => {
 
 document.addEventListener('click', async (event) => {
   const rm = event.target.closest('.conn-remove');
-  if (!rm) return;
-  await api(`/api/connections/${encodeURIComponent(rm.dataset.host)}/remove`, { method: 'POST' });
-  toast('Removed'); loadConnector();
+  if (rm) {
+    await api(`/api/connections/${encodeURIComponent(rm.dataset.host)}/remove`, { method: 'POST' });
+    toast('Removed'); loadConnector();
+    return;
+  }
+
+  // Save a session cookie for one community (paste the cookie-export JSON).
+  const save = event.target.closest('.conn-save-cookie');
+  if (save) {
+    const host = save.dataset.host;
+    const box = document.querySelector(`.conn-cookie-json[data-host="${CSS.escape(host)}"]`);
+    const text = (box && box.value || '').trim();
+    if (!text) return toast('Paste the cookie JSON first');
+    save.disabled = true;
+    try {
+      await api(`/api/connections/${encodeURIComponent(host)}/session`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cookies: text }),
+      });
+      if (box) box.value = '';   // don't leave the credential sitting in the field
+      toast(`Session saved for ${host}`);
+      loadConnector();
+    } catch (e) { toast(String(e.message || e).slice(0, 200)); }
+    finally { save.disabled = false; }
+    return;
+  }
+
+  // Clear a dead/expired session cookie without removing the community.
+  const clear = event.target.closest('.conn-clear-session');
+  if (clear) {
+    const host = clear.dataset.host;
+    await api(`/api/connections/${encodeURIComponent(host)}/session/clear`, { method: 'POST' });
+    toast(`Cleared cookie for ${host}`);
+    loadConnector();
+    return;
+  }
+
+  // Scan one community over HTTP with its stored cookie.
+  const scan = event.target.closest('.conn-scan');
+  if (scan) {
+    const host = scan.dataset.host;
+    scan.disabled = true;
+    try {
+      const r = await api(`/api/connections/${encodeURIComponent(host)}/scan`, { method: 'POST' });
+      if (r) toast(`Scanning ${host}…`);
+    } catch (e) { toast(String(e.message || e).slice(0, 200)); }
+    finally { scan.disabled = false; }
+    return;
+  }
 });
 
 // --- Triggered jobs (search / read) ----------------------------------
