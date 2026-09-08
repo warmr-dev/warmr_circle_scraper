@@ -152,3 +152,66 @@ def test_only_session_cookies_are_sent_not_cf_or_analytics():
     assert "_circle_session" in names
     assert "cf_clearance" not in names   # API doesn't need it; don't ship it
     assert "_ga" not in names
+
+
+# --- dashboard endpoints: store cookie (encrypted) + HTTP scan --------------
+
+import tempfile as _tempfile
+from fastapi.testclient import TestClient as _TC
+
+
+def _dash(monkeypatch):
+    monkeypatch.setenv("DASHBOARD_PASSWORD", "testpassword")
+    monkeypatch.setenv("DASHBOARD_SECRET_KEY", "k")
+    monkeypatch.setenv("CIRCLE_CRED_KEY", "test-key")
+    from circle_leads.web.app import create_app
+    c = _TC(create_app(db_url="sqlite:///" + _tempfile.mktemp(suffix=".db")))
+    c.post("/login", data={"password": "testpassword"})
+    return c
+
+
+def test_store_session_cookie_requires_a_value(monkeypatch):
+    c = _dash(monkeypatch)
+    c.post("/api/connections/add", json={"host": "x.circle.so"})
+    assert c.post("/api/connections/x.circle.so/session",
+                  json={"session_cookie": ""}).status_code == 400
+
+
+def test_store_session_cookie_strips_name_prefix_and_encrypts(monkeypatch):
+    c = _dash(monkeypatch)
+    c.post("/api/connections/add", json={"host": "x.circle.so"})
+    r = c.post("/api/connections/x.circle.so/session",
+               json={"session_cookie": "_circle_session=SECRETVALUE"})
+    assert r.status_code == 200 and r.json()["cookies"] == 1
+    # It's listed as a stored session (metadata only; the blob is encrypted).
+    sessions = c.get("/api/replay/sessions").json()["sessions"]
+    assert any(s["host"] == "x.circle.so" for s in sessions)
+
+
+def test_store_session_refuses_without_encryption_key(monkeypatch):
+    monkeypatch.setenv("DASHBOARD_PASSWORD", "testpassword")
+    monkeypatch.setenv("DASHBOARD_SECRET_KEY", "k")
+    monkeypatch.delenv("CIRCLE_CRED_KEY", raising=False)
+    from circle_leads.web.app import create_app
+    c = _TC(create_app(db_url="sqlite:///" + _tempfile.mktemp(suffix=".db")))
+    c.post("/login", data={"password": "testpassword"})
+    c.post("/api/connections/add", json={"host": "x.circle.so"})
+    r = c.post("/api/connections/x.circle.so/session",
+               json={"session_cookie": "v"})
+    assert r.status_code == 400
+    assert "CIRCLE_CRED_KEY" in r.json()["detail"]
+
+
+def test_scan_without_a_stored_session_is_404(monkeypatch):
+    c = _dash(monkeypatch)
+    c.post("/api/connections/add", json={"host": "x.circle.so"})
+    assert c.post("/api/connections/x.circle.so/scan").status_code == 404
+
+
+def test_scan_endpoints_require_auth(monkeypatch):
+    monkeypatch.setenv("DASHBOARD_PASSWORD", "testpassword")
+    monkeypatch.setenv("DASHBOARD_SECRET_KEY", "k")
+    from circle_leads.web.app import create_app
+    anon = _TC(create_app(db_url="sqlite:///" + _tempfile.mktemp(suffix=".db")))
+    assert anon.post("/api/connections/x.circle.so/session", json={}).status_code == 401
+    assert anon.post("/api/connections/x.circle.so/scan").status_code == 401

@@ -517,6 +517,116 @@ def create_app(
             )
         return {"ok": True, "host": host, "priority": priority, "created": created}
 
+    @app.post("/api/connections/{host}/session")
+    def set_connection_session(
+        host: str, payload: dict, _: None = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Store a member session cookie for a community, encrypted at rest.
+
+        Circle's /internal_api is not behind Cloudflare, so a valid
+        _circle_session cookie lets the backend read this community over plain
+        HTTP -- no browser, runs anywhere. The cookie is a live credential:
+        stored AES-GCM encrypted (needs CIRCLE_CRED_KEY), never logged, never
+        returned to the frontend. One cookie per community (Circle scopes the
+        session per subdomain).
+        """
+        from circle_leads.web.replay_store import ReplayKeyMissing, store_session
+        host = _clean_host(host)
+        session = str((payload or {}).get("session_cookie") or "").strip()
+        if not session:
+            raise HTTPException(400, "Paste the _circle_session cookie value.")
+        # Accept either the bare value or a "name=value" paste.
+        if session.startswith("_circle_session="):
+            session = session.split("=", 1)[1]
+        cookies = [{"domain": host, "name": "_circle_session", "value": session,
+                    "path": "/", "secure": True, "session": True}]
+        remember = str((payload or {}).get("remember_token") or "").strip()
+        if remember:
+            cookies.append({"domain": host, "name": "remember_user_token",
+                            "value": remember, "path": "/", "secure": True})
+        try:
+            store_session(db, host, cookies)
+        except ReplayKeyMissing as exc:
+            raise HTTPException(400, str(exc)) from exc
+        log_activity_holder(kind="review", community=host.split(".")[0],
+                            summary=f"Session cookie stored for {host} (encrypted)")
+        return {"ok": True, "host": host, "cookies": len(cookies)}
+
+    @app.post("/api/connections/{host}/scan")
+    def scan_connection_http(
+        host: str, _: None = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Read a community over HTTP with its stored session cookie, right now.
+
+        This is the cloud-native path: no local connector, no browser. It uses
+        the encrypted session cookie to call /internal_api and ingest posts.
+        """
+        from circle_leads.web.replay_store import ReplayKeyMissing, load_cookies
+        from circle_leads.scraper.member_api_reader import (
+            MemberApiReader, SessionInvalid, ChallengeHit, fetch_space_posts,
+        )
+        from circle_leads.storage.models import CircleConnection, ConnectionState
+        host = _clean_host(host)
+        try:
+            cookie_list = load_cookies(db, host)
+        except ReplayKeyMissing as exc:
+            raise HTTPException(400, str(exc)) from exc
+        if not cookie_list:
+            raise HTTPException(404, f"No stored session for {host}. Add one first.")
+        cookies = {c["name"]: c["value"] for c in cookie_list}
+
+        from circle_leads.triage.pipeline import triage_records
+
+        def _run(job):
+            reader = MemberApiReader(host, cookies=cookies)
+            state = ConnectionState.CONNECTED
+            detail = ""
+            total = 0
+            readable = 0
+            try:
+                if not reader.check_session():
+                    state = ConnectionState.SESSION_EXPIRED
+                    detail = "Session cookie expired -- refresh it."
+                else:
+                    spaces = reader.list_spaces()
+                    for sp in spaces:
+                        recs = fetch_space_posts(reader, sp["id"], max_pages=5)
+                        if not recs:
+                            continue
+                        readable += 1
+                        total += len(recs)
+                        triage_records(
+                            db, recs, requirements(), community=host.split(".")[0],
+                            source_url=f"https://{host}",
+                            use_llm=bool(os.environ.get("OPENAI_API_KEY")),
+                        )
+                    job.result = {"spaces": len(spaces), "readable": readable,
+                                  "posts": total}
+                    job.detail = f"{total} post(s) from {readable}/{len(spaces)} space(s)"
+            except SessionInvalid:
+                state = ConnectionState.SESSION_EXPIRED
+                detail = "Session rejected -- refresh the cookie."
+            except ChallengeHit as exc:
+                state = ConnectionState.ERROR
+                detail = str(exc)
+            with db.session() as s:
+                conn = s.scalar(select(CircleConnection).where(CircleConnection.host == host))
+                if conn is None:
+                    conn = CircleConnection(host=host)
+                    s.add(conn)
+                conn.state = state.value
+                conn.state_detail = detail or None
+                conn.spaces_readable = readable
+            log_activity_holder(
+                kind="ingest", level="success" if total else "info",
+                community=host.split(".")[0],
+                summary=f"HTTP scan of {host}: {total} post(s) from {readable} space(s)",
+                items_seen=total,
+            )
+
+        job = jobs.start("read", f"HTTP scan {host}", _run)
+        return {"ok": True, "job_id": job.id, "host": host}
+
     @app.post("/api/connections/{host}/priority")
     def set_connection_priority(
         host: str, payload: dict, _: None = Depends(require_auth)
