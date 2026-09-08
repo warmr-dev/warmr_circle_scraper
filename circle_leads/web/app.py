@@ -619,10 +619,16 @@ def create_app(
         return {"ok": True, "host": host, "cookies": len(cookies),
                 "missing": missing}
 
-    def _scan_cookie_host(host: str) -> dict[str, Any]:
+    def _scan_cookie_host(host: str, *, max_pages: int = 5,
+                          time_budget: float | None = None) -> dict[str, Any]:
         """Read one community over HTTP with its stored session cookie and
         ingest posts. Returns a summary; updates the connection state. No
-        browser. Shared by the single-scan endpoint and the VIP-first batch."""
+        browser. Shared by the single-scan endpoint and the VIP-first batch.
+
+        ``time_budget`` (seconds) stops the scan early so it fits a serverless
+        function timeout; ``partial`` in the result flags an unfinished run.
+        """
+        import time as _time
         from circle_leads.web.replay_store import load_cookies
         from circle_leads.scraper.member_api_reader import (
             MemberApiReader, SessionInvalid, ChallengeHit, fetch_space_posts,
@@ -630,6 +636,7 @@ def create_app(
         from circle_leads.storage.models import CircleConnection, ConnectionState
         from circle_leads.triage.pipeline import triage_records
 
+        started = _time.time()
         cookie_list = load_cookies(db, host) or []
         cookies = {c["name"]: c["value"] for c in cookie_list}
         state = ConnectionState.CONNECTED
@@ -638,6 +645,7 @@ def create_app(
         readable = 0
         spaces_total = 0
         leads = 0
+        partial = False
         try:
             reader = MemberApiReader(host, cookies=cookies)
             if not reader.check_session():
@@ -647,8 +655,11 @@ def create_app(
                 spaces = reader.list_spaces()
                 spaces_total = len(spaces)
                 for sp in spaces:
+                    if time_budget and (_time.time() - started) > time_budget:
+                        partial = True    # ran out of time; stop cleanly
+                        break
                     try:
-                        recs = fetch_space_posts(reader, sp["id"], max_pages=5)
+                        recs = fetch_space_posts(reader, sp["id"], max_pages=max_pages)
                     except SessionInvalid:
                         # A single space may deny access; don't fail the whole scan.
                         continue
@@ -662,10 +673,11 @@ def create_app(
                         use_llm=bool(os.environ.get("OPENAI_API_KEY")),
                     )
                     leads += len(res.leads)
+                suffix = " (partial — press scan again to continue)" if partial else ""
                 if total:
-                    detail = f"{total} post(s), {leads} lead(s) from {readable}/{spaces_total} space(s)"
+                    detail = f"{total} post(s), {leads} lead(s) from {readable}/{spaces_total} space(s){suffix}"
                 else:
-                    detail = f"No readable posts ({spaces_total} space(s) visible)."
+                    detail = f"No readable posts ({spaces_total} space(s) visible){suffix}."
         except SessionInvalid:
             state = ConnectionState.SESSION_EXPIRED
             detail = "Session rejected -- refresh the cookie."
@@ -695,7 +707,8 @@ def create_app(
             items_seen=total, leads_found=leads,
         )
         return {"host": host, "state": state.value, "posts": total,
-                "spaces_readable": readable, "leads": leads, "detail": detail}
+                "spaces_readable": readable, "leads": leads, "detail": detail,
+                "partial": partial}
 
     def _cookie_hosts_vip_first() -> list[str]:
         """Communities that have a stored session cookie, VIP first, paused
@@ -728,7 +741,10 @@ def create_app(
         # function freezes after the response, so the scan would never finish.
         # Run it inline within the request there; use a background job elsewhere.
         if _is_serverless():
-            result = _scan_cookie_host(host)
+            # Fit under the function timeout: fewer pages, stop before ~45s.
+            # A partial run is fine -- pressing scan again continues, and dedup
+            # means already-ingested posts are skipped.
+            result = _scan_cookie_host(host, max_pages=2, time_budget=45.0)
             return {"ok": True, "host": host, "result": result, "sync": True}
         job = jobs.start("read", f"HTTP scan {host}",
                          lambda job: job.__setattr__("result", _scan_cookie_host(host)))
@@ -743,13 +759,20 @@ def create_app(
 
         if _is_serverless():
             # Background threads die on Vercel, and scanning many communities
-            # would exceed the function timeout. Scan a few (VIP first) inline;
-            # the response says how many remain so the UI can call again.
-            budget = 3
-            done = [_scan_cookie_host(h) for h in hosts[:budget]]
+            # would exceed the function timeout. Scan within a time budget,
+            # VIP first; the response says how many remain so the UI calls again.
+            import time as _t
+            started = _t.time()
+            done = []
+            remaining = list(hosts)
+            for h in hosts:
+                if _t.time() - started > 40.0:
+                    break
+                done.append(_scan_cookie_host(h, max_pages=2, time_budget=20.0))
+                remaining.remove(h)
             return {"ok": True, "sync": True, "scanned": len(done),
                     "leads": sum(r["leads"] for r in done),
-                    "results": done, "remaining": hosts[budget:]}
+                    "results": done, "remaining": remaining}
 
         def _run(job):
             results = []
