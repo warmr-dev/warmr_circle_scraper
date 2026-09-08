@@ -80,7 +80,10 @@ def _engine_kwargs(url: str) -> dict:
         # which is exactly the Supabase session-pooler cap (EMAXCONNSESSION).
         "pool_size": 2,
         "max_overflow": 1,
-        "pool_timeout": 30,
+        # Fail fast rather than hang: a request should not wait 30s for a pooled
+        # connection (that makes a misconfigured DB look like a frozen page on
+        # Vercel). 5s is plenty when the DB is healthy.
+        "pool_timeout": 5,
     }
     try:
         parsed = make_url(url)
@@ -88,9 +91,14 @@ def _engine_kwargs(url: str) -> dict:
         parsed = None
     host = (parsed.host or "") if parsed is not None else ""
     port = parsed.port if parsed is not None else None
+    # A short TCP connect timeout so an unreachable DB errors in seconds, not
+    # after psycopg's long default -- the difference between "clear error" and
+    # "page hangs forever" on serverless.
+    connect_args: dict = {"connect_timeout": 8}
     if "pooler.supabase.com" in host or port == 6543:
         # Transaction-mode PgBouncer cannot use prepared statements.
-        kwargs["connect_args"] = {"prepare_threshold": None}
+        connect_args["prepare_threshold"] = None
+    kwargs["connect_args"] = connect_args
     return kwargs
 
 

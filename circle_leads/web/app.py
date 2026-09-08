@@ -98,6 +98,27 @@ def create_app(
             return RedirectResponse("/", status_code=303)
         return HTMLResponse((STATIC_DIR / "login.html").read_text(encoding="utf-8"))
 
+    @app.get("/api/health")
+    def api_health() -> dict[str, Any]:
+        """Fast DB reachability check. No auth so a deploy can be diagnosed even
+        when the DB is down. Reports whether Postgres answers within seconds."""
+        import time as _t
+        from sqlalchemy import text as _text
+        info: dict[str, Any] = {
+            "db_url_host": (db.url.split("@")[-1].split("/")[0] if "@" in db.url else "sqlite"),
+            "skip_db_init": os.environ.get("SKIP_DB_INIT", "").lower() == "true",
+        }
+        t0 = _t.time()
+        try:
+            with db.engine.connect() as conn:
+                conn.execute(_text("SELECT 1"))
+            info["db"] = "ok"
+        except Exception as exc:  # noqa: BLE001 - report, don't hang
+            info["db"] = "error"
+            info["error"] = f"{exc.__class__.__name__}: {str(exc)[:200]}"
+        info["ms"] = int((_t.time() - t0) * 1000)
+        return info
+
     @app.post("/login")
     def login(response: Response, password: str = Form(...)) -> JSONResponse:
         if not verify_password(password):
