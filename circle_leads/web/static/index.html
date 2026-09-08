@@ -1089,11 +1089,19 @@ $('conn-add').addEventListener('click', async () => {
 const scanAllBtn = $('conn-scan-all');
 if (scanAllBtn) scanAllBtn.addEventListener('click', async () => {
   scanAllBtn.disabled = true;
+  const orig = scanAllBtn.textContent;
+  scanAllBtn.textContent = 'Scanning…';
   try {
     const r = await api('/api/connections/scan-all', { method: 'POST' });
-    if (r) toast(`Scanning ${r.hosts.length} communit${r.hosts.length===1?'y':'ies'} (VIP first)…`);
+    if (r && r.sync) {
+      const more = r.remaining && r.remaining.length ? ` — ${r.remaining.length} more, press again` : '';
+      toast(`Scanned ${r.scanned}, ${r.leads} lead(s)${more}`);
+    } else if (r) {
+      toast(`Scanning ${r.hosts.length} communit${r.hosts.length===1?'y':'ies'} (VIP first)…`);
+    }
+    loadConnector();
   } catch (e) { toast(String(e.message || e).slice(0, 200)); }
-  finally { scanAllBtn.disabled = false; }
+  finally { scanAllBtn.disabled = false; scanAllBtn.textContent = orig; }
 });
 
 document.addEventListener('click', async (event) => {
@@ -1157,11 +1165,20 @@ document.addEventListener('click', async (event) => {
   if (scan) {
     const host = scan.dataset.host;
     scan.disabled = true;
+    const orig = scan.textContent;
+    scan.textContent = 'Scanning…';
     try {
       const r = await api(`/api/connections/${encodeURIComponent(host)}/scan`, { method: 'POST' });
-      if (r) toast(`Scanning ${host}…`);
+      if (r && r.sync && r.result) {
+        // Serverless: the scan ran inline; show the outcome now.
+        const res = r.result;
+        toast(`${host}: ${res.posts} post(s), ${res.leads} lead(s) — ${res.state}`);
+      } else if (r) {
+        toast(`Scanning ${host}…`);   // background job (non-serverless)
+      }
+      loadConnector();
     } catch (e) { toast(String(e.message || e).slice(0, 200)); }
-    finally { scan.disabled = false; }
+    finally { scan.disabled = false; scan.textContent = orig; }
     return;
   }
 });

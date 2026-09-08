@@ -79,6 +79,12 @@ def create_app(
     sessions = SessionManager()
     jobs = JobRegistry()
 
+    def _is_serverless() -> bool:
+        """True on Vercel/Lambda, where background threads die after the
+        response returns (so long work must run inline within the request)."""
+        return bool(os.environ.get("VERCEL")
+                    or os.environ.get("AWS_LAMBDA_FUNCTION_NAME"))
+
     def requirements():
         return requirements_holder["req"]
 
@@ -718,6 +724,12 @@ def create_app(
         host = _clean_host(host)
         if not load_cookies(db, host):
             raise HTTPException(404, f"No stored session for {host}. Add one first.")
+        # On serverless (Vercel/Lambda) a background thread is killed when the
+        # function freezes after the response, so the scan would never finish.
+        # Run it inline within the request there; use a background job elsewhere.
+        if _is_serverless():
+            result = _scan_cookie_host(host)
+            return {"ok": True, "host": host, "result": result, "sync": True}
         job = jobs.start("read", f"HTTP scan {host}",
                          lambda job: job.__setattr__("result", _scan_cookie_host(host)))
         return {"ok": True, "job_id": job.id, "host": host}
@@ -728,6 +740,16 @@ def create_app(
         hosts = _cookie_hosts_vip_first()
         if not hosts:
             raise HTTPException(400, "No communities have a session cookie yet.")
+
+        if _is_serverless():
+            # Background threads die on Vercel, and scanning many communities
+            # would exceed the function timeout. Scan a few (VIP first) inline;
+            # the response says how many remain so the UI can call again.
+            budget = 3
+            done = [_scan_cookie_host(h) for h in hosts[:budget]]
+            return {"ok": True, "sync": True, "scanned": len(done),
+                    "leads": sum(r["leads"] for r in done),
+                    "results": done, "remaining": hosts[budget:]}
 
         def _run(job):
             results = []
