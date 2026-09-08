@@ -257,6 +257,43 @@ class BrowserFeedReader:
             ctx.close()
             return ok
 
+    def export_session_cookies(self) -> dict:
+        """Return the member session cookies from the logged-in profile.
+
+        These drive the HTTP MemberApiReader, so the browser is needed only for
+        the one-time login: after this, reads are plain HTTP. Returns only the
+        session cookies (not cf_clearance / analytics). Raises NotLoggedIn if
+        there is no valid session to export.
+        """
+        from circle_leads.scraper.member_api_reader import SESSION_COOKIE_NAMES
+
+        with self._sync_playwright() as pw:
+            ctx = pw.chromium.launch_persistent_context(
+                str(self.profile_dir), headless=True
+            )
+            page = ctx.pages[0] if ctx.pages else ctx.new_page()
+            try:
+                page.goto(self.base, wait_until="domcontentloaded", timeout=20000)
+                if not self._is_logged_in_via(page):
+                    ctx.close()
+                    raise NotLoggedIn(
+                        f"No valid session for {self.community_host} to export."
+                    )
+                jar = ctx.cookies()
+            finally:
+                if ctx:
+                    ctx.close()
+        out = {}
+        for c in jar:
+            if c.get("name") in SESSION_COOKIE_NAMES:
+                out[c["name"]] = c["value"]
+        if not out:
+            raise NotLoggedIn(
+                f"Logged in to {self.community_host} but found no session cookie "
+                "to export."
+            )
+        return out
+
     def logout(self) -> None:
         """Clear this community's saved session by wiping its profile cookies."""
         import shutil

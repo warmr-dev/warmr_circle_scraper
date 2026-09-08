@@ -50,6 +50,77 @@ def authenticate_with_credentials(
     )
 
 
+def sync_community_http(
+    host: str,
+    backend: BackendClient,
+    *,
+    excluded_content: list[str] | None = None,
+    max_pages: int = 5,
+) -> dict:
+    """Sync a community over plain HTTP using the member session cookie.
+
+    The browser logged in once and saved a session to the local profile; this
+    exports that cookie and does every read with a plain HTTP client (no
+    browser, no Cloudflare). Falls back to reporting AUTHENTICATION_REQUIRED if
+    the session isn't valid, exactly like the browser path.
+    """
+    from circle_leads.scraper.browser_reader import BrowserFeedReader, NotLoggedIn
+    from circle_leads.scraper.member_api_reader import (
+        MemberApiReader, SessionInvalid, fetch_space_posts as http_fetch,
+    )
+
+    host = host.replace("https://", "").strip("/")
+    # One browser touch to lift the session cookie; everything else is HTTP.
+    try:
+        cookies = BrowserFeedReader(host, headless=True).export_session_cookies()
+    except NotLoggedIn:
+        backend.report_connection(
+            host=host, state=ConnectionState.AUTHENTICATION_REQUIRED.value,
+            state_detail="No valid local session -- please authenticate.",
+        )
+        return {"host": host, "state": "authentication_required"}
+
+    reader = MemberApiReader(host, cookies=cookies)
+    try:
+        if not reader.check_session():
+            backend.report_connection(
+                host=host, state=ConnectionState.SESSION_EXPIRED.value,
+                state_detail="Session cookie expired.",
+            )
+            return {"host": host, "state": "session_expired"}
+        spaces = reader.list_spaces()
+    except SessionInvalid:
+        backend.report_connection(host=host, state=ConnectionState.SESSION_EXPIRED.value)
+        return {"host": host, "state": "session_expired"}
+
+    if not spaces:
+        backend.report_connection(host=host, state=ConnectionState.ACCESS_DENIED.value,
+                                  state_detail="No spaces visible to this account.")
+        return {"host": host, "state": "access_denied", "spaces": 0}
+
+    total_posts = 0
+    readable = 0
+    for sp in spaces:
+        try:
+            records = http_fetch(reader, sp["id"], excluded_content=excluded_content,
+                                 max_pages=max_pages)
+        except SessionInvalid:
+            backend.report_connection(host=host, state=ConnectionState.SESSION_EXPIRED.value)
+            return {"host": host, "state": "session_expired", "posts": total_posts}
+        if not records:
+            continue
+        readable += 1
+        total_posts += len(records)
+        backend.ingest(host, records)
+
+    backend.report_connection(
+        host=host, state=ConnectionState.CONNECTED.value,
+        spaces_total=len(spaces), spaces_readable=readable,
+    )
+    return {"host": host, "state": "connected", "spaces_total": len(spaces),
+            "spaces_readable": readable, "posts": total_posts, "transport": "http"}
+
+
 def sync_community(
     host: str,
     backend: BackendClient,
