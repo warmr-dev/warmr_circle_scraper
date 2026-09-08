@@ -70,11 +70,14 @@ def _db():
     return Database("sqlite:///" + tempfile.mktemp(suffix=".db"))
 
 
-def test_store_refuses_without_a_key(monkeypatch):
+def test_store_without_a_key_stores_plaintext(monkeypatch):
+    """No key -> plaintext blob (marked), round-trips fine."""
     monkeypatch.delenv("CIRCLE_CRED_KEY", raising=False)
-    from circle_leads.web.replay_store import ReplayKeyMissing, store_session
-    with pytest.raises(ReplayKeyMissing):
-        store_session(_db(), "x.circle.so", parse_cookies(json.dumps(SAMPLE)))
+    from circle_leads.web.replay_store import store_session, load_cookies
+    db = _db()
+    cookies = parse_cookies(json.dumps(SAMPLE))
+    store_session(db, "x.circle.so", cookies)
+    assert load_cookies(db, "x.circle.so") == cookies
 
 
 @pytest.mark.skipif(

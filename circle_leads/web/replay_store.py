@@ -1,12 +1,10 @@
-"""Encrypted-at-rest storage for replay sessions (Version B experiment).
+"""At-rest storage for member session cookies, keyed by community host.
 
-Cookie blobs are encrypted with AES-GCM before they touch the database, using
-CIRCLE_CRED_KEY. If that key is not set, storing a session is refused — we do
-not persist captured Circle sessions in plaintext.
-
-Honest limitation: the server must decrypt to replay, so it holds the key in
-its own environment. This protects the DB dump, not the running server. That is
-the best available given the user's choice to store the session server-side.
+Cookie blobs are encrypted with AES-GCM when ``CIRCLE_CRED_KEY`` is set. If it
+is not set, cookies are stored in PLAINTEXT (a plain-JSON blob, prefixed so we
+know how to read it back). Plaintext is the user's explicit choice: it removes
+the setup step, at the cost that the raw session cookie is readable by anyone
+with database access. Set CIRCLE_CRED_KEY to encrypt at rest instead.
 """
 
 from __future__ import annotations
@@ -21,26 +19,41 @@ from circle_leads.connector.credentials import decrypt, encrypt
 from circle_leads.storage.database import Database
 from circle_leads.storage.models import ReplaySession
 
+# Marks a blob stored without encryption, so load knows not to decrypt.
+_PLAINTEXT_PREFIX = "plain:"
+
 
 class ReplayKeyMissing(RuntimeError):
-    """CIRCLE_CRED_KEY is not set, so a session cannot be stored encrypted."""
+    """Kept for compatibility; no longer raised (plaintext fallback is used)."""
 
 
-def _key() -> str:
-    key = os.environ.get("CIRCLE_CRED_KEY")
+def _key() -> str | None:
+    return os.environ.get("CIRCLE_CRED_KEY") or None
+
+
+def _serialize(cookies: list[dict]) -> str:
+    """Encrypt if a key is set, else store a marked plaintext blob."""
+    payload = json.dumps(cookies)
+    key = _key()
+    if key:
+        return encrypt(payload, key)
+    return _PLAINTEXT_PREFIX + payload
+
+
+def _deserialize(blob: str) -> list[dict]:
+    if blob.startswith(_PLAINTEXT_PREFIX):
+        return json.loads(blob[len(_PLAINTEXT_PREFIX):])
+    key = _key()
     if not key:
-        raise ReplayKeyMissing(
-            "CIRCLE_CRED_KEY is not set. Refusing to store a captured Circle "
-            "session in plaintext. Set CIRCLE_CRED_KEY (a strong passphrase) to "
-            "enable the Version B replay experiment."
-        )
-    return key
+        # Encrypted blob but no key now -> unreadable; treat as empty.
+        return []
+    return json.loads(decrypt(blob, key))
 
 
 def store_session(db: Database, host: str, cookies: list[dict],
                   *, member_label: str | None = None) -> dict:
-    """Encrypt and upsert a replay session for ``host``."""
-    blob = encrypt(json.dumps(cookies), _key())
+    """Upsert a session for ``host`` (encrypted if a key is set, else plaintext)."""
+    blob = _serialize(cookies)
     with db.session() as s:
         row = s.scalar(select(ReplaySession).where(ReplaySession.host == host))
         if row is None:
@@ -62,7 +75,7 @@ def load_cookies(db: Database, host: str) -> list[dict] | None:
         if row is None:
             return None
         blob = row.encrypted_cookies
-    return json.loads(decrypt(blob, _key()))
+    return _deserialize(blob)
 
 
 def record_result(db: Database, host: str, result: str, detail: str) -> None:

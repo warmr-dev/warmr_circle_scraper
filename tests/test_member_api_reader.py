@@ -189,7 +189,8 @@ def test_store_session_cookie_strips_name_prefix_and_encrypts(monkeypatch):
     assert any(s["host"] == "x.circle.so" for s in sessions)
 
 
-def test_store_session_refuses_without_encryption_key(monkeypatch):
+def test_store_session_works_without_encryption_key(monkeypatch):
+    """No CIRCLE_CRED_KEY -> stored as plaintext (the user's choice), not refused."""
     monkeypatch.setenv("DASHBOARD_PASSWORD", "testpassword")
     monkeypatch.setenv("DASHBOARD_SECRET_KEY", "k")
     monkeypatch.delenv("CIRCLE_CRED_KEY", raising=False)
@@ -199,8 +200,7 @@ def test_store_session_refuses_without_encryption_key(monkeypatch):
     c.post("/api/connections/add", json={"host": "x.circle.so"})
     r = c.post("/api/connections/x.circle.so/session",
                json={"session_cookie": "v", "user_session_identifier": "u"})
-    assert r.status_code == 400
-    assert "CIRCLE_CRED_KEY" in r.json()["detail"]
+    assert r.status_code == 200 and r.json()["cookies"] == 2
 
 
 def test_scan_without_a_stored_session_is_404(monkeypatch):
@@ -218,15 +218,23 @@ def test_scan_endpoints_require_auth(monkeypatch):
     assert anon.post("/api/connections/x.circle.so/scan").status_code == 401
 
 
-def test_store_session_requires_both_cookies(monkeypatch):
-    """Circle needs _circle_session AND user_session_identifier together."""
+def test_store_session_one_cookie_saves_but_warns(monkeypatch):
+    """One cookie is stored but the response lists what's still missing."""
     c = _dash(monkeypatch)
     c.post("/api/connections/add", json={"host": "x.circle.so"})
-    # only _circle_session -> rejected, names the missing one
     r = c.post("/api/connections/x.circle.so/session",
                json={"session_cookie": "s"})
-    assert r.status_code == 400
-    assert "user_session_identifier" in r.json()["detail"]
+    assert r.status_code == 200
+    assert "user_session_identifier" in r.json()["missing"]
+
+
+def test_store_session_option_b_two_values(monkeypatch):
+    """Option B: the two values pasted individually (OR the JSON export)."""
+    c = _dash(monkeypatch)
+    c.post("/api/connections/add", json={"host": "x.circle.so"})
+    r = c.post("/api/connections/x.circle.so/session",
+               json={"session_cookie": "S", "user_session_identifier": "U"})
+    assert r.status_code == 200 and r.json()["cookies"] == 2 and r.json()["missing"] == []
 
 
 def test_store_session_accepts_full_cookie_json_export(monkeypatch):

@@ -528,37 +528,43 @@ def create_app(
     def set_connection_session(
         host: str, payload: dict, _: None = Depends(require_auth)
     ) -> dict[str, Any]:
-        """Store a member session cookie for a community, encrypted at rest.
+        """Store a member session cookie for a community.
 
         Circle's /internal_api is not behind Cloudflare, so a valid
         _circle_session cookie lets the backend read this community over plain
-        HTTP -- no browser, runs anywhere. The cookie is a live credential:
-        stored AES-GCM encrypted (needs CIRCLE_CRED_KEY), never logged, never
-        returned to the frontend. One cookie per community (Circle scopes the
-        session per subdomain).
+        HTTP -- no browser, runs anywhere. Stored encrypted if CIRCLE_CRED_KEY
+        is set, else plaintext (the user's choice). Never logged, never returned
+        to the frontend. One cookie per community (Circle scopes it per
+        subdomain).
+
+        Two ways to provide it (use EITHER):
+          - ``cookies``: the full cookie-export JSON array (both cookies are
+            extracted automatically), or
+          - ``session_cookie`` + ``user_session_identifier``: the two values
+            pasted individually.
         """
         import json as _json
-        from circle_leads.web.replay_store import ReplayKeyMissing, store_session
+        from circle_leads.web.replay_store import store_session
         from circle_leads.scraper.member_api_reader import SESSION_COOKIE_NAMES
 
         host = _clean_host(host)
-        # Reading a Circle community needs BOTH _circle_session AND
-        # user_session_identifier (verified live). Accept the easiest input: a
-        # full cookie-export JSON array, or individual values.
-        raw = (payload or {}).get("cookies")
         got: dict[str, str] = {}
+
+        # Path 1: a full cookie-export JSON array (string or already-parsed).
+        raw = (payload or {}).get("cookies")
         if raw:
             data = raw
             if isinstance(raw, str):
                 try:
                     data = _json.loads(raw)
                 except (ValueError, TypeError):
-                    raise HTTPException(400, "cookies must be a JSON array export.")
+                    raise HTTPException(400, "The cookie box must contain the JSON export array.")
             if isinstance(data, list):
                 for c in data:
                     if isinstance(c, dict) and c.get("name") in SESSION_COOKIE_NAMES:
                         got[c["name"]] = str(c.get("value") or "")
-        # Fall back to explicit fields.
+
+        # Path 2: the two values pasted individually (OR alternative to JSON).
         for field_name, cookie_name in (
             ("session_cookie", "_circle_session"),
             ("user_session_identifier", "user_session_identifier"),
@@ -566,24 +572,101 @@ def create_app(
         ):
             val = str((payload or {}).get(field_name) or "").strip()
             if val:
-                got[cookie_name] = val.split("=", 1)[1] if "=" in val and val.startswith(cookie_name) else val
+                # Tolerate a "name=value" paste.
+                got[cookie_name] = (val.split("=", 1)[1]
+                                    if "=" in val and val.startswith(cookie_name) else val)
 
-        if "_circle_session" not in got:
-            raise HTTPException(400, "Missing _circle_session. Paste the cookie export JSON.")
-        if "user_session_identifier" not in got:
+        if "_circle_session" not in got and "user_session_identifier" not in got:
             raise HTTPException(
-                400, "Missing user_session_identifier -- Circle needs BOTH it and "
-                "_circle_session. Paste the full cookie export so both are captured.")
+                400, "Paste either the cookie-export JSON, or the _circle_session "
+                "and user_session_identifier values.")
+        # Both are needed to actually read Circle; warn but still store what we got
+        # so the user can fix it, and the scan will report if the session is invalid.
+        missing = [n for n in ("_circle_session", "user_session_identifier") if n not in got]
 
         cookies = [{"domain": host, "name": n, "value": v, "path": "/",
                     "secure": True, "session": True} for n, v in got.items()]
-        try:
-            store_session(db, host, cookies)
-        except ReplayKeyMissing as exc:
-            raise HTTPException(400, str(exc)) from exc
+        store_session(db, host, cookies)
         log_activity_holder(kind="review", community=host.split(".")[0],
-                            summary=f"Session cookies stored for {host} (encrypted)")
-        return {"ok": True, "host": host, "cookies": len(cookies)}
+                            summary=f"Session cookies stored for {host}")
+        return {"ok": True, "host": host, "cookies": len(cookies),
+                "missing": missing}
+
+    def _scan_cookie_host(host: str) -> dict[str, Any]:
+        """Read one community over HTTP with its stored session cookie and
+        ingest posts. Returns a summary; updates the connection state. No
+        browser. Shared by the single-scan endpoint and the VIP-first batch."""
+        from circle_leads.web.replay_store import load_cookies
+        from circle_leads.scraper.member_api_reader import (
+            MemberApiReader, SessionInvalid, ChallengeHit, fetch_space_posts,
+        )
+        from circle_leads.storage.models import CircleConnection, ConnectionState
+        from circle_leads.triage.pipeline import triage_records
+
+        cookie_list = load_cookies(db, host) or []
+        cookies = {c["name"]: c["value"] for c in cookie_list}
+        state = ConnectionState.CONNECTED
+        detail = ""
+        total = 0
+        readable = 0
+        leads = 0
+        try:
+            reader = MemberApiReader(host, cookies=cookies)
+            if not reader.check_session():
+                state = ConnectionState.SESSION_EXPIRED
+                detail = "Session cookie expired -- refresh it."
+            else:
+                for sp in reader.list_spaces():
+                    recs = fetch_space_posts(reader, sp["id"], max_pages=5)
+                    if not recs:
+                        continue
+                    readable += 1
+                    total += len(recs)
+                    res = triage_records(
+                        db, recs, requirements(), community=host.split(".")[0],
+                        source_url=f"https://{host}",
+                        use_llm=bool(os.environ.get("OPENAI_API_KEY")),
+                    )
+                    leads += len(res.leads)
+        except SessionInvalid:
+            state = ConnectionState.SESSION_EXPIRED
+            detail = "Session rejected -- refresh the cookie."
+        except ChallengeHit as exc:
+            state = ConnectionState.ERROR
+            detail = str(exc)
+        except Exception as exc:  # noqa: BLE001 - one bad host must not stop a batch
+            state = ConnectionState.ERROR
+            detail = f"{exc.__class__.__name__}: {exc}"
+        with db.session() as s:
+            conn = s.scalar(select(CircleConnection).where(CircleConnection.host == host))
+            if conn is None:
+                conn = CircleConnection(host=host)
+                s.add(conn)
+            conn.state = state.value
+            conn.state_detail = detail or None
+            conn.spaces_readable = readable
+        log_activity_holder(
+            kind="ingest", level="success" if leads else "info",
+            community=host.split(".")[0],
+            summary=f"HTTP scan of {host}: {total} post(s), {leads} lead(s) from {readable} space(s)",
+            items_seen=total, leads_found=leads,
+        )
+        return {"host": host, "state": state.value, "posts": total,
+                "spaces_readable": readable, "leads": leads, "detail": detail}
+
+    def _cookie_hosts_vip_first() -> list[str]:
+        """Communities that have a stored session cookie, VIP first, paused
+        excluded -- the scan order for every harvest."""
+        from circle_leads.storage.models import (
+            CircleConnection, ConnectionPriority, ReplaySession, SCAN_ORDER,
+        )
+        with db.session() as s:
+            with_cookie = {r.host for r in s.scalars(select(ReplaySession)).all()}
+            rows = [c for c in s.scalars(select(CircleConnection)).all()
+                    if c.host in with_cookie
+                    and c.priority != ConnectionPriority.PAUSED.value]
+            rows.sort(key=lambda c: (SCAN_ORDER.get(c.priority, 1), c.host))
+            return [c.host for c in rows]
 
     @app.post("/api/connections/{host}/scan")
     def scan_connection_http(
@@ -591,74 +674,35 @@ def create_app(
     ) -> dict[str, Any]:
         """Read a community over HTTP with its stored session cookie, right now.
 
-        This is the cloud-native path: no local connector, no browser. It uses
-        the encrypted session cookie to call /internal_api and ingest posts.
+        Cloud-native: no local connector, no browser. Uses the stored session
+        cookie to call /internal_api and ingest posts.
         """
-        from circle_leads.web.replay_store import ReplayKeyMissing, load_cookies
-        from circle_leads.scraper.member_api_reader import (
-            MemberApiReader, SessionInvalid, ChallengeHit, fetch_space_posts,
-        )
-        from circle_leads.storage.models import CircleConnection, ConnectionState
+        from circle_leads.web.replay_store import load_cookies
         host = _clean_host(host)
-        try:
-            cookie_list = load_cookies(db, host)
-        except ReplayKeyMissing as exc:
-            raise HTTPException(400, str(exc)) from exc
-        if not cookie_list:
+        if not load_cookies(db, host):
             raise HTTPException(404, f"No stored session for {host}. Add one first.")
-        cookies = {c["name"]: c["value"] for c in cookie_list}
+        job = jobs.start("read", f"HTTP scan {host}",
+                         lambda job: job.__setattr__("result", _scan_cookie_host(host)))
+        return {"ok": True, "job_id": job.id, "host": host}
 
-        from circle_leads.triage.pipeline import triage_records
+    @app.post("/api/connections/scan-all")
+    def scan_all_cookie_hosts(_: None = Depends(require_auth)) -> dict[str, Any]:
+        """Scan every cookie-backed community, VIP first (paused excluded)."""
+        hosts = _cookie_hosts_vip_first()
+        if not hosts:
+            raise HTTPException(400, "No communities have a session cookie yet.")
 
         def _run(job):
-            reader = MemberApiReader(host, cookies=cookies)
-            state = ConnectionState.CONNECTED
-            detail = ""
-            total = 0
-            readable = 0
-            try:
-                if not reader.check_session():
-                    state = ConnectionState.SESSION_EXPIRED
-                    detail = "Session cookie expired -- refresh it."
-                else:
-                    spaces = reader.list_spaces()
-                    for sp in spaces:
-                        recs = fetch_space_posts(reader, sp["id"], max_pages=5)
-                        if not recs:
-                            continue
-                        readable += 1
-                        total += len(recs)
-                        triage_records(
-                            db, recs, requirements(), community=host.split(".")[0],
-                            source_url=f"https://{host}",
-                            use_llm=bool(os.environ.get("OPENAI_API_KEY")),
-                        )
-                    job.result = {"spaces": len(spaces), "readable": readable,
-                                  "posts": total}
-                    job.detail = f"{total} post(s) from {readable}/{len(spaces)} space(s)"
-            except SessionInvalid:
-                state = ConnectionState.SESSION_EXPIRED
-                detail = "Session rejected -- refresh the cookie."
-            except ChallengeHit as exc:
-                state = ConnectionState.ERROR
-                detail = str(exc)
-            with db.session() as s:
-                conn = s.scalar(select(CircleConnection).where(CircleConnection.host == host))
-                if conn is None:
-                    conn = CircleConnection(host=host)
-                    s.add(conn)
-                conn.state = state.value
-                conn.state_detail = detail or None
-                conn.spaces_readable = readable
-            log_activity_holder(
-                kind="ingest", level="success" if total else "info",
-                community=host.split(".")[0],
-                summary=f"HTTP scan of {host}: {total} post(s) from {readable} space(s)",
-                items_seen=total,
-            )
+            results = []
+            for h in hosts:
+                results.append(_scan_cookie_host(h))
+                job.detail = f"scanned {len(results)}/{len(hosts)} (VIP first)"
+            job.result = {"scanned": len(results),
+                          "leads": sum(r["leads"] for r in results),
+                          "order": hosts}
 
-        job = jobs.start("read", f"HTTP scan {host}", _run)
-        return {"ok": True, "job_id": job.id, "host": host}
+        job = jobs.start("read", f"Scan {len(hosts)} communities (VIP first)", _run)
+        return {"ok": True, "job_id": job.id, "hosts": hosts}
 
     @app.post("/api/connections/{host}/priority")
     def set_connection_priority(
@@ -851,6 +895,14 @@ def create_app(
                         "use_llm": use_llm, "all_spaces": all_spaces,
                         "recency_days": recency_days},
             )
+            # VIP first: scan cookie-backed private communities before the
+            # public harvest, in priority order (paused excluded).
+            priv_hosts = _cookie_hosts_vip_first()
+            priv_leads = 0
+            for i, h in enumerate(priv_hosts, 1):
+                job.detail = f"Scanning private communities (VIP first) {i}/{len(priv_hosts)}: {h}"
+                priv_leads += _scan_cookie_host(h).get("leads", 0)
+
             job.detail = "Discovering + reading public communities..."
             res = harvest(
                 db, requirements(), niches=niches, search=not no_search,
@@ -1092,6 +1144,9 @@ def create_app(
 
         def run(job):
             from circle_leads.harvest import harvest
+            # VIP first: private cookie-backed communities before the public run.
+            for h in _cookie_hosts_vip_first():
+                _scan_cookie_host(h)
             res = harvest(
                 db, requirements(), verbose_log=True,
                 use_llm=bool(_os.environ.get("OPENAI_API_KEY")),

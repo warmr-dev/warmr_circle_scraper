@@ -447,13 +447,14 @@
       <p>Read private communities you're a member of. You log into Circle yourself on your own computer — your session and password never leave your machine.</p>
     </div>
 
-    <div class="panel">
-      <h2>Local connector</h2>
-      <div id="connector-status" class="muted" style="font-size:13px">Loading…</div>
-      <div class="row" style="margin-top:10px">
-        <button class="action" id="conn-pair">Pair a local connector</button>
+    <!-- Local connector (pairing) removed: the cloud reads directly with your
+         session cookie, so no local process is needed. -->
+    <div class="panel" style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+      <div>
+        <h2 style="margin:0 0 2px">Scan all (VIP first)</h2>
+        <span class="muted" style="font-size:13px">Reads every community that has a session cookie, VIP priority first.</span>
       </div>
-      <div id="conn-pair-out" class="muted" style="margin-top:8px;font-size:13px"></div>
+      <button class="action" id="conn-scan-all">Scan all now</button>
     </div>
 
     <div class="panel">
@@ -983,16 +984,6 @@ const CONN_STATE = {
 };
 
 async function loadConnector() {
-  // Connector online status
-  const cs = await api('/api/connectors');
-  if (cs) {
-    const online = (cs.connectors || []).filter(c => c.online);
-    $('connector-status').innerHTML = cs.connectors.length
-      ? `${online.length} online / ${cs.connectors.length} paired` +
-        cs.connectors.map(c => ` · <b>${esc(c.name || 'connector')}</b> ${c.online ? '🟢 online' : '⚪ offline'}`).join('')
-      : 'No connector paired yet. Pair one below, then run it on your computer.';
-  }
-  // Private community connections
   const data = await api('/api/connections');
   if (!data) return;
   if (!data.connections.length) {
@@ -1018,11 +1009,14 @@ async function loadConnector() {
       <details class="conn-cookie" style="margin-top:8px">
         <summary style="cursor:pointer;font-size:13px;color:var(--accent-ink)">${c.has_session ? 'Update' : 'Add'} session cookie</summary>
         <div class="muted" style="font-size:12px;margin:6px 0">
-          Log into <b>${esc(c.host)}</b> in your browser, export its cookies (or the two below),
-          and paste the JSON here. Needs <code>_circle_session</code> + <code>user_session_identifier</code>.
-          Stored encrypted; never leaves the server.
+          Log into <b>${esc(c.host)}</b> in your browser. Provide the cookie <b>either way</b> below —
+          needs <code>_circle_session</code> + <code>user_session_identifier</code>.
         </div>
-        <textarea class="conn-cookie-json" data-host="${esc(c.host)}" placeholder='Paste cookie export JSON for ${esc(c.host)}' style="min-height:80px;font-size:12px"></textarea>
+        <div style="font-size:12px;font-weight:600;margin:6px 0 2px">Option A — paste the full cookie-export JSON</div>
+        <textarea class="conn-cookie-json" data-host="${esc(c.host)}" placeholder='Paste cookie export JSON for ${esc(c.host)}' style="min-height:70px;font-size:12px"></textarea>
+        <div style="font-size:12px;font-weight:600;margin:8px 0 2px">Option B — paste the two values</div>
+        <input class="conn-cookie-cs" data-host="${esc(c.host)}" placeholder="_circle_session value" style="width:100%;font-size:12px;margin-bottom:4px">
+        <input class="conn-cookie-usi" data-host="${esc(c.host)}" placeholder="user_session_identifier value" style="width:100%;font-size:12px">
         <div class="row" style="margin-top:6px">
           <button class="ghost conn-save-cookie" data-host="${esc(c.host)}">Save cookie</button>
         </div>
@@ -1039,15 +1033,6 @@ async function loadConnector() {
     </div>`;
   }).join('');
 }
-
-$('conn-pair').addEventListener('click', async () => {
-  const r = await api('/api/connector/pair', { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' });
-  if (!r) return;
-  $('conn-pair-out').innerHTML =
-    `Pairing code: <b style="font-size:16px;letter-spacing:1px">${esc(r.pairing_code)}</b> ` +
-    `(expires in ${r.expires_in_minutes} min). On your computer run:<br>` +
-    `<code>circle-connector pair --backend ${esc(location.origin)} --code ${esc(r.pairing_code)}</code>`;
-});
 
 // Scan priority: VIP communities are read first, paused ones are skipped.
 const PRIORITIES = [
@@ -1095,9 +1080,20 @@ $('conn-add').addEventListener('click', async () => {
   if (r) {
     $('conn-host').value = '';
     $('conn-notes').value = '';
-    toast(r.created ? 'Community added — log in locally next' : 'Community updated');
+    toast(r.created ? 'Community added — add its session cookie next' : 'Community updated');
     loadConnector();
   }
+});
+
+// Scan every cookie-backed community, VIP first.
+const scanAllBtn = $('conn-scan-all');
+if (scanAllBtn) scanAllBtn.addEventListener('click', async () => {
+  scanAllBtn.disabled = true;
+  try {
+    const r = await api('/api/connections/scan-all', { method: 'POST' });
+    if (r) toast(`Scanning ${r.hosts.length} communit${r.hosts.length===1?'y':'ies'} (VIP first)…`);
+  } catch (e) { toast(String(e.message || e).slice(0, 200)); }
+  finally { scanAllBtn.disabled = false; }
 });
 
 document.addEventListener('click', async (event) => {
@@ -1108,21 +1104,38 @@ document.addEventListener('click', async (event) => {
     return;
   }
 
-  // Save a session cookie for one community (paste the cookie-export JSON).
+  // Save a session cookie for one community: Option A (JSON) OR Option B (two values).
   const save = event.target.closest('.conn-save-cookie');
   if (save) {
     const host = save.dataset.host;
-    const box = document.querySelector(`.conn-cookie-json[data-host="${CSS.escape(host)}"]`);
-    const text = (box && box.value || '').trim();
-    if (!text) return toast('Paste the cookie JSON first');
+    const q = sel => document.querySelector(`${sel}[data-host="${CSS.escape(host)}"]`);
+    const jsonBox = q('.conn-cookie-json');
+    const csBox = q('.conn-cookie-cs');
+    const usiBox = q('.conn-cookie-usi');
+    const jsonText = (jsonBox && jsonBox.value || '').trim();
+    const cs = (csBox && csBox.value || '').trim();
+    const usi = (usiBox && usiBox.value || '').trim();
+
+    let body;
+    if (jsonText) {
+      body = { cookies: jsonText };                       // Option A
+    } else if (cs || usi) {
+      body = { session_cookie: cs, user_session_identifier: usi };  // Option B
+    } else {
+      return toast('Paste the cookie JSON, or the two values');
+    }
     save.disabled = true;
     try {
-      await api(`/api/connections/${encodeURIComponent(host)}/session`, {
+      const r = await api(`/api/connections/${encodeURIComponent(host)}/session`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ cookies: text }),
+        body: JSON.stringify(body),
       });
-      if (box) box.value = '';   // don't leave the credential sitting in the field
-      toast(`Session saved for ${host}`);
+      [jsonBox, csBox, usiBox].forEach(b => { if (b) b.value = ''; });  // clear the fields
+      if (r && r.missing && r.missing.length) {
+        toast(`Saved, but missing: ${r.missing.join(', ')} — scan may fail`);
+      } else {
+        toast(`Session saved for ${host}`);
+      }
       loadConnector();
     } catch (e) { toast(String(e.message || e).slice(0, 200)); }
     finally { save.disabled = false; }
