@@ -609,15 +609,22 @@ def create_app(
         detail = ""
         total = 0
         readable = 0
+        spaces_total = 0
         leads = 0
         try:
             reader = MemberApiReader(host, cookies=cookies)
             if not reader.check_session():
                 state = ConnectionState.SESSION_EXPIRED
-                detail = "Session cookie expired -- refresh it."
+                detail = "Session cookie invalid or expired -- refresh it."
             else:
-                for sp in reader.list_spaces():
-                    recs = fetch_space_posts(reader, sp["id"], max_pages=5)
+                spaces = reader.list_spaces()
+                spaces_total = len(spaces)
+                for sp in spaces:
+                    try:
+                        recs = fetch_space_posts(reader, sp["id"], max_pages=5)
+                    except SessionInvalid:
+                        # A single space may deny access; don't fail the whole scan.
+                        continue
                     if not recs:
                         continue
                     readable += 1
@@ -628,6 +635,10 @@ def create_app(
                         use_llm=bool(os.environ.get("OPENAI_API_KEY")),
                     )
                     leads += len(res.leads)
+                if total:
+                    detail = f"{total} post(s), {leads} lead(s) from {readable}/{spaces_total} space(s)"
+                else:
+                    detail = f"No readable posts ({spaces_total} space(s) visible)."
         except SessionInvalid:
             state = ConnectionState.SESSION_EXPIRED
             detail = "Session rejected -- refresh the cookie."
@@ -645,10 +656,15 @@ def create_app(
             conn.state = state.value
             conn.state_detail = detail or None
             conn.spaces_readable = readable
+            conn.spaces_total = spaces_total
+            import datetime as _sdt
+            conn.last_sync_at = _sdt.datetime.utcnow()
         log_activity_holder(
-            kind="ingest", level="success" if leads else "info",
+            kind="ingest",
+            level="warning" if state != ConnectionState.CONNECTED else ("success" if leads else "info"),
             community=host.split(".")[0],
-            summary=f"HTTP scan of {host}: {total} post(s), {leads} lead(s) from {readable} space(s)",
+            summary=(f"HTTP scan of {host}: {total} post(s), {leads} lead(s) from "
+                     f"{readable} space(s)" + (f" — {detail}" if state != ConnectionState.CONNECTED else "")),
             items_seen=total, leads_found=leads,
         )
         return {"host": host, "state": state.value, "posts": total,
