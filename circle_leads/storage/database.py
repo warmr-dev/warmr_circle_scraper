@@ -136,6 +136,8 @@ class Database:
         self.url = url
         self.engine = create_engine(url, **_engine_kwargs(url))
         self._sessionmaker = sessionmaker(bind=self.engine, future=True)
+        import threading as _threading
+        self._shared = _threading.local()  # holds an optional shared session
 
         # Creating/altering schema on every cold start opens a connection and
         # runs DDL per instance -- the connection storm that trips the pooler.
@@ -182,6 +184,16 @@ class Database:
 
     @contextmanager
     def session(self) -> Iterator[Session]:
+        # If a shared session is active on this thread (see shared_session),
+        # reuse it so a burst of session() calls in one operation shares ONE
+        # connection instead of checking out a new one each time -- a big win
+        # over a network pooler (Supabase) where each checkout costs a round
+        # trip. The shared owner commits once at the end.
+        shared = getattr(self._shared, "session", None)
+        if shared is not None:
+            yield shared              # no commit/close: the owner handles it
+            shared.flush()            # make writes visible to the next block
+            return
         s = self._sessionmaker()
         try:
             yield s
@@ -190,6 +202,23 @@ class Database:
             s.rollback()
             raise
         finally:
+            s.close()
+
+    @contextmanager
+    def shared_session(self) -> Iterator[Session]:
+        """Open one session that every nested ``session()`` call reuses, on
+        this thread. Commits once on exit. Use it around a loop that would
+        otherwise open a session per iteration."""
+        s = self._sessionmaker()
+        self._shared.session = s
+        try:
+            yield s
+            s.commit()
+        except Exception:
+            s.rollback()
+            raise
+        finally:
+            self._shared.session = None
             s.close()
 
 

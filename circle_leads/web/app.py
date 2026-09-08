@@ -667,11 +667,15 @@ def create_app(
                         continue
                     readable += 1
                     total += len(recs)
-                    res = triage_records(
-                        db, recs, requirements(), community=host.split(".")[0],
-                        source_url=f"https://{host}",
-                        use_llm=bool(os.environ.get("OPENAI_API_KEY")),
-                    )
+                    # Share ONE DB connection across this space's per-post writes
+                    # instead of a pooler checkout per post -- the big win over a
+                    # network pooler (Supabase).
+                    with db.shared_session():
+                        res = triage_records(
+                            db, recs, requirements(), community=host.split(".")[0],
+                            source_url=f"https://{host}",
+                            use_llm=bool(os.environ.get("OPENAI_API_KEY")),
+                        )
                     leads += len(res.leads)
                 suffix = " (partial — press scan again to continue)" if partial else ""
                 if total:
