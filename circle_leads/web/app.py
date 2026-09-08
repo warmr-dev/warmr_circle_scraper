@@ -744,7 +744,7 @@ def create_app(
             # Fit under the function timeout: fewer pages, stop before ~45s.
             # A partial run is fine -- pressing scan again continues, and dedup
             # means already-ingested posts are skipped.
-            result = _scan_cookie_host(host, max_pages=2, time_budget=45.0)
+            result = _scan_cookie_host(host, max_pages=1, time_budget=30.0)
             return {"ok": True, "host": host, "result": result, "sync": True}
         job = jobs.start("read", f"HTTP scan {host}",
                          lambda job: job.__setattr__("result", _scan_cookie_host(host)))
@@ -766,9 +766,9 @@ def create_app(
             done = []
             remaining = list(hosts)
             for h in hosts:
-                if _t.time() - started > 40.0:
+                if _t.time() - started > 30.0:
                     break
-                done.append(_scan_cookie_host(h, max_pages=2, time_budget=20.0))
+                done.append(_scan_cookie_host(h, max_pages=1, time_budget=15.0))
                 remaining.remove(h)
             return {"ok": True, "sync": True, "scanned": len(done),
                     "leads": sum(r["leads"] for r in done),
