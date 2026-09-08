@@ -647,12 +647,19 @@ def create_app(
         leads = 0
         partial = False
         try:
-            reader = MemberApiReader(host, cookies=cookies)
-            if not reader.check_session():
+            # Lower the inter-page pause on serverless (we're time-bounded and
+            # do few pages anyway). list_spaces doubles as the session check --
+            # it raises SessionInvalid on a bad cookie -- so we skip a separate
+            # check_session round-trip.
+            pause = 0.2 if _is_serverless() else 0.7
+            reader = MemberApiReader(host, cookies=cookies, request_pause=pause)
+            try:
+                spaces = reader.list_spaces()
+            except SessionInvalid:
                 state = ConnectionState.SESSION_EXPIRED
                 detail = "Session cookie invalid or expired -- refresh it."
-            else:
-                spaces = reader.list_spaces()
+                spaces = None
+            if spaces is not None:
                 spaces_total = len(spaces)
                 for sp in spaces:
                     if time_budget and (_time.time() - started) > time_budget:
