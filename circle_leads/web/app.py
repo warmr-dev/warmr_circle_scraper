@@ -666,7 +666,13 @@ def create_app(
                         partial = True    # ran out of time; stop cleanly
                         break
                     try:
-                        recs = fetch_space_posts(reader, sp["id"], max_pages=max_pages)
+                        # Pull comments+replies too (hiring intent often lives
+                        # there). On the tight serverless budget, cap how many
+                        # posts we fetch comments for so a scan still fits.
+                        cap = 8 if time_budget else 25
+                        recs = fetch_space_posts(
+                            reader, sp["id"], max_pages=max_pages,
+                            with_comments=True, max_comment_posts=cap)
                     except SessionInvalid:
                         # A single space may deny access; don't fail the whole scan.
                         continue
@@ -1252,6 +1258,27 @@ def create_app(
                           "leads": res.leads_found}
             lane = "fast read" if fast_lane else "full"
             job.detail = f"Scheduled harvest ({lane}): {res.leads_found} lead(s)"
+
+        if _is_serverless():
+            # A background thread would be killed when the function freezes, and
+            # a full harvest (discovery + web search + reading many communities)
+            # can't finish in one function timeout. So on serverless the tick
+            # scans only the VIP-first private communities inline (fast, bounded)
+            # and leaves the heavy public harvest to the always-on worker.
+            hosts = _cookie_hosts_vip_first()
+            import time as _time
+            started = _time.time()
+            scanned = 0
+            leads = 0
+            for h in hosts:
+                if _time.time() - started > 40.0:
+                    break
+                r = _scan_cookie_host(h, max_pages=1, time_budget=15.0)
+                scanned += 1
+                leads += r.get("leads", 0)
+            return {"ran": True, "mode": "serverless-private-only",
+                    "scanned": scanned, "leads": leads,
+                    "note": "Public harvest runs on the worker, not on serverless."}
 
         jobs.start("harvest", "Scheduled harvest (tick)", run)
         return {"ran": True, "fast_lane": fast_lane, "searched": do_search}

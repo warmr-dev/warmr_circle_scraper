@@ -293,3 +293,67 @@ def test_clear_session_requires_auth(monkeypatch):
     from circle_leads.web.app import create_app
     anon = _TC(create_app(db_url="sqlite:///" + _tempfile.mktemp(suffix=".db")))
     assert anon.post("/api/connections/a.circle.so/session/clear").status_code == 401
+
+
+# --- comments + replies + tiptap extraction --------------------------------
+
+def test_tiptap_body_flattens_to_full_text():
+    from circle_leads.scraper.member_api_reader import _tiptap_text
+    body = {"type": "doc", "content": [
+        {"type": "paragraph", "content": [{"type": "text", "text": "We are hiring a "},
+                                           {"type": "text", "text": "backend engineer."}]},
+        {"type": "paragraph", "content": [{"type": "text", "text": "DM me."}]},
+    ]}
+    text = _tiptap_text(body)
+    assert "We are hiring a backend engineer." in text
+    assert "DM me." in text
+
+
+def test_extract_text_prefers_full_tiptap_over_truncated():
+    from circle_leads.scraper.member_api_reader import _extract_text
+    rec = {
+        "name": "Job",
+        "truncated_content": "We are hiring a…",     # preview
+        "tiptap_body": {"type": "doc", "content": [
+            {"type": "paragraph", "content": [
+                {"type": "text", "text": "We are hiring a senior C++ engineer, remote, contract."}]}]},
+    }
+    title, body = _extract_text(rec)
+    assert title == "Job"
+    assert "senior C++ engineer, remote, contract" in body   # full, not truncated
+
+
+def test_fetch_space_posts_includes_comments_and_replies():
+    # A post with a comment that has a reply.
+    routes = {
+        "/internal_api/spaces/9/posts": _Resp(200, {"records": [
+            {"id": 100, "name": "Post", "truncated_content": "Body.", "comments_count": 1}
+        ], "has_next_page": False}),
+        "/internal_api/posts/100/comments": _Resp(200, {"records": [
+            {"id": 200, "truncated_content": "We're looking for a dev, DM me.",
+             "replies_count": 1, "community_member": {"id": 5, "name": "Ann"}}
+        ], "has_next_page": False}),
+        "/internal_api/comments/200/comments": _Resp(200, {"records": [
+            {"id": 300, "truncated_content": "Sent you a message.",
+             "community_member": {"id": 6, "name": "Bob"}}
+        ]}),
+    }
+    r = _reader(routes)
+    recs = fetch_space_posts(r, 9, with_comments=True)
+    kinds = [x["content_type"] for x in recs]
+    assert kinds.count("post") == 1
+    assert kinds.count("comment") == 2   # the comment + its reply
+    comment = next(x for x in recs if x["content_type"] == "comment" and "looking for" in x["content"])
+    assert comment["thread_id"] == "100"        # tied to its post
+    assert comment["author"]["display_name"] == "Ann"
+
+
+def test_comments_can_be_disabled():
+    routes = {
+        "/internal_api/spaces/9/posts": _Resp(200, {"records": [
+            {"id": 100, "name": "P", "truncated_content": "B", "comments_count": 3}
+        ], "has_next_page": False}),
+    }
+    r = _reader(routes)
+    recs = fetch_space_posts(r, 9, with_comments=False)
+    assert all(x["content_type"] == "post" for x in recs)

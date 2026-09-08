@@ -146,14 +146,64 @@ class MemberApiReader:
             time.sleep(self.request_pause)
         return records
 
+    def list_comments(self, post_id: str | int, *, per_page: int = 30,
+                      max_pages: int = 3) -> list[dict]:
+        """Top-level comments on a post (verified endpoint)."""
+        records: list[dict] = []
+        for pageno in range(1, max_pages + 1):
+            payload = self._get(
+                f"/internal_api/posts/{post_id}/comments?page={pageno}&per_page={per_page}")
+            batch = (payload.get("records") if isinstance(payload, dict) else payload) or []
+            if not batch:
+                break
+            records.extend(batch)
+            if isinstance(payload, dict) and not payload.get("has_next_page"):
+                break
+            time.sleep(self.request_pause)
+        return records
+
+    def list_replies(self, comment_id: str | int, *, per_page: int = 30) -> list[dict]:
+        """Replies to a comment (nested comments)."""
+        payload = self._get(
+            f"/internal_api/comments/{comment_id}/comments?per_page={per_page}")
+        return (payload.get("records") if isinstance(payload, dict) else payload) or []
+
 
 def _post_id(record: dict):
     return record.get("id") or record.get("post_id")
 
 
+def _tiptap_text(node) -> str:
+    """Flatten Circle's tiptap/ProseMirror JSON body to plain text.
+
+    Posts and comments carry the full body as tiptap_body (structured JSON);
+    truncated_content is only a preview. Walking the tree gets the whole text.
+    """
+    if node is None:
+        return ""
+    if isinstance(node, str):
+        return node
+    out: list[str] = []
+    if isinstance(node, dict):
+        if node.get("type") == "text" and isinstance(node.get("text"), str):
+            out.append(node["text"])
+        for child in (node.get("content") or []):
+            out.append(_tiptap_text(child))
+        # Block nodes -> newline so paragraphs don't run together.
+        if node.get("type") in ("paragraph", "heading", "listItem", "blockquote"):
+            out.append("\n")
+    elif isinstance(node, list):
+        for child in node:
+            out.append(_tiptap_text(child))
+    return "".join(out)
+
+
 def _extract_text(record: dict) -> tuple[str, str]:
     title = strip_html(record.get("name") or record.get("title") or "")
-    body = strip_html(record.get("truncated_content") or "")
+    # Prefer the full tiptap body over the truncated preview.
+    body = _tiptap_text(record.get("tiptap_body")).strip()
+    if not body:
+        body = strip_html(record.get("truncated_content") or "")
     if not body:
         for key in ("body_plain_text", "plain_text", "content", "text"):
             if record.get(key):
@@ -162,14 +212,32 @@ def _extract_text(record: dict) -> tuple[str, str]:
     return title, body
 
 
+def _comment_author(record: dict) -> dict:
+    a = record.get("community_member") or record.get("user") or {}
+    return {
+        "source_author_id": a.get("id"),
+        "display_name": a.get("name") or a.get("full_name"),
+        "profile_url": a.get("url"),
+    }
+
+
 def fetch_space_posts(reader: MemberApiReader, space_id: str | int, *,
                       excluded_content: list[str] | None = None,
-                      max_pages: int = 10) -> list[dict]:
-    """Read + normalize a space's posts for the lead pipeline (same shape as
-    the browser reader's output, so the connector is interchangeable)."""
+                      max_pages: int = 10,
+                      with_comments: bool = True,
+                      max_comment_posts: int = 25) -> list[dict]:
+    """Read + normalize a space's posts (and their comments + replies) for the
+    lead pipeline. Same record shape as the browser reader, so callers are
+    interchangeable.
+
+    ``with_comments`` also pulls comments and their replies for up to
+    ``max_comment_posts`` posts -- hiring intent often lives in a comment
+    ("DM me", "we're looking for…") as much as the post body.
+    """
     community_url = reader.base
     records: list[dict] = []
-    for record in reader.list_posts(space_id, max_pages=max_pages):
+    posts = reader.list_posts(space_id, max_pages=max_pages)
+    for i, record in enumerate(posts):
         pid = _post_id(record)
         if pid is None:
             continue
@@ -177,26 +245,90 @@ def fetch_space_posts(reader: MemberApiReader, space_id: str | int, *,
         text = (f"{title}\n\n{body}".strip()
                 if title and title != body else (body or title))
         text = redact_pii(text, excluded_content)
-        if not text.strip():
-            continue
-        url = record.get("url")
+        if text.strip():
+            url = record.get("url")
+            if url and url.startswith("/"):
+                url = community_url.rstrip("/") + url
+            author = record.get("user") or record.get("community_member") or {}
+            records.append({
+                "source_content_id": str(pid),
+                "content_type": "post",
+                "thread_id": str(pid),
+                "title": title or None,
+                "content": text,
+                "url": url,
+                "published_at": parse_timestamp(
+                    record.get("created_at") or record.get("published_at")),
+                "author": {
+                    "source_author_id": author.get("id"),
+                    "display_name": author.get("name") or author.get("full_name"),
+                    "profile_url": author.get("url"),
+                },
+                "permission_reference": "member_session",
+            })
+
+        # Comments + replies (bounded, so a huge thread can't dominate a scan).
+        if with_comments and i < max_comment_posts and record.get("comments_count") != 0:
+            try:
+                comments = reader.list_comments(pid, max_pages=2)
+            except (SessionInvalid, ChallengeHit):
+                raise
+            except Exception:  # noqa: BLE001 - a comment fetch must not kill the scan
+                comments = []
+            for cm in comments:
+                records.extend(_normalize_comment(
+                    reader, cm, thread_id=str(pid), community_url=community_url,
+                    excluded_content=excluded_content))
+    return records
+
+
+def _normalize_comment(reader, comment: dict, *, thread_id: str,
+                       community_url: str, excluded_content) -> list[dict]:
+    """Normalize a comment plus its replies into lead-pipeline records."""
+    out: list[dict] = []
+    cid = comment.get("id")
+    if cid is None:
+        return out
+    _, body = _extract_text(comment)   # comments have no title
+    body = redact_pii(body, excluded_content)
+    if body.strip():
+        url = comment.get("show_url") or comment.get("url")
         if url and url.startswith("/"):
             url = community_url.rstrip("/") + url
-        author = record.get("user") or record.get("community_member") or {}
-        records.append({
-            "source_content_id": str(pid),
-            "content_type": "post",
-            "thread_id": str(pid),
-            "title": title or None,
-            "content": text,
+        out.append({
+            "source_content_id": f"c{cid}",
+            "content_type": "comment",
+            "thread_id": thread_id,
+            "title": None,
+            "content": body,
             "url": url,
-            "published_at": parse_timestamp(
-                record.get("created_at") or record.get("published_at")),
-            "author": {
-                "source_author_id": author.get("id"),
-                "display_name": author.get("name") or author.get("full_name"),
-                "profile_url": author.get("url"),
-            },
+            "published_at": parse_timestamp(comment.get("created_at")),
+            "author": _comment_author(comment),
             "permission_reference": "member_session",
         })
-    return records
+    # Replies (nested comments).
+    if (comment.get("replies_count") or 0) > 0:
+        try:
+            replies = reader.list_replies(cid)
+        except Exception:  # noqa: BLE001
+            replies = []
+        for rp in replies:
+            rid = rp.get("id")
+            if rid is None:
+                continue
+            _, rbody = _extract_text(rp)
+            rbody = redact_pii(rbody, excluded_content)
+            if not rbody.strip():
+                continue
+            out.append({
+                "source_content_id": f"c{rid}",
+                "content_type": "comment",
+                "thread_id": thread_id,
+                "title": None,
+                "content": rbody,
+                "url": comment.get("show_url"),
+                "published_at": parse_timestamp(rp.get("created_at")),
+                "author": _comment_author(rp),
+                "permission_reference": "member_session",
+            })
+    return out
