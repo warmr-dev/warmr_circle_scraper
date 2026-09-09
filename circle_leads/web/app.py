@@ -268,6 +268,9 @@ def create_app(
         """
         import re as _re
         from urllib.parse import urlparse
+        from circle_leads.discovery.discover_communities import (
+            community_slug_for_host, detect_platform,
+        )
         from circle_leads.scraper.public_reader import PublicReader
         from circle_leads.storage.database import get_or_create_community
         from circle_leads.storage.models import AccessState, PermissionStatus
@@ -285,8 +288,9 @@ def create_app(
                     "community.circle.so", "circle.so", "www.circle.so"):
             raise HTTPException(400, f"{host} is not a community — paste the community's own URL.")
 
-        slug = host.split(".")[0]
+        slug = community_slug_for_host(host)
         url = f"https://{host}"
+        platform = detect_platform(url)
 
         # Probe the public API: reachable? readable spaces? real name?
         readable = False
@@ -309,12 +313,15 @@ def create_app(
             c = get_or_create_community(
                 s, slug=slug, url=url,
                 name=real_name or slug,
+                platform=platform,
                 discovery_source="dashboard:add-by-link",
                 access_status=AccessState.NOT_VISITED.value,
                 permission_status=PermissionStatus.CANDIDATE.value,
             )
             if real_name and (not c.name or c.name == slug):
                 c.name = real_name
+            if platform and c.platform != platform:
+                c.platform = platform
             log_activity(
                 s, kind="review", community=slug,
                 summary=(
@@ -1147,6 +1154,7 @@ def create_app(
                         "slug": c.slug,
                         "name": c.name,
                         "url": c.url,
+                        "platform": c.platform,
                         "price_label": c.price_label,
                         "relevance_score": c.relevance_score,
                         "relevance_reasons": c.relevance_reasons or [],

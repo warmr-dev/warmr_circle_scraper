@@ -137,6 +137,55 @@ def test_harvest_skips_non_subdomain_communities(db, reqs, monkeypatch):
     assert "discover.circle.so" not in " ".join(read)
 
 
+def test_harvest_reads_a_circle_custom_domain(db, reqs, monkeypatch):
+    """platform='circle' on a custom domain is read, not just *.circle.so."""
+    import circle_leads.harvest as h
+    from circle_leads.scraper.public_reader import PublicSpace
+
+    with db.session() as s:
+        c = get_or_create_community(
+            s, slug="forum", url="https://forum.joelpilger.com",
+        )
+        c.platform = "circle"
+        c.relevance_score = 40
+
+    read = []
+    class Reader:
+        def __init__(self, host, **kw):
+            self.base = f"https://{host}"; read.append(host)
+        def list_spaces(self):
+            return [PublicSpace("1", "job-posts", "Job Posts")]
+        def read_space(self, sid, **kw):
+            return True, []
+        def community_name(self): return "Forum"
+    monkeypatch.setattr(h, "PublicReader", Reader)
+    harvest(db, reqs, search=False)
+    assert "forum.joelpilger.com" in read
+
+
+def test_harvest_skips_non_circle_platforms(db, reqs, monkeypatch):
+    """A find classified as facebook/slack is never read."""
+    import circle_leads.harvest as h
+
+    with db.session() as s:
+        c = get_or_create_community(
+            s, slug="fbgroup", url="https://www.facebook.com/groups/devs",
+        )
+        c.platform = "facebook"
+        c.relevance_score = 95  # would be first in line if it were readable
+
+    read = []
+    class Reader:
+        def __init__(self, host, **kw):
+            self.base = f"https://{host}"; read.append(host)
+        def list_spaces(self): return []
+        def read_space(self, sid, **kw): return False, []
+        def community_name(self): return None
+    monkeypatch.setattr(h, "PublicReader", Reader)
+    harvest(db, reqs, search=False)
+    assert not any("facebook.com" in host for host in read)
+
+
 def test_harvest_rereads_known_communities(db, reqs, monkeypatch):
     """A previously-read community is re-read for new posts, not skipped."""
     import circle_leads.harvest as h

@@ -19,6 +19,7 @@ from sqlalchemy import select
 
 from circle_leads.scraper.http_client import shared_session
 
+from circle_leads.discovery.discover_communities import detect_platform
 from circle_leads.discovery.finder import RankedCommunity
 from circle_leads.discovery.validate_finds import (
     is_subdomain_community,
@@ -99,12 +100,14 @@ def persist_finds(
 
     with db.session() as s:
         for rc in validated:
+            platform = detect_platform(rc.join_url, session=http)
             existing = s.scalar(select(Community).where(Community.slug == rc.slug))
             if existing is None:
                 community = Community(
                     slug=rc.slug,
                     name=rc.name,
                     url=rc.join_url,
+                    platform=platform,
                     discovery_source=f"{source}:{niche}" if niche else source,
                     access_status=AccessState.NOT_VISITED.value,
                     permission_status=PermissionStatus.CANDIDATE.value,
@@ -118,6 +121,9 @@ def persist_finds(
                 result.new.append(rc)
             else:
                 changed = False
+                if platform and existing.platform != platform:
+                    existing.platform = platform
+                    changed = True
                 if rc.score > (existing.relevance_score or 0):
                     existing.relevance_score = rc.score
                     existing.relevance_reasons = rc.reasons

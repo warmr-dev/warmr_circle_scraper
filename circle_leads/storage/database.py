@@ -159,6 +159,7 @@ class Database:
         # (table, column, DDL type + default) -- keep in sync with the models.
         additions = [
             ("communities", "watching", "BOOLEAN DEFAULT FALSE"),
+            ("communities", "platform", "VARCHAR(32)"),
             ("leads", "external_synced_at", "TIMESTAMP"),
             ("circle_connections", "priority", "VARCHAR(16) DEFAULT 'normal'"),
             ("circle_connections", "notes", "TEXT"),

@@ -3,10 +3,53 @@ import pytest
 from circle_leads.discovery.discover_communities import (
     community_slug_for_host,
     dedupe,
+    detect_platform,
     extract_from_text,
+    is_circle_platform,
     normalize_community_url,
+    platform_from_host,
 )
 from circle_leads.discovery.validate_community import assess_relevance
+
+
+@pytest.mark.parametrize(
+    "host,expected",
+    [
+        ("foo.circle.so", "circle"),
+        ("startup-founders.circle.so", "circle"),
+        ("discover.circle.so", "circle_infra"),
+        ("app.circle.so", "circle_infra"),
+        ("login.circle.so", "circle_infra"),
+        ("circle.so", "circle_infra"),
+        ("myworkspace.slack.com", "slack"),
+        ("join.slack.com", "slack"),
+        ("www.facebook.com", "facebook"),
+        ("facebook.com", "facebook"),
+        ("some-group.skool.com", "skool"),
+        ("acme.mn.co", "mighty_networks"),
+        ("discord.gg", "discord"),
+        # a bare custom domain can't be judged by name alone
+        ("forum.joelpilger.com", None),
+        ("members.skl.club", None),
+    ],
+)
+def test_platform_from_host(host, expected):
+    assert platform_from_host(host) == expected
+
+
+def test_is_circle_platform():
+    assert is_circle_platform("circle") is True
+    assert is_circle_platform("circle_infra") is False
+    assert is_circle_platform("facebook") is False
+    assert is_circle_platform(None) is False
+
+
+def test_detect_platform_uses_host_heuristics_without_network():
+    # These never touch the network (host is decisive).
+    assert detect_platform("https://foo.circle.so") == "circle"
+    assert detect_platform("https://team.slack.com/join") == "slack"
+    assert detect_platform("https://discover.circle.so/products/x") == "discover"
+    assert detect_platform("manual://flutter-devs") == "other"
 
 
 @pytest.mark.parametrize(
