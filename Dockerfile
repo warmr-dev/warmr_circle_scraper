@@ -6,7 +6,10 @@ WORKDIR /app
 # feed reader in the cloud (private communities). The public harvest doesn't
 # need it, so it's left out to keep the image small. Add it if you need it.
 COPY . .
-RUN pip install --no-cache-dir -e '.[web]'
+# `llm` pulls in openai + anthropic so the classifier's LLM layer works for
+# genuinely ambiguous posts. Without it make_backend() falls back to rules only,
+# even when OPENAI_API_KEY / ANTHROPIC_API_KEY are set.
+RUN pip install --no-cache-dir -e '.[web,llm]'
 
 ENV CIRCLE_LEADS_DB=""
 EXPOSE 8000
