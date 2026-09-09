@@ -1079,6 +1079,94 @@ def dashboard_cmd(ctx, host, port):
     run(host=host, port=port, db=ctx.obj["db"])
 
 
+@cli.command("worker")
+@click.option("--poll-seconds", type=int, default=5, show_default=True,
+              help="Seconds to sleep when the job queue is empty.")
+@click.option("--use-llm", is_flag=True, help="LLM-escalate ambiguous posts.")
+@click.pass_context
+def worker_cmd(ctx, poll_seconds, use_llm):
+    """Always-on worker: drain the scan-job queue and run scheduled harvests.
+
+    Deploy this as the Railway worker service. The dashboard just enqueues jobs
+    (instant); this warm, pooled process does the actual scanning fast -- no
+    serverless timeout, no work inside a web request.
+
+    It handles three job kinds from the queue:
+      scan       -- read one private community (cookie) for posts+comments
+      scan_all   -- read every cookie-backed community, VIP first
+      harvest    -- discover public communities (web search) + read them
+    And on its own it runs the scheduled harvest when the dashboard schedule
+    says it is due.
+    """
+    import time as _t
+
+    db = ctx.obj["db"]
+    req = ctx.obj["requirements"]
+    use_llm = use_llm or bool(os.environ.get("OPENAI_API_KEY"))
+
+    from circle_leads.storage.job_queue import claim_next, complete
+    from circle_leads.scanning import cookie_hosts_vip_first, scan_cookie_host
+    from circle_leads.storage.settings_store import is_harvest_due, mark_harvest_run
+
+    click.echo("Worker started. Draining the scan-job queue; running harvests "
+               "when due. Ctrl-C to stop.")
+
+    def _run_harvest(search: bool = True) -> dict:
+        from circle_leads.harvest import harvest
+        # VIP-first private communities, then the public harvest.
+        priv_leads = 0
+        for h in cookie_hosts_vip_first(db):
+            priv_leads += scan_cookie_host(db, req, h, use_llm=use_llm).get("leads", 0)
+        res = harvest(db, req, verbose_log=True, use_llm=use_llm, search=search)
+        return {"private_leads": priv_leads, "public_leads": res.leads_found,
+                "communities_read": res.communities_read,
+                "new_communities": res.new_communities}
+
+    last_schedule_check = 0.0
+    while True:
+        job = None
+        try:
+            job = claim_next(db)
+        except Exception as exc:  # noqa: BLE001 - a DB blip must not kill the loop
+            click.echo(f"  queue error: {exc.__class__.__name__}", err=True)
+
+        if job is not None:
+            click.echo(f"  job {job.id}: {job.kind} {job.host or ''}")
+            try:
+                if job.kind == "scan" and job.host:
+                    result = scan_cookie_host(db, req, job.host, use_llm=use_llm)
+                elif job.kind == "scan_all":
+                    hosts = cookie_hosts_vip_first(db)
+                    results = [scan_cookie_host(db, req, h, use_llm=use_llm) for h in hosts]
+                    result = {"scanned": len(results),
+                              "leads": sum(r["leads"] for r in results),
+                              "detail": f"scanned {len(results)} communities"}
+                elif job.kind == "harvest":
+                    result = _run_harvest(search=True)
+                else:
+                    result = {"detail": f"unknown job kind {job.kind!r}"}
+                complete(db, job.id, result=result)
+                click.echo(f"    done: {result.get('detail') or result}")
+            except Exception as exc:  # noqa: BLE001 - record and move on
+                complete(db, job.id, result={}, error=f"{exc.__class__.__name__}: {exc}")
+                click.echo(f"    error: {exc}", err=True)
+            continue  # immediately look for the next job
+
+        # Queue empty: check the harvest schedule about once a minute.
+        now = _t.time()
+        if now - last_schedule_check > 60:
+            last_schedule_check = now
+            try:
+                if is_harvest_due(db):
+                    mark_harvest_run(db)
+                    click.echo("  scheduled harvest due -- running")
+                    r = _run_harvest(search=True)
+                    click.echo(f"    harvest: {r}")
+            except Exception as exc:  # noqa: BLE001
+                click.echo(f"  schedule error: {exc.__class__.__name__}", err=True)
+
+        _t.sleep(max(1, poll_seconds))
+
 
 def main() -> None:
     cli(obj={})

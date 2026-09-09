@@ -456,3 +456,40 @@ class ReplaySession(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=utcnow, onupdate=utcnow
     )
+
+
+class JobState(str, enum.Enum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    DONE = "done"
+    ERROR = "error"
+
+
+class ScanJob(Base):
+    """A unit of work the Railway worker executes, enqueued by the dashboard.
+
+    This is the control plane: Vercel (or any dashboard) just writes a row here
+    and returns instantly; the always-on worker polls, claims, and runs it. No
+    heavy work happens inside a web request -- so the UI stays fast and the
+    worker (warm, pooled, no timeout) does the scanning.
+    """
+
+    __tablename__ = "scan_jobs"
+    __table_args__ = (Index("ix_scan_jobs_pick", "state", "priority", "created_at"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    # "scan" (one host) | "scan_all" | "harvest"
+    kind: Mapped[str] = mapped_column(String(32), index=True)
+    host: Mapped[str | None] = mapped_column(String(255))   # for kind=scan
+    priority: Mapped[int] = mapped_column(Integer, default=1)  # 0=VIP first
+
+    state: Mapped[str] = mapped_column(
+        String(16), default=JobState.QUEUED.value, index=True
+    )
+    detail: Mapped[str | None] = mapped_column(Text)
+    result: Mapped[dict | None] = mapped_column(JSON, default=dict)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)

@@ -745,63 +745,43 @@ def create_app(
     def scan_connection_http(
         host: str, _: None = Depends(require_auth)
     ) -> dict[str, Any]:
-        """Read a community over HTTP with its stored session cookie, right now.
+        """Enqueue a scan of one community; the Railway worker runs it.
 
-        Cloud-native: no local connector, no browser. Uses the stored session
-        cookie to call /internal_api and ingest posts.
+        The dashboard does NOT scan inside the request -- it writes a job to the
+        durable queue and returns instantly. The always-on worker (warm, pooled,
+        no timeout) does the actual reading fast. Results appear on the
+        connection row + Activity when the worker finishes.
         """
         from circle_leads.web.replay_store import load_cookies
+        from circle_leads.storage.job_queue import enqueue
         host = _clean_host(host)
         if not load_cookies(db, host):
             raise HTTPException(404, f"No stored session for {host}. Add one first.")
-        # On serverless (Vercel/Lambda) a background thread is killed when the
-        # function freezes after the response, so the scan would never finish.
-        # Run it inline within the request there; use a background job elsewhere.
-        if _is_serverless():
-            # Fit under the function timeout: fewer pages, stop before ~45s.
-            # A partial run is fine -- pressing scan again continues, and dedup
-            # means already-ingested posts are skipped.
-            result = _scan_cookie_host(host, max_pages=1, time_budget=30.0)
-            return {"ok": True, "host": host, "result": result, "sync": True}
-        job = jobs.start("read", f"HTTP scan {host}",
-                         lambda job: job.__setattr__("result", _scan_cookie_host(host)))
-        return {"ok": True, "job_id": job.id, "host": host}
+        # VIP communities enqueue at higher priority (lower number = first).
+        from circle_leads.storage.models import CircleConnection, ConnectionPriority
+        with db.session() as s:
+            conn = s.scalar(select(CircleConnection).where(CircleConnection.host == host))
+            prio = 0 if (conn and conn.priority == ConnectionPriority.VIP.value) else 1
+        job_id = enqueue(db, "scan", host=host, priority=prio)
+        return {"ok": True, "host": host, "queued": True, "job_id": job_id,
+                "note": "Queued — the worker will scan it shortly."}
 
     @app.post("/api/connections/scan-all")
     def scan_all_cookie_hosts(_: None = Depends(require_auth)) -> dict[str, Any]:
-        """Scan every cookie-backed community, VIP first (paused excluded)."""
+        """Enqueue a VIP-first scan of every cookie-backed community."""
+        from circle_leads.storage.job_queue import enqueue
         hosts = _cookie_hosts_vip_first()
         if not hosts:
             raise HTTPException(400, "No communities have a session cookie yet.")
+        job_id = enqueue(db, "scan_all", priority=0)
+        return {"ok": True, "queued": True, "job_id": job_id, "hosts": hosts,
+                "note": "Queued — the worker will scan them VIP-first."}
 
-        if _is_serverless():
-            # Background threads die on Vercel, and scanning many communities
-            # would exceed the function timeout. Scan within a time budget,
-            # VIP first; the response says how many remain so the UI calls again.
-            import time as _t
-            started = _t.time()
-            done = []
-            remaining = list(hosts)
-            for h in hosts:
-                if _t.time() - started > 30.0:
-                    break
-                done.append(_scan_cookie_host(h, max_pages=1, time_budget=15.0))
-                remaining.remove(h)
-            return {"ok": True, "sync": True, "scanned": len(done),
-                    "leads": sum(r["leads"] for r in done),
-                    "results": done, "remaining": remaining}
-
-        def _run(job):
-            results = []
-            for h in hosts:
-                results.append(_scan_cookie_host(h))
-                job.detail = f"scanned {len(results)}/{len(hosts)} (VIP first)"
-            job.result = {"scanned": len(results),
-                          "leads": sum(r["leads"] for r in results),
-                          "order": hosts}
-
-        job = jobs.start("read", f"Scan {len(hosts)} communities (VIP first)", _run)
-        return {"ok": True, "job_id": job.id, "hosts": hosts}
+    @app.get("/api/scan-jobs")
+    def list_scan_jobs(_: None = Depends(require_auth)) -> dict[str, Any]:
+        """Recent scan-queue jobs (queued/running/done) for the dashboard."""
+        from circle_leads.storage.job_queue import recent
+        return {"jobs": recent(db, limit=20)}
 
     @app.post("/api/connections/{host}/priority")
     def set_connection_priority(
@@ -1259,29 +1239,14 @@ def create_app(
             lane = "fast read" if fast_lane else "full"
             job.detail = f"Scheduled harvest ({lane}): {res.leads_found} lead(s)"
 
-        if _is_serverless():
-            # A background thread would be killed when the function freezes, and
-            # a full harvest (discovery + web search + reading many communities)
-            # can't finish in one function timeout. So on serverless the tick
-            # scans only the VIP-first private communities inline (fast, bounded)
-            # and leaves the heavy public harvest to the always-on worker.
-            hosts = _cookie_hosts_vip_first()
-            import time as _time
-            started = _time.time()
-            scanned = 0
-            leads = 0
-            for h in hosts:
-                if _time.time() - started > 40.0:
-                    break
-                r = _scan_cookie_host(h, max_pages=1, time_budget=15.0)
-                scanned += 1
-                leads += r.get("leads", 0)
-            return {"ran": True, "mode": "serverless-private-only",
-                    "scanned": scanned, "leads": leads,
-                    "note": "Public harvest runs on the worker, not on serverless."}
-
-        jobs.start("harvest", "Scheduled harvest (tick)", run)
-        return {"ran": True, "fast_lane": fast_lane, "searched": do_search}
+        # The tick just ENQUEUES a harvest job; the always-on worker runs it.
+        # No heavy work in the request -- so this is instant and works on
+        # serverless too. (The worker also checks the schedule itself, so this
+        # is belt-and-suspenders for a cron pinger.)
+        from circle_leads.storage.job_queue import enqueue
+        job_id = enqueue(db, "harvest", priority=1)
+        return {"ran": True, "queued": True, "job_id": job_id,
+                "note": "Harvest queued for the worker."}
 
     @app.get("/api/schedule")
     def api_schedule(_: None = Depends(require_auth)) -> dict[str, Any]:

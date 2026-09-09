@@ -452,7 +452,8 @@
     <div class="panel" style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
       <div>
         <h2 style="margin:0 0 2px">Scan all (VIP first)</h2>
-        <span class="muted" style="font-size:13px">Reads every community that has a session cookie, VIP priority first.</span>
+        <span class="muted" style="font-size:13px">Queues every community that has a session cookie, VIP first. The worker scans them.</span>
+        <div id="scan-jobs-status" class="muted" style="font-size:12px;margin-top:4px"></div>
       </div>
       <button class="action" id="conn-scan-all">Scan all now</button>
     </div>
@@ -983,7 +984,34 @@ const CONN_STATE = {
   error: ['Error', 'var(--danger)', '✗'],
 };
 
+// Poll the scan-job queue; when jobs finish, refresh the connection list.
+let scanJobTimer = null;
+async function pollScanJobs() {
+  const d = await api('/api/scan-jobs');
+  if (!d) return;
+  const active = (d.jobs || []).filter(j => j.state === 'queued' || j.state === 'running');
+  const box = $('scan-jobs-status');
+  if (box) {
+    box.innerHTML = active.length
+      ? '⏳ ' + active.map(j => `${esc(j.kind)}${j.host ? ' ' + esc(j.host) : ''} (${j.state})`).join(', ')
+      : (d.jobs && d.jobs.length ? '✓ worker idle — last: ' + esc((d.jobs[0].detail || d.jobs[0].state)) : 'No jobs yet.');
+  }
+  if (scanJobTimer) { clearInterval(scanJobTimer); scanJobTimer = null; }
+  if (active.length) {
+    scanJobTimer = setInterval(async () => {
+      const dd = await api('/api/scan-jobs');
+      if (!dd) return;
+      const still = (dd.jobs || []).filter(j => j.state === 'queued' || j.state === 'running');
+      if (box) box.innerHTML = still.length
+        ? '⏳ ' + still.map(j => `${esc(j.kind)}${j.host ? ' ' + esc(j.host) : ''} (${j.state})`).join(', ')
+        : '✓ done';
+      if (!still.length) { clearInterval(scanJobTimer); scanJobTimer = null; loadConnector(); }
+    }, 3000);
+  }
+}
+
 async function loadConnector() {
+  pollScanJobs();
   const data = await api('/api/connections');
   if (!data) return;
   if (!data.connections.length) {
@@ -1093,13 +1121,8 @@ if (scanAllBtn) scanAllBtn.addEventListener('click', async () => {
   scanAllBtn.textContent = 'Scanning…';
   try {
     const r = await api('/api/connections/scan-all', { method: 'POST' });
-    if (r && r.sync) {
-      const more = r.remaining && r.remaining.length ? ` — ${r.remaining.length} more, press again` : '';
-      toast(`Scanned ${r.scanned}, ${r.leads} lead(s)${more}`);
-    } else if (r) {
-      toast(`Scanning ${r.hosts.length} communit${r.hosts.length===1?'y':'ies'} (VIP first)…`);
-    }
-    loadConnector();
+    if (r) toast(`Queued ${r.hosts.length} communit${r.hosts.length===1?'y':'ies'} (VIP first) — the worker is scanning.`);
+    pollScanJobs();
   } catch (e) { toast(String(e.message || e).slice(0, 200)); }
   finally { scanAllBtn.disabled = false; scanAllBtn.textContent = orig; }
 });
@@ -1169,14 +1192,8 @@ document.addEventListener('click', async (event) => {
     scan.textContent = 'Scanning…';
     try {
       const r = await api(`/api/connections/${encodeURIComponent(host)}/scan`, { method: 'POST' });
-      if (r && r.sync && r.result) {
-        // Serverless: the scan ran inline; show the outcome now.
-        const res = r.result;
-        toast(`${host}: ${res.posts} post(s), ${res.leads} lead(s) — ${res.state}`);
-      } else if (r) {
-        toast(`Scanning ${host}…`);   // background job (non-serverless)
-      }
-      loadConnector();
+      if (r) toast(`Queued ${host} — the worker is scanning.`);
+      pollScanJobs();
     } catch (e) { toast(String(e.message || e).slice(0, 200)); }
     finally { scan.disabled = false; scan.textContent = orig; }
     return;

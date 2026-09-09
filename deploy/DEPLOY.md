@@ -70,14 +70,24 @@ Env:   CIRCLE_LEADS_DB, DASHBOARD_PASSWORD, DASHBOARD_SECRET_KEY,
        DASHBOARD_HTTPS=true, EXA_API_KEY, OPENAI_API_KEY
 ```
 
-**Service 2 — worker (the harvest):**
+**Service 2 — worker (does ALL the scanning + harvest):**
 
-The recommended shape on Railway is an **always-on worker** that reads the
-dashboard-set schedule from the DB and harvests when due:
+The always-on worker drains the **scan-job queue** (private-community scans the
+dashboard enqueues) AND runs the scheduled public harvest. The dashboard/UI
+never scans inside a request -- it just writes a job; this warm, pooled process
+does the work fast, with no serverless timeout:
 ```
-Start: circle-leads --db "$CIRCLE_LEADS_DB" harvest --loop --poll-seconds 60
-Env:   CIRCLE_LEADS_DB, EXA_API_KEY, OPENAI_API_KEY
+Start: circle-leads --db "$CIRCLE_LEADS_DB" worker
+Env:   CIRCLE_LEADS_DB, EXA_API_KEY, OPENAI_API_KEY, CIRCLE_CRED_KEY
 ```
+`worker` loops forever: it claims and runs queued scan/scan_all/harvest jobs
+immediately, and when the queue is empty it checks the dashboard schedule and
+harvests when due. Deploy this on Railway (a persistent process); point the
+Vercel dashboard at the same `CIRCLE_LEADS_DB`, and pressing "Scan now" there
+returns instantly while the worker does the reading.
+
+(The older `harvest --loop --poll-seconds 60` still works for harvest-only, but
+`worker` is preferred -- it also drains the scan queue.)
 `--loop` runs forever: every `--poll-seconds` it checks `is_harvest_due` (the
 interval you picked in the dashboard Config tab, down to every 5 min) and only
 harvests when due. So the worker is a *fixed* frequent poller; the *actual*
