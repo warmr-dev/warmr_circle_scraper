@@ -1,11 +1,39 @@
 import pytest
 
 from circle_leads.discovery.discover_communities import (
+    community_slug_for_host,
     dedupe,
     extract_from_text,
     normalize_community_url,
 )
 from circle_leads.discovery.validate_community import assess_relevance
+
+
+@pytest.mark.parametrize(
+    "host,expected",
+    [
+        ("foo.circle.so", "foo"),
+        ("startup-founders.circle.so", "startup-founders"),
+        # custom domains: the collision cases that motivated this helper
+        ("www.siliconslopes.com", "siliconslopes"),
+        ("www.yourspinstate.com", "yourspinstate"),
+        ("community.bigstarlights.com", "bigstarlights"),
+        ("siliconslopes.com", "siliconslopes"),
+        ("portal.acme.io", "acme"),
+        # two-part public suffixes
+        ("example.co.uk", "example"),
+        ("www.example.co.uk", "example"),
+        ("", "unknown"),
+    ],
+)
+def test_community_slug_for_host(host, expected):
+    assert community_slug_for_host(host) == expected
+
+
+def test_slug_helper_does_not_collapse_unrelated_www_hosts():
+    a = community_slug_for_host("www.siliconslopes.com")
+    b = community_slug_for_host("www.yourspinstate.com")
+    assert a != b  # the old host.split(".")[0] made both "www"
 
 
 @pytest.mark.parametrize(

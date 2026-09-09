@@ -49,6 +49,45 @@ class DiscoveredCommunity:
     metadata: dict = field(default_factory=dict)
 
 
+# Leading host labels that identify infrastructure, not the community itself.
+# Stripped before deriving a slug so `www.acme.com` and `community.acme.com`
+# don't collapse to different first labels for the same organisation.
+_INFRA_HOST_LABELS = {
+    "www", "app", "apps", "community", "communities", "portal", "hub", "go",
+    "my", "members", "member", "login", "get", "join", "circle", "space",
+}
+
+
+def community_slug_for_host(host: str) -> str:
+    """A stable, collision-resistant community slug for any host.
+
+    - `foo.circle.so`            -> `foo`   (the subdomain label)
+    - `www.siliconslopes.com`    -> `siliconslopes`
+    - `community.bigstarlights.com` -> `bigstarlights`
+    - `siliconslopes.com`        -> `siliconslopes`
+
+    The old `host.split(".")[0]` collapsed every `www.*` host to `www` and
+    every `community.*` host to `community`, so unrelated communities landed
+    on one row. Two-part public suffixes (`example.co.uk`) fall back to the
+    label before the suffix pair, which is good enough here -- `get_or_create_
+    community` also matches on the (unique) URL.
+    """
+    host = (host or "").strip().lower().strip(".")
+    if not host:
+        return "unknown"
+    if host.endswith(".circle.so"):
+        return host[: -len(".circle.so")].split(".")[-1] or "circle"
+    labels = host.split(".")
+    if len(labels) <= 2:
+        return labels[0]
+    if labels[0] in _INFRA_HOST_LABELS:
+        labels = labels[1:]
+    if len(labels) <= 2:
+        return labels[0]
+    # 3+ labels remain: assume the last two are a public suffix (co.uk, com.au).
+    return labels[-3]
+
+
 def normalize_community_url(url: str) -> tuple[str, str] | None:
     """Return (slug, canonical_url) for a Circle community URL, else None."""
     url = (url or "").strip()
