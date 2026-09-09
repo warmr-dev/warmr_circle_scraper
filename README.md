@@ -1,307 +1,271 @@
 # Warmr Circle
 
-Finds posts where **someone wants to hire** across Circle.so communities you are
-authorized to read, and filters out **people looking for work**.
+Finds posts where **someone wants to hire** across Circle.so communities — your
+own private ones and public ones — and filters out people who are **looking for
+work**.
 
 ```
-"We are looking for a backend developer."      -> LEAD
-"I am looking for a job as a software engineer." -> NOT_LEAD
+"We are looking for a backend developer."         -> LEAD
+"I am looking for a job as a software engineer."  -> NOT_LEAD
 ```
+
+It reads your **private paid communities** with your own session, reads **public**
+communities with no login, classifies every post/comment as hire-vs-seek, scores
+and de-duplicates the leads, and surfaces them in a dashboard. The heavy work runs
+on an always-on worker; the dashboard stays instant.
 
 ---
 
-## Read this first: how this differs from a browser scraper
+## How it reads Circle (the honest version)
 
-The original brief asked for a Playwright scraper driving a logged-in Circle
-session. **This project does not do that**, because it cannot be done within
-Circle's rules:
+This project was built on a specific, tested finding — not on assumptions:
 
-- Circle's [Platform Terms](https://circle.so/terms) prohibit third-party
-  applications and scripts that scrape or extract data without Circle's prior
-  written consent.
-- A member account is not an API credential. Circle deliberately separates
-  admin automation (Admin API tokens, created by a community admin) from
-  member-side access (Headless JWTs, minted by the community's own Headless
-  Auth token). One personal login is not designed to become a cross-community
-  extraction key.
-- `robots.txt` permitting crawlers does not override an account-level
-  contractual restriction, and it says nothing about logged-in member content.
+**Circle has no member API.** Verified against Circle's live OpenAPI specs: no
+member OAuth, no member personal-access token, and no "list my communities"
+endpoint. Every official API token is created by a community **admin** and scoped
+to one community. So an official-API integration would need each community's
+operator to hand you a token.
+→ [`docs/circle_auth_investigation.md`](docs/circle_auth_investigation.md)
 
-So ingestion runs on Circle's **official APIs**, authorized per community by
-that community's operator. Everything else in the brief — discovery, relevance
-filtering, incremental collection, the hiring-vs-seeking classifier, extraction,
-scoring, deduplication, search, and export — is implemented as specified.
+**But Circle's `/internal_api/*` JSON works with your own session cookie.** The
+endpoints Circle's own web app calls (`/internal_api/spaces`,
+`/spaces/{id}/posts`, `/posts/{id}/comments`, `/comments/{id}/comments`) return
+real JSON to an ordinary HTTPS client carrying your member session cookie —
+**and they are not behind the Cloudflare challenge** that gates the HTML pages.
+So the app reads your communities over plain HTTP, with **no browser**, from
+anywhere.
+→ [`docs/circle_auth_investigation.md`](docs/circle_auth_investigation.md), and
+the endpoint map in the project memory.
 
-The trade-off is real: this takes longer to set up, and it will not let you
-point the tool at an arbitrary community and start reading. What it gives you is
-access that does not break, does not risk your account, and produces data you
-can actually act on.
+Two cookies are required per community (`_circle_session` +
+`user_session_identifier`), and Circle scopes a session **per subdomain**, so you
+provide one cookie set per community. Approaches that were built, measured, and
+**do not work** — a server-hosted browser and cookie-replay-in-a-fresh-browser
+(both hit Cloudflare), and an automated password login (Turnstile on the login
+form) — are documented in [`docs/remote_browser_poc.md`](docs/remote_browser_poc.md)
+and kept behind an off-by-default flag as evidence.
 
-### What the tool will and will not do
+### What it reads, and what it can't
 
 | | |
 |---|---|
-| Discover communities from public listings and your own lists | Yes |
-| Check a public landing page to see whether a community exists | Yes |
-| Read posts, comments, and group chats you are **approved** to read | Yes |
-| Classify, score, deduplicate, search, and export | Yes |
-| Reuse your browser cookies or automate your logged-in session | **No** |
-| Call undocumented endpoints, or bypass a login, paywall, or CAPTCHA | **No** |
-| Read direct messages | **No** — excluded by an allowlist that fails closed |
-| Ingest a community without recorded operator approval | **No** |
-| Automate signup, join requests, or repeated join attempts | **No** |
-
----
-
-## Install
-
-Requires Python 3.11+.
-
-```bash
-python3 -m venv .venv && source .venv/bin/activate
-pip install -e .            # add '.[llm]' for semantic classification
-```
-
-## Quick start
-
-```bash
-# 1. Record candidate communities (public metadata only)
-circle-leads discover --from-file my_communities.txt
-circle-leads communities
-
-# 2. Get operator approval  (see docs/operator_request.md), then create
-#    circle_leads/config/communities/<community>.yaml from the template
-#    and set permission_status: approved
-
-# 3. Put the operator-issued tokens in your environment
-cp .env.example .env && $EDITOR .env && set -a && source .env && set +a
-
-# 4. Collect, classify, score
-circle-leads run --use-llm
-
-# 5. Review and export
-circle-leads search --role "Backend Developer" --skills "Python,AWS"
-circle-leads export --format csv --priority HIGH -o exports/leads.csv
-```
-
-Every command accepts `--db` and `--config`. Run `circle-leads -h` for the full
-list.
-
-**New here? Read [docs/HOWTO.md](docs/HOWTO.md)** — how each stage works, plus
-setup, daily use, tuning, and troubleshooting.
-
----
-
-## Private communities: the Circle Connector
-
-Public/free communities are read directly with no login. For **private
-communities you are a member of**, use the **Circle Connector**: you log into
-each community yourself in a real browser on your own machine, and a small local
-process reads what your account can see and uploads only the normalized text to
-your Railway backend. Your Circle password, cookies, and session never leave your
-computer.
-
-```bash
-# On your computer, once:
-pip install 'circle-leads[browser]'
-playwright install chromium
-
-# Pair with your deployed backend (get the code from the dashboard's
-# "Circle Connector" tab → "Pair a local connector"):
-circle-connector pair --backend https://<your-app>.up.railway.app --code <CODE>
-
-# Add the community host in the dashboard, then log in yourself:
-circle-connector login altea.circle.so     # a browser opens; you sign in
-circle-connector run  altea.circle.so       # read + upload on a loop
-```
-
-Circle has no "list my communities" API, so you add each community host
-explicitly; spaces inside an authenticated community are discovered
-automatically. The connector accesses only content exposed to your authenticated
-browser session — spaces your account cannot access are not scraped.
-
-**Full walkthrough: [docs/connector.md](docs/connector.md)** — Railway deploy,
-env vars, pairing, session expiry, and the security model.
-
-### Why the browser is local and not on Railway
-
-Two questions get asked often enough to have written answers:
-
-- **"Can't we just use Circle's API as a member?"** No. There is no member
-  OAuth, no member personal-access token, and no endpoint listing the
-  communities you belong to. Verified against Circle's live OpenAPI specs —
-  `grep -ic oauth` returns 0 across all three, the member JWT is minted by an
-  *admin* and locked to one `community_id`.
-  → **[docs/circle_auth_investigation.md](docs/circle_auth_investigation.md)**
-
-- **"Can't the browser run on Railway, so I log in there instead?"** It was
-  built and measured. Circle serves an automated browser a Cloudflare
-  "Verifying you are a human" interstitial — reproduced on 4/4 communities,
-  *from a residential IP*, so it is anti-automation rather than anti-datacenter.
-  Railway would fare worse. The PoC stops and reports rather than trying to
-  defeat it.
-  → **[docs/remote_browser_poc.md](docs/remote_browser_poc.md)**
+| Your **private** communities (posts, comments, replies), via your session cookie | ✅ |
+| Full post/comment text (flattened from Circle's rich-text body, not truncated) | ✅ |
+| **Public** communities (posts), no login | ✅ |
+| Discover new communities by web search; re-scan existing ones | ✅ |
+| Classify hire-vs-seek, extract role/skills/budget, score, de-duplicate, export | ✅ |
+| **Chat / DMs** | ❌ separate real-time service with its own token; not scraped |
+| Defeat a Cloudflare / CAPTCHA challenge | ❌ never — it stops and reports |
 
 ---
 
 ## Architecture
 
-```
-circle_leads/
-├── discovery/         discover_communities.py, validate_community.py
-├── authentication/    browser_session.py   (token resolution, JWT minting)
-├── scraper/           community_scraper.py, posts_scraper.py,
-│                      comments_scraper.py, chat_scraper.py,
-│                      normalize.py, pagination.py
-├── classifier/        lead_classifier.py, keyword_rules.py,
-│                      ai_classifier.py, extraction.py
-├── storage/           database.py, models.py
-├── scoring/           lead_scoring.py
-├── export/            exporters.py
-├── config/            requirements.yaml, settings.py, communities/
-├── cli/               main.py
-└── pipeline.py        orchestration
-```
-
-Pipeline:
+Three moving parts. The dashboard never does heavy work in a request — it writes
+a job; the worker does the scanning.
 
 ```
-discover -> validate -> check relevance -> [operator approval]
-   -> ingest approved spaces -> normalize -> deduplicate
-   -> rule classification -> LLM escalation (ambiguous only)
-   -> extract -> score -> store -> export -> human review
+                    ┌─────────────────────────┐
+                    │        Supabase         │  (Postgres)
+                    │  communities · posts    │
+                    │  leads · scan_jobs      │  ← the queue
+                    │  scan sessions · config │
+                    └────────▲───────▲────────┘
+             enqueue job     │       │   claim + run job
+          ┌──────────────────┘       └──────────────────┐
+          │                                              │
+ ┌────────┴─────────┐                          ┌─────────┴──────────┐
+ │  Dashboard (UI)  │                          │  Worker (always-on)│
+ │  Vercel/Render   │                          │  Railway/Render    │
+ │                  │                          │                    │
+ │ press "Scan now" │  → writes scan_jobs row →│ polls the queue,   │
+ │ returns in ~40ms │                          │ scans /internal_api│
+ │ shows leads      │                          │ VIP first, then    │
+ │                  │                          │ public harvest     │
+ └──────────────────┘                          └─────────┬──────────┘
+                                                          │  your session cookie
+                                                          ▼
+                                                      Circle.so
 ```
+
+- **Dashboard** — the web app (`circle-leads dashboard`). Login, communities,
+  leads, config. Pressing *Scan now* / *Scan all* just **enqueues** a job and
+  returns instantly (~40 ms); it never scans inside the request. Runs fine on
+  serverless (Vercel) because it does no long work.
+- **Worker** — `circle-leads worker`, an always-on process. It drains the
+  `scan_jobs` queue (private-community scans, VIP-first) and runs the scheduled
+  **public harvest** (web-search discovery + reading). Warm, pooled, no timeout —
+  this is where all the actual reading happens.
+- **Supabase** — one Postgres database, shared by both. Holds communities,
+  posts, leads, the job queue, encrypted session cookies, and settings.
+
+Why the split: a serverless function times out (~60 s) and kills background
+threads, so scanning many spaces inside a Vercel request fails. Enqueue-and-let-
+the-worker-run makes the UI instant and the scanning unbounded.
 
 ---
 
-## Classification
-
-The hard part is that hiring and job-seeking use nearly identical words. The
-system decides by asking **who is being searched for** and **who performs the
-work**, not by keyword presence.
-
-**Layer 1 — rules** (deterministic, explainable, always runs). Weighted patterns
-for hiring intent, job-seeking intent, negation, and hypotheticals. The decisive
-test is whether the *object of the search* is a person or employment:
+## Data flow
 
 ```
-"looking for a software engineer"          object = a person      -> +
-"looking for a job as a software engineer" object = employment    -> −
+discover (web search) ─┐
+                       ├─→ read spaces → posts + comments + replies
+your private cookies ──┘         │
+                                 ▼
+                    normalize (flatten rich text, redact PII)
+                                 │
+                                 ▼
+             classify: rules → LLM escalation (ambiguous only)
+                                 │
+                                 ▼
+            hire? → extract role/skills/budget → score → de-dup
+                                 │
+                                 ▼
+                     store lead → dashboard → export (Vini)
 ```
 
-Negation ("we are not hiring", "role has been filled") is a hard disqualifier.
-Confident scores settle the case without spending an API call.
+**Classification** is the hard part: hiring and job-seeking use nearly identical
+words. The decisive test is *who is the object of the search* — a person to hire
+(LEAD) or employment for oneself (NOT_LEAD). Layer 1 is deterministic weighted
+rules; only genuinely ambiguous posts escalate to an LLM (`--use-llm` /
+`OPENAI_API_KEY`). Every lead keeps an exact evidence quote and which layer
+decided it.
 
-**Layer 2 — LLM** (only for genuinely ambiguous posts). Two guardrails:
+---
 
-- `evidence_quote` must be an **exact substring** of the source. A LEAD verdict
-  the model cannot ground in real words is downgraded to `UNCERTAIN`, not
-  trusted.
-- Extracted `budget` and `company` are discarded unless they appear in the
-  source, so a reviewer never sees an invented number.
+## Quick start (local)
 
-**Layer 3 — extraction.** Job title, skills, employment type, engagement type
-(individual / agency / freelancer / contractor / technical cofounder /
-full-time / part-time), company, budget, location, urgency.
+Requires Python 3.11+.
 
-Every stored lead keeps its evidence quote, reason, rule score breakdown, and
-which layer decided — so a reviewer can see *why*.
-
-## Scoring
-
-```
-hiring intent  +40    budget mentioned    +10
-target role    +20    company identified   +5
-target skill   +15    recent post         +10
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e '.[web]'            # dashboard + Postgres driver
+# optional: '.[llm]' for LLM classification, '.[crypto]' to encrypt stored cookies
 ```
 
-Scaled by classifier confidence, clamped to 0–100.
-`HIGH 80–100 · MEDIUM 50–79 · LOW 0–49`. All weights and thresholds live in
-`requirements.yaml`.
+```bash
+export DASHBOARD_PASSWORD='a-password-8-chars-min'
+export CIRCLE_LEADS_DB='postgresql://…:6543/postgres'   # Supabase; omit for local SQLite
 
-## Deduplication
+circle-leads dashboard          # the UI at http://127.0.0.1:8000
+circle-leads worker             # in another terminal: drains the queue + harvests
+```
 
-Three layers: `(community, source_content_id, content_type)` identity for
-idempotent re-runs, a normalized content hash for exact duplicates, and a
-token-shingle SimHash for near-duplicates (reposts, light edits). The SimHash
-tolerance scales with text length, since one added word shifts a larger share of
-a short post's shingles. Edited content is re-queued for classification rather
-than keeping a stale verdict.
+Then in the dashboard → **Circle Connector** tab:
 
-## Configuration
+1. **Add a community** (e.g. `mycommunity.circle.so`), set its priority (VIP first).
+2. **Add its session cookie** — log into that community in your browser, export
+   its cookies, and paste the JSON (or the two values). Needs `_circle_session`
+   and `user_session_identifier`. Stored encrypted if `CIRCLE_CRED_KEY` is set,
+   else plaintext.
+3. **Scan now** — the worker reads it; leads appear on the **Leads** tab.
 
-All lead requirements live in `circle_leads/config/requirements.yaml`: target
-roles and skills, confidence threshold, keyword lists, scoring weights,
-priority bands, excluded content types, retention, and rate limits. Change them
-and re-run `classify` — no code changes.
+---
 
-Per-community authorization lives in `circle_leads/config/communities/*.yaml`,
-one file each, holding the approved spaces and rooms and the **names** of the
-environment variables that hold the tokens.
+## Deploy (dashboard + worker + Supabase)
+
+Do **not** run the scanning on serverless — that's what the worker is for.
+
+**Supabase** — create the tables once, then point both services at it:
+```
+CIRCLE_LEADS_DB = postgresql://postgres.<ref>:<pw>@aws-0-<region>.pooler.supabase.com:6543/postgres
+```
+Use the **transaction pooler (port 6543)** — session mode (5432) exhausts the
+connection cap and hangs. The code auto-rewrites 5432→6543 for Supabase URLs, but
+set 6543 explicitly. See [`deploy/DEPLOY.md`](deploy/DEPLOY.md).
+
+**Dashboard** (Vercel/Render):
+```
+Start: circle-leads dashboard --host 0.0.0.0 --port $PORT
+Env:   CIRCLE_LEADS_DB, DASHBOARD_PASSWORD, DASHBOARD_HTTPS=true, CIRCLE_CRED_KEY,
+       SKIP_DB_INIT=true   # after tables exist
+```
+On Vercel the entrypoint is the lazy `app.py` (`tool.vercel.entrypoint`), which
+imports without a DB so the build can't crash. `/api/health` reports DB status.
+
+**Worker** (Railway/Render — an always-on process):
+```
+Start: circle-leads worker
+Env:   CIRCLE_LEADS_DB, EXA_API_KEY, OPENAI_API_KEY, CIRCLE_CRED_KEY
+```
+
+Full guide, including the Vercel/Supabase pooler gotchas and the read-only-config
+fix: [`deploy/DEPLOY.md`](deploy/DEPLOY.md).
+
+---
+
+## Scheduling
+
+Set the harvest cadence in the dashboard's **Config** tab (stored in the DB). The
+**worker** checks it and harvests when due — no external cron needed. If you run
+the dashboard without a worker, an external pinger can hit
+`GET /api/tick?token=<TICK_TOKEN>`, which enqueues a harvest job for the worker.
+
+---
+
+## Repository layout
+
+```
+circle_leads/
+├── scanning.py          scan_cookie_host, cookie_hosts_vip_first (shared by app + worker)
+├── harvest.py           public discovery (web search) + read + classify
+├── pipeline.py          orchestration
+├── scraper/
+│   ├── member_api_reader.py   /internal_api reader: spaces, posts, comments, replies
+│   ├── public_reader.py       public communities (no login)
+│   └── normalize.py           rich-text flattening, PII redaction
+├── discovery/           web search (Exa/Brave/DDG), validate, persist communities
+├── classifier/          rules → LLM escalation, extraction
+├── scoring/             lead scoring + priority
+├── triage/              per-post classify/score/store loop
+├── storage/
+│   ├── models.py        the Supabase schema (12 tables)
+│   ├── job_queue.py     the durable scan-job queue (enqueue, atomic claim, complete)
+│   ├── database.py      engine (Supabase pooler tuning, shared_session batching)
+│   └── replay_store.py  encrypted-at-rest session cookies, per community
+├── web/
+│   ├── app.py           the dashboard API (enqueues jobs; never scans inline)
+│   └── static/index.html the dashboard UI
+├── cli/main.py          circle-leads … (dashboard, worker, harvest, run, export, …)
+└── remote_browser/      the measured-not-viable PoCs (server browser, cookie replay), off by default
+```
+
+**Supabase tables:** `communities`, `spaces`, `authors`, `posts`, `leads`,
+`activity_log`, `settings`, `scrape_runs`, `circle_connections`,
+`replay_sessions` (encrypted cookies), `scan_jobs` (the queue), `connectors`.
 
 ---
 
 ## Security
 
-- **No credentials in source or Git.** Tokens are read from the environment at
-  call time. Permission files store variable *names*, never values. `.env`,
-  `data/`, and `exports/` are gitignored.
-- **Nothing is logged.** `AdminCredentials` and `MemberSession` redact their
-  tokens in `repr()`; a `redact()` helper strips `Authorization` and `Cookie`
-  before any header reaches a log.
-- **DMs are excluded by an allowlist that fails closed.** Circle's Headless
-  `/messages` endpoint returns direct messages by default and offers no
-  server-side filter, so rooms are collected only when positively identified as
-  `group_chat`. An unrecognized or missing room kind is treated as a DM. Filtering
-  happens *before* any message fetch, so DM content is never requested.
-- **401/403 is a stop condition, not a retry.** Retrying an authorization
-  failure would also burn the monthly API allowance.
-- **Rate limits.** Circle documents 2,000 requests / 5 min per IP, a monthly
-  allowance as low as 5,000 on Business plans, and counts 429s against it. The
-  client uses a token bucket, exponential backoff with jitter, a 60-second
-  cooldown on 429, and an optional `--request-budget` hard stop.
-- **PII.** Emails and phone numbers are stripped at ingestion on every path.
-  Phone matching requires positive evidence (an E.164 `+`, parenthesized area
-  code, separator-joined national form, or a `phone`/`call`/`whatsapp` cue) so
-  it does not shred the budget figures the scorer depends on.
-- **Exports are formula-escaped.** Author names and post bodies are written by
-  community members; a cell starting `=`, `+`, `-`, `@`, tab, or CR is quoted so
-  a spreadsheet cannot execute it.
-- **Deduplication is scoped per community**, so separately consented datasets
-  are never linked.
-- **Retention and kill switch.** `circle-leads purge --expired` drops content
-  past the configured window; `purge --community <slug>` deletes a community's
-  stored content and marks it revoked.
+- **Session cookies are encrypted at rest** (AES-GCM) when `CIRCLE_CRED_KEY` is
+  set; stored plaintext otherwise (your choice). Never logged, never returned to
+  the frontend. One cookie set per community; delete/clear from the dashboard.
+- **The `replay_sessions` table holds live member sessions.** Keep it off the
+  Supabase anon/public API (enable RLS with no anon policy). The app connects as
+  the Postgres owner, which bypasses RLS.
+- **No Circle password is ever handled by the app** — you log into Circle
+  yourself and hand over only the resulting session cookie.
+- **Challenges are a stop signal, never bypassed.** Nothing here solves a CAPTCHA,
+  spoofs a fingerprint, or evades Cloudflare; a challenge is reported and the run
+  stops.
+- **Rotate a cookie if it's exposed** (log out/in on that community). Cookies
+  expire; re-paste when a scan reports the session expired.
 
-## Review before outreach
-
-Leads are candidates, not verdicts. "Looking for a developer" can be a genuine
-request, self-promotion, a joke, or a quotation. Review the permalink and the
-surrounding thread before contacting anyone, prefer replying in the original
-thread where community norms allow it, and follow the operator's rules on
-commercial replies.
+---
 
 ## Tests
 
 ```bash
-pytest -q      # 166 tests
+pip install -e '.[dev]' && pytest        # 548 tests, offline (no network, no browser)
 ```
 
-Covers every LEAD/NOT_LEAD example in the specification, the authorization
-boundaries (DM exclusion, space allowlisting, permission gating, credential
-redaction), the LLM guardrails, rate limiting and retry behavior, deduplication,
-and a full ingest-classify-export run against a mocked API.
+---
 
-## Limitations
+## Further reading
 
-- Requires per-community operator cooperation. There is no path here that reads
-  a community you have not been approved for.
-- Chat collection needs the operator's Circle plan to include Headless
-  (Business and above).
-- The Admin API has no documented chat-read endpoint; posts and comments come
-  from Admin v2, chats from Headless.
-- Circle's docs disagree on the Admin v2 auth scheme (`Bearer` vs `Token`).
-  Default is `Bearer`; override with `CIRCLE_ADMIN_AUTH_SCHEME=Token`.
-- `per_page` has no documented ceiling. Default is 100; lower it if you see
-  errors.
-- The rule layer alone is tuned for English-language posts.
+- [`docs/circle_auth_investigation.md`](docs/circle_auth_investigation.md) — why there is no member API, and how `/internal_api` was verified.
+- [`docs/remote_browser_poc.md`](docs/remote_browser_poc.md) — the server-browser and cookie-replay approaches that were measured and rejected.
+- [`docs/replay_supabase.md`](docs/replay_supabase.md) — encrypted session storage on Supabase.
+- [`deploy/DEPLOY.md`](deploy/DEPLOY.md) — dashboard + worker + Supabase, and the serverless gotchas.
+- [`docs/connector.md`](docs/connector.md) — the optional local connector (a legacy path; the cloud cookie flow supersedes it).
