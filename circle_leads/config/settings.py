@@ -58,6 +58,11 @@ class Requirements(BaseModel):
     # How many days back the harvest reads a community's posts (read window),
     # distinct from scoring.recency_days (the "recent post" score bonus).
     harvest_recency_days: int = 30
+    # Hard age cap. Posts older than this are never read, classified, stored, or
+    # filed as leads -- not even on a community's first full-backlog pass, and
+    # not on private cookie scans. Stops the pipeline surfacing years-old
+    # "leads" and pushing them to Vini. 0 disables the cap.
+    max_post_age_days: int = 365
     # Read every public space, not only hiring-named ones.
     harvest_all_spaces: bool = False
     # How many of your target roles/skills to search each harvest. More = more
@@ -81,6 +86,13 @@ class Requirements(BaseModel):
     def _confidence_range(cls, v: float) -> float:
         if not 0.0 <= v <= 1.0:
             raise ValueError("minimum_confidence must be between 0 and 1")
+        return v
+
+    @field_validator("max_post_age_days")
+    @classmethod
+    def _age_non_negative(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError("max_post_age_days must be >= 0 (0 disables the cap)")
         return v
 
     @property
@@ -116,6 +128,7 @@ def requirements_to_dict(req: "Requirements") -> dict:
         "exclude_job_seekers": req.exclude_job_seekers,
         "minimum_confidence": req.minimum_confidence,
         "harvest_recency_days": req.harvest_recency_days,
+        "max_post_age_days": req.max_post_age_days,
         "harvest_all_spaces": req.harvest_all_spaces,
         "max_search_niches": req.max_search_niches,
         "expand_search_with_ai": req.expand_search_with_ai,

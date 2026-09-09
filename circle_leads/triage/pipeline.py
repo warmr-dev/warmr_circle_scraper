@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import select
@@ -51,6 +51,7 @@ class TriageResult:
     filtered: int = 0
     duplicates: int = 0
     already_seen: int = 0
+    too_old: int = 0
 
     @property
     def new_leads(self) -> list[dict]:
@@ -174,6 +175,15 @@ def _triage_posts(
     if not posts:
         return result
 
+    # Hard age cap (last line of defence -- both the public harvest and private
+    # cookie scans land here). A post older than this is never stored,
+    # classified, or filed. Undated posts pass: we can't prove they're old.
+    age_cutoff = None
+    if getattr(requirements, "max_post_age_days", 0) and requirements.max_post_age_days > 0:
+        age_cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
+            days=requirements.max_post_age_days
+        )
+
     llm: LlmBackend | None = None
     model_name = None
     if use_llm:
@@ -205,6 +215,14 @@ def _triage_posts(
             override = published_override[raw.index]
             if override is not None:
                 published = override
+
+        if age_cutoff is not None and published is not None:
+            when = published
+            if getattr(when, "tzinfo", None) is not None:
+                when = when.astimezone(timezone.utc).replace(tzinfo=None)
+            if when < age_cutoff:
+                result.too_old += 1
+                continue
 
         with db.session() as s:
             author = get_or_create_author(
@@ -405,12 +423,13 @@ def _triage_posts(
             summary=(
                 f"Triaged {result.total_posts} post(s): {len(result.leads)} lead(s), "
                 f"{result.not_leads} not-lead, {result.filtered} filtered, "
-                f"{result.already_seen} seen before"
+                f"{result.too_old} too old, {result.already_seen} seen before"
             ),
             detail={
                 "source_url": source_url,
                 "llm": "on" if llm is not None else "off",
                 "duplicates": result.duplicates,
+                "too_old": result.too_old,
             },
             items_seen=result.total_posts,
             leads_found=len(result.leads),

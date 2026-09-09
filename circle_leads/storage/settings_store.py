@@ -163,3 +163,25 @@ def set_requirements_override(db: Database, data: dict) -> None:
     import json
 
     set_setting(db, REQUIREMENTS_KEY, json.dumps(data))
+
+
+def load_effective_requirements(db: Database, config_path=None):
+    """Packaged requirements.yaml with the dashboard's DB override merged on top.
+
+    The dashboard persists config edits in the DB (the packaged YAML is
+    read-only on serverless). The worker and CLI must read the same override so
+    a setting changed in the dashboard actually reaches the automated harvest.
+    Falls back to the packaged defaults on any error.
+    """
+    from circle_leads.config.settings import load_requirements, validate_requirements
+
+    try:
+        override = get_requirements_override(db)
+    except Exception:  # noqa: BLE001 - a fresh/empty DB just means no override
+        override = None
+    if override:
+        try:
+            return validate_requirements(override)
+        except Exception:  # noqa: BLE001 - a bad stored blob must not brick startup
+            pass
+    return load_requirements(config_path)

@@ -185,6 +185,52 @@ def test_only_new_skips_known_communities(db, reqs, monkeypatch):
     assert read == []
 
 
+def test_first_read_is_clamped_to_the_age_cap(db, reqs, monkeypatch):
+    """A never-read community's first pass must still be bounded by the age cap,
+    not read as an unbounded full backlog (since=None)."""
+    import circle_leads.harvest as h
+    from circle_leads.scraper.public_reader import PublicSpace
+
+    reqs = reqs.model_copy(update={"max_post_age_days": 365})
+    since_used = []
+
+    class Reader:
+        def __init__(self, host, **kw):
+            self.community_host = host; self.base = f"https://{host}"
+        def list_spaces(self):
+            return [PublicSpace("1", "job-posts", "Job Posts")]
+        def read_space(self, sid, since=None, **kw):
+            since_used.append(since)
+            return True, []
+    monkeypatch.setattr(h, "PublicReader", Reader)
+
+    h.harvest(db, reqs, search=False)
+    assert since_used and since_used[0] is not None
+    age = datetime.now(timezone.utc).replace(tzinfo=None) - since_used[0]
+    assert timedelta(days=364) < age < timedelta(days=366)
+
+
+def test_age_cap_of_zero_keeps_the_full_backlog_first_read(db, reqs, monkeypatch):
+    import circle_leads.harvest as h
+    from circle_leads.scraper.public_reader import PublicSpace
+
+    reqs = reqs.model_copy(update={"max_post_age_days": 0})
+    since_used = []
+
+    class Reader:
+        def __init__(self, host, **kw):
+            self.community_host = host; self.base = f"https://{host}"
+        def list_spaces(self):
+            return [PublicSpace("1", "job-posts", "Job Posts")]
+        def read_space(self, sid, since=None, **kw):
+            since_used.append(since)
+            return True, []
+    monkeypatch.setattr(h, "PublicReader", Reader)
+
+    h.harvest(db, reqs, search=False)
+    assert since_used == [None]  # unbounded first read, as before
+
+
 def test_harvest_survives_a_bad_space(db, reqs, monkeypatch):
     """One space that raises must not abort the whole run."""
     import circle_leads.harvest as h

@@ -190,6 +190,14 @@ def harvest(
     recency_cutoff = (
         datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=recency_days)
     )
+    # Hard age cap: never read past this, even on a first full-backlog pass.
+    # Keeps the harvest from paginating years deep and surfacing stale leads.
+    age_cutoff = None
+    if getattr(requirements, "max_post_age_days", 0) and requirements.max_post_age_days > 0:
+        age_cutoff = (
+            datetime.now(timezone.utc).replace(tzinfo=None)
+            - timedelta(days=requirements.max_post_age_days)
+        )
     hosts = _community_hosts(db, limit=max_communities, watched_only=watched_only)
     for host, slug, last_synced, watching in hosts:
         if only_new and last_synced is not None:
@@ -218,14 +226,21 @@ def harvest(
         # max_pages), because its best hiring posts are often months old and a
         # tight recency window would skip them. Only on *re-reads* do we apply
         # the incremental watermark, so we don't re-fetch history every run.
-        if last_synced is None:
+        first_read = last_synced is None
+        if first_read:
             since = None  # never read before -> read everything available
         else:
             since = last_synced if last_synced > recency_cutoff else recency_cutoff
+        # The age cap wins over both: no post older than it is ever worth reading.
+        if age_cutoff is not None and (since is None or since < age_cutoff):
+            since = age_cutoff
         # Say what kind of read this is: a first full-backlog pass, or an
         # incremental re-read only pulling posts newer than the watermark.
-        if since is None:
-            scope = "first read (full backlog)"
+        if first_read:
+            scope = (
+                "first read (full backlog)" if since is None
+                else f"first read (back to {since.date()})"
+            )
         else:
             scope = f"re-read (posts since {since.date()})"
         with db.session() as s:
@@ -287,9 +302,11 @@ def harvest(
             # Guard each space: a malformed post or a classify error must not
             # abort the whole run and lose every community not yet processed.
             try:
-                # Read deeper on a first, full-backlog pass; a light re-read
-                # (incremental watermark) only needs the top few pages.
-                pages = max(max_pages, 10) if since is None else max_pages
+                # Read deeper on a first pass; a light re-read (incremental
+                # watermark) only needs the top few pages. read_space stops
+                # paging as soon as it crosses `since`, so the age cap still
+                # bounds the depth.
+                pages = max(max_pages, 10) if first_read else max_pages
                 was_public, raw = reader.read_space(sp.id, max_pages=pages, since=since)
                 sp.is_public = was_public
                 if not was_public:

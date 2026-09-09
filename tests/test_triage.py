@@ -255,3 +255,64 @@ def test_triage_records_preserves_per_post_url(db, reqs):
     with db.session() as s:
         post = s.scalars(select(Post)).first()
         assert post.url == "https://x.circle.so/c/job-posts/hiring-a-flutter-dev"
+
+
+# --- age cap ---------------------------------------------------------------
+
+def _hire_record(published):
+    return {
+        "content": "We are hiring a Flutter developer for our app, budget $20k",
+        "published_at": published,
+    }
+
+
+def test_records_older_than_the_age_cap_are_dropped(db, reqs):
+    """A post past max_post_age_days is never stored, classified, or filed."""
+    from datetime import datetime, timedelta
+    from sqlalchemy import select
+    from circle_leads.triage.pipeline import triage_records
+    from circle_leads.storage.models import Post
+
+    reqs = reqs.model_copy(update={"max_post_age_days": 365})
+    old = datetime.utcnow() - timedelta(days=400)
+    result = triage_records(db, [_hire_record(old)], reqs, community="x")
+
+    assert result.too_old == 1
+    assert result.leads == []
+    with db.session() as s:
+        assert s.scalars(select(Post)).first() is None  # not even stored
+
+
+def test_recent_records_pass_the_age_cap(db, reqs):
+    from datetime import datetime, timedelta
+    from circle_leads.triage.pipeline import triage_records
+
+    reqs = reqs.model_copy(update={"max_post_age_days": 365})
+    recent = datetime.utcnow() - timedelta(days=10)
+    result = triage_records(db, [_hire_record(recent)], reqs, community="x")
+
+    assert result.too_old == 0
+    assert len(result.leads) == 1
+
+
+def test_undated_records_are_kept_even_with_the_cap(db, reqs):
+    """We can't prove an undated post is old, so it must not be dropped."""
+    from circle_leads.triage.pipeline import triage_records
+
+    reqs = reqs.model_copy(update={"max_post_age_days": 365})
+    result = triage_records(db, [_hire_record(None)], reqs, community="x")
+
+    assert result.too_old == 0
+    assert len(result.leads) == 1
+
+
+def test_age_cap_of_zero_disables_the_filter(db, reqs):
+    from datetime import datetime, timedelta
+    from circle_leads.triage.pipeline import triage_records
+
+    reqs = reqs.model_copy(update={"max_post_age_days": 0})
+    old = datetime.utcnow() - timedelta(days=4000)
+    result = triage_records(db, [_hire_record(old)], reqs, community="x")
+
+    assert result.too_old == 0
+    assert len(result.leads) == 1

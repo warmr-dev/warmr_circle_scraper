@@ -350,6 +350,9 @@
       <div class="row" style="gap:18px;flex-wrap:wrap;margin-top:12px">
         <label style="font-size:13px">Harvest reads posts from last
           <input id="cfg-recency" type="number" min="1" max="365" style="width:70px;margin-left:6px"> days</label>
+        <label style="font-size:13px" title="Hard cap: posts older than this are never read, classified, or filed as leads — not even on a community's first pass. 0 = no cap.">
+          Never process posts older than
+          <input id="cfg-max-age" type="number" min="0" max="3650" style="width:70px;margin-left:6px"> days</label>
         <label class="muted" style="font-size:13px;display:flex;align-items:center;gap:6px">
           <input id="cfg-all-spaces" type="checkbox" style="width:auto"> Read all public spaces (not just hiring-named)</label>
         <label style="font-size:13px" title="How many of your target roles/skills to search each harvest. More = more coverage but more search calls. 0 = search all.">
@@ -1343,6 +1346,7 @@ async function loadConfig() {
   $('cfg-med').value = c.priority_thresholds.medium;
   $('cfg-exclude-seekers').checked = c.exclude_job_seekers;
   $('cfg-recency').value = c.harvest_recency_days;
+  $('cfg-max-age').value = c.max_post_age_days;
   $('cfg-all-spaces').checked = c.harvest_all_spaces;
   $('cfg-max-niches').value = c.max_search_niches;
   $('sc-hiring').value = c.scoring.hiring_intent;
@@ -1361,6 +1365,7 @@ $('cfg-save').addEventListener('click', async () => {
     exclude_job_seekers: $('cfg-exclude-seekers').checked,
     minimum_confidence: parseFloat($('cfg-conf').value),
     harvest_recency_days: parseInt($('cfg-recency').value),
+    max_post_age_days: parseInt($('cfg-max-age').value),
     harvest_all_spaces: $('cfg-all-spaces').checked,
     max_search_niches: parseInt($('cfg-max-niches').value),
     llm_escalation_threshold: parseInt($('cfg-llm').value),
@@ -1413,6 +1418,7 @@ async function saveConfigOnly() {
     exclude_job_seekers: $('cfg-exclude-seekers').checked,
     minimum_confidence: parseFloat($('cfg-conf').value),
     harvest_recency_days: parseInt($('cfg-recency').value),
+    max_post_age_days: parseInt($('cfg-max-age').value),
     harvest_all_spaces: $('cfg-all-spaces').checked,
     llm_escalation_threshold: parseInt($('cfg-llm').value),
     keywords: { include: parseCsv($('cfg-kw-include').value), exclude: parseCsv($('cfg-kw-exclude').value) },
