@@ -16,6 +16,8 @@
 
 BEGIN;
 
+ALTER TABLE communities ADD COLUMN IF NOT EXISTS platform VARCHAR(32);
+
 -- trigify: new row, a plain circle.so subdomain, publicly readable.
 INSERT INTO communities (slug, name, url, platform, discovered_at, discovery_source,
                          access_status, permission_status, relevance_score,
