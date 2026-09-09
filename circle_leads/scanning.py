@@ -52,8 +52,13 @@ def scan_cookie_host(db: Database, requirements: Requirements, host: str, *,
         MemberApiReader, SessionInvalid, ChallengeHit, fetch_space_posts,
     )
     from circle_leads.triage.pipeline import triage_records
+    from circle_leads.discovery.discover_communities import community_slug_for_host
 
     started = time.time()
+    # Stable slug for this host. NOT host.split(".")[0] -- that collapsed every
+    # www.* host to "www" and every community.* host to "community", so
+    # unrelated communities piled onto one row (see WORKLOG P10).
+    slug = community_slug_for_host(host)
     cookies = {c["name"]: c["value"] for c in (load_cookies(db, host) or [])}
     state = ConnectionState.CONNECTED
     detail = ""
@@ -89,7 +94,7 @@ def scan_cookie_host(db: Database, requirements: Requirements, host: str, *,
                 # a per-post pooler checkout on Supabase).
                 with db.shared_session():
                     res = triage_records(
-                        db, recs, requirements, community=host.split(".")[0],
+                        db, recs, requirements, community=slug,
                         source_url=f"https://{host}", use_llm=use_llm,
                     )
                 leads += len(res.leads)
@@ -122,7 +127,7 @@ def scan_cookie_host(db: Database, requirements: Requirements, host: str, *,
             s, kind="ingest",
             level="warning" if state != ConnectionState.CONNECTED
             else ("success" if leads else "info"),
-            community=host.split(".")[0],
+            community=slug,
             summary=(f"HTTP scan of {host}: {total} post(s), {leads} lead(s) "
                      f"from {readable} space(s)"
                      + (f" — {detail}" if state != ConnectionState.CONNECTED else "")),
