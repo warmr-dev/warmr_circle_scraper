@@ -134,3 +134,34 @@ def test_set_schedule_accepts_minute_forms(tmp_path):
     import pytest
     with pytest.raises(ValueError):
         set_schedule(db, "custom:0m")
+
+
+# --- effective requirements (YAML defaults + DB override) -----------------
+
+def test_load_effective_requirements_returns_defaults_without_override(db):
+    from circle_leads.storage.settings_store import load_effective_requirements
+
+    req = load_effective_requirements(db)
+    assert req.max_post_age_days == 365  # packaged/model default
+
+
+def test_load_effective_requirements_applies_the_db_override(db):
+    from circle_leads.storage.settings_store import (
+        load_effective_requirements, set_requirements_override,
+    )
+    from circle_leads.config.settings import requirements_to_dict
+
+    base = requirements_to_dict(load_effective_requirements(db))
+    base["max_post_age_days"] = 90
+    set_requirements_override(db, base)
+
+    assert load_effective_requirements(db).max_post_age_days == 90
+
+
+def test_load_effective_requirements_ignores_a_corrupt_override(db):
+    from circle_leads.storage.settings_store import load_effective_requirements
+    from circle_leads.storage.settings_store import REQUIREMENTS_KEY
+
+    set_setting(db, REQUIREMENTS_KEY, "{not valid json")
+    req = load_effective_requirements(db)
+    assert req.max_post_age_days == 365  # fell back to defaults

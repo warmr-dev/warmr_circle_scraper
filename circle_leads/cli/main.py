@@ -603,7 +603,7 @@ def harvest_cmd(ctx, niches, no_search, only_new, max_communities, use_llm, verb
     import time as _time
     from circle_leads.harvest import harvest
     from circle_leads.storage.settings_store import (
-        is_harvest_due, mark_harvest_run, get_schedule,
+        is_harvest_due, mark_harvest_run, get_schedule, load_effective_requirements,
     )
 
     # --loop makes this a standalone worker: it repeatedly checks the
@@ -622,9 +622,16 @@ def harvest_cmd(ctx, niches, no_search, only_new, max_communities, use_llm, verb
             if not use_llm and os.environ.get("OPENAI_API_KEY"):
                 use_llm = True
 
+        # Read the dashboard's config (DB override on top of the YAML), so a
+        # scheduled/looping harvest honours edits made in the UI.
+        try:
+            req = load_effective_requirements(ctx.obj["db"])
+        except Exception:  # noqa: BLE001
+            req = ctx.obj["requirements"]
+
         click.echo("Harvesting: searching + reading public communities...", err=True)
         res = harvest(
-            ctx.obj["db"], ctx.obj["requirements"],
+            ctx.obj["db"], req,
             niches=list(niches) or None,
             search=not no_search, only_new=only_new,
             max_communities=max_communities, use_llm=use_llm, verbose_log=verbose_log,
@@ -1013,6 +1020,8 @@ def config_cmd(ctx):
     click.echo(f"Target skills:       {', '.join(r.target_skills) or '(any)'}")
     click.echo(f"Exclude job seekers: {r.exclude_job_seekers}")
     click.echo(f"Minimum confidence:  {r.minimum_confidence}")
+    click.echo(f"Max post age:        {r.max_post_age_days} days"
+               + (" (no cap)" if not r.max_post_age_days else ""))
     click.echo(f"LLM escalation at:   rule score < {r.llm_escalation_threshold}")
     click.echo(f"Include keywords:    {', '.join(r.keywords.include) or '(none)'}")
     click.echo(f"Exclude keywords:    {', '.join(r.keywords.exclude) or '(none)'}")
@@ -1101,12 +1110,18 @@ def worker_cmd(ctx, poll_seconds, use_llm):
     import time as _t
 
     db = ctx.obj["db"]
-    req = ctx.obj["requirements"]
     use_llm = use_llm or bool(os.environ.get("OPENAI_API_KEY"))
 
     from circle_leads.storage.job_queue import claim_next, complete
     from circle_leads.scanning import cookie_hosts_vip_first, scan_cookie_host
-    from circle_leads.storage.settings_store import is_harvest_due, mark_harvest_run
+    from circle_leads.storage.settings_store import (
+        is_harvest_due, load_effective_requirements, mark_harvest_run,
+    )
+
+    # Read the same config the dashboard writes (DB override on top of the
+    # packaged YAML), re-read each iteration so a dashboard edit -- e.g. the
+    # max-post-age cap -- takes effect without a worker restart.
+    req = load_effective_requirements(db)
 
     click.echo("Worker started. Draining the scan-job queue; running harvests "
                "when due. Ctrl-C to stop.")
@@ -1124,6 +1139,14 @@ def worker_cmd(ctx, poll_seconds, use_llm):
 
     last_schedule_check = 0.0
     while True:
+        # Pick up dashboard config edits (age cap, roles, thresholds) without a
+        # restart. Cheap: one indexed settings lookup, and it falls back to the
+        # value already loaded on any error.
+        try:
+            req = load_effective_requirements(db)
+        except Exception:  # noqa: BLE001 - keep the last good config
+            pass
+
         job = None
         try:
             job = claim_next(db)

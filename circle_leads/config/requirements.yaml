@@ -97,6 +97,7 @@ target_skills:
 exclude_job_seekers: true
 minimum_confidence: 0.6
 harvest_recency_days: 30
+max_post_age_days: 365
 harvest_all_spaces: false
 max_search_niches: 12
 expand_search_with_ai: true
