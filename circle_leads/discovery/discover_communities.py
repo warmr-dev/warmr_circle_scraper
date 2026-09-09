@@ -88,6 +88,123 @@ def community_slug_for_host(host: str) -> str:
     return labels[-3]
 
 
+# --- Platform classification --------------------------------------------------
+# The Circle Discover directory (and web search) turn up "communities" that are
+# not on Circle at all -- Facebook groups, Slack workspaces, Skool, Mighty
+# Networks. We can't read those, but throwing the find away loses the research.
+# Instead every community row carries a `platform`, and the harvest reads only
+# the ones on Circle (subdomain OR custom domain).
+
+PLATFORM_CIRCLE = "circle"
+PLATFORM_DISCOVER = "discover"          # a discover.circle.so listing, host unknown
+PLATFORM_CIRCLE_INFRA = "circle_infra"  # app/login/... .circle.so, not a community
+PLATFORM_OTHER = "other"                # reachable, but not a Circle community
+
+# host suffix -> platform. Checked with endswith(), so it also matches subdomains
+# (foo.slack.com, bar.mn.co).
+_PLATFORM_SUFFIXES = {
+    ".slack.com": "slack",
+    ".skool.com": "skool",
+    ".mn.co": "mighty_networks",
+    ".mightynetworks.com": "mighty_networks",
+    ".facebook.com": "facebook",
+    ".discord.com": "discord",
+    ".discord.gg": "discord",
+    ".heartbeat.chat": "heartbeat",
+    ".meetup.com": "meetup",
+    ".geneva.com": "geneva",
+    ".discourse.group": "discourse",
+}
+_PLATFORM_EXACT = {
+    "facebook.com": "facebook", "fb.com": "facebook", "m.facebook.com": "facebook",
+    "slack.com": "slack", "join.slack.com": "slack",
+    "discord.com": "discord", "discord.gg": "discord",
+    "skool.com": "skool", "meetup.com": "meetup", "linkedin.com": "linkedin",
+    "www.linkedin.com": "linkedin", "t.me": "telegram", "telegram.me": "telegram",
+}
+_CIRCLE_INFRA_LABELS = {
+    "app", "login", "discover", "www", "help", "status", "signup", "sign-in",
+    "auth", "api", "assets", "cdn", "marketing", "compass", "email", "mail",
+    "circle-compass-assets", "assets-v2",
+}
+
+
+def platform_from_host(host: str) -> str | None:
+    """Classify a host by name alone. Returns None when a fetch is needed."""
+    host = (host or "").strip().lower().strip(".")
+    if not host:
+        return None
+    if host == "circle.so" or host.endswith(".circle.so"):
+        label = host[: -len(".circle.so")].split(".")[-1] if host != "circle.so" else ""
+        return PLATFORM_CIRCLE_INFRA if label in _CIRCLE_INFRA_LABELS or not label else PLATFORM_CIRCLE
+    if host in _PLATFORM_EXACT:
+        return _PLATFORM_EXACT[host]
+    for suffix, name in _PLATFORM_SUFFIXES.items():
+        if host.endswith(suffix):
+            return name
+    return None  # a bare custom domain -- probe it to know
+
+
+def _looks_like_circle_html(text: str) -> bool:
+    t = (text or "").lower()
+    return (
+        "assets-v2.circle.so" in t
+        or "circle-compass-assets.circle.so" in t
+        or 'name="application-name" content="circle"' in t
+    )
+
+
+def detect_platform(url: str, *, session=None, timeout: int = 10) -> str:
+    """Full platform detection: host heuristics, then a Circle-API probe.
+
+    A Circle community -- on any domain -- answers ``/internal_api/spaces`` with
+    JSON (200 when public, 401/403 when private). A non-Circle host answers with
+    an HTML page or an error. That single request is the reliable test.
+    """
+    if not url or "://" not in url:
+        if (url or "").startswith("discover.circle.so"):
+            return PLATFORM_DISCOVER
+        url = "https://" + (url or "")
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        return PLATFORM_OTHER  # manual://, jsonl:, ...
+    host = (parsed.hostname or "").lower()
+    if host == "discover.circle.so":
+        return PLATFORM_DISCOVER
+    named = platform_from_host(host)
+    if named is not None:
+        return named
+
+    from circle_leads.scraper.http_client import shared_session
+
+    http = session or shared_session()
+    ua = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+        )
+    }
+    try:
+        r = http.get(f"https://{host}/internal_api/spaces", headers=ua,
+                     timeout=timeout, allow_redirects=True)
+        if "json" in r.headers.get("content-type", "").lower():
+            return PLATFORM_CIRCLE
+    except Exception:  # noqa: BLE001 - network flake -> fall through to the HTML check
+        pass
+    try:
+        r = http.get(f"https://{host}", headers=ua, timeout=timeout, allow_redirects=True)
+        if _looks_like_circle_html(r.text):
+            return PLATFORM_CIRCLE
+    except Exception:  # noqa: BLE001
+        pass
+    return PLATFORM_OTHER
+
+
+def is_circle_platform(platform: str | None) -> bool:
+    """True when the harvest's public reader can read this community."""
+    return platform == PLATFORM_CIRCLE
+
+
 def normalize_community_url(url: str) -> tuple[str, str] | None:
     """Return (slug, canonical_url) for a Circle community URL, else None."""
     url = (url or "").strip()

@@ -945,9 +945,17 @@ async function loadCommunities() {
       const score = Math.round(c.relevance_score);
       const sColor = scoreColor(score);
       const [statusLabel, statusColor] = ACCESS_META[c.access_status] || ACCESS_META.not_visited;
-      const isCircle = c.url && c.url.includes('.circle.so') && !c.url.includes('discover');
+      const isCircle = c.platform
+        ? c.platform === 'circle'
+        : (c.url && c.url.includes('.circle.so') && !c.url.includes('discover'));
+      const PLAT_LABEL = { discover: 'Discover listing', circle_infra: 'Circle infra',
+        facebook: 'Facebook', slack: 'Slack', skool: 'Skool', mighty_networks: 'Mighty Networks',
+        discord: 'Discord', linkedin: 'LinkedIn', other: 'Not Circle' };
+      const platBadge = (!isCircle && c.platform && PLAT_LABEL[c.platform])
+        ? ` <span class="pill" style="font-size:11px;color:var(--muted);background:color-mix(in srgb, var(--muted) 12%, transparent)">${PLAT_LABEL[c.platform]}</span>`
+        : '';
       return `<tr>
-        <td><a href="${esc(c.url)}" target="_blank" rel="noopener" class="ellipsis" style="max-width:220px">${esc(c.name || c.slug)} ↗</a></td>
+        <td><a href="${esc(c.url)}" target="_blank" rel="noopener" class="ellipsis" style="max-width:220px">${esc(c.name || c.slug)} ↗</a>${platBadge}</td>
         <td>${priceBadge}</td>
         <td class="num"><span class="score-badge" style="color:${sColor};background:color-mix(in srgb, ${sColor} 14%, transparent)">${score}</span></td>
         <td class="muted" title="${esc(c.discovered_at || '')}">${c.discovered_at ? esc(c.discovered_at.slice(0, 10)) : '—'}</td>

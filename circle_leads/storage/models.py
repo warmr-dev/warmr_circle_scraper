@@ -85,6 +85,13 @@ class Community(Base):
     discovered_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     discovery_source: Mapped[str | None] = mapped_column(String(255))
 
+    # Which platform hosts this community: "circle" (subdomain or custom domain,
+    # readable by the harvest), "discover" (a discover.circle.so listing whose
+    # real host isn't resolved yet), "circle_infra", "facebook", "slack",
+    # "skool", "mighty_networks", "other", ... NULL on rows created before this
+    # column existed -- the harvest falls back to a URL check for those.
+    platform: Mapped[str | None] = mapped_column(String(32), index=True)
+
     access_status: Mapped[str] = mapped_column(
         String(32), default=AccessState.NOT_VISITED.value, index=True
     )

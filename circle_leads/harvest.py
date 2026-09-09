@@ -56,10 +56,23 @@ class HarvestResult:
     errors: list[str] = field(default_factory=list)
 
 
+def _reads_on_circle(c: Community) -> bool:
+    """True when the public reader can read this community.
+
+    Any Circle-hosted community works -- a ``<slug>.circle.so`` subdomain or a
+    custom domain like ``forum.joelpilger.com``. Rows created before the
+    ``platform`` column existed carry NULL, so fall back to the URL shape for
+    those (unchanged behaviour until the backfill runs).
+    """
+    if c.platform is not None:
+        return c.platform == "circle"
+    return is_subdomain_community(c.url)
+
+
 def _community_hosts(
     db: Database, *, limit: int, watched_only: bool = False
 ) -> list[tuple[str, str, object, bool]]:
-    """Return (host, slug, last_synced_at, watching) for readable subdomains.
+    """Return (host, slug, last_synced_at, watching) for readable communities.
 
     Watched ("subscribed") communities come first, then the rest by score, so
     the fast lane services subscriptions before sweeping others. With
@@ -74,8 +87,8 @@ def _community_hosts(
         rows = list(s.scalars(stmt).all())
         out = []
         for c in rows:
-            if not is_subdomain_community(c.url):
-                continue  # Discover listings can't be read; only subdomains
+            if not _reads_on_circle(c):
+                continue  # Discover listings / FB / Slack / dead hosts can't be read
             if watched_only and not c.watching:
                 continue
             host = c.url.replace("https://", "").replace("http://", "").strip("/")
