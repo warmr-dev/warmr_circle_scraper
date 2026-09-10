@@ -33,6 +33,27 @@ def test_watched_community_polled_before_higher_scoring_unwatched():
     assert order[0] == "watched"  # watched first despite lower score
 
 
+def test_low_limit_permanently_hides_the_low_ranked_tail():
+    # The order is stable (watching, then score), so a limit below the
+    # readable-set size drops the same tail every run -- it is never harvested,
+    # no matter how many runs happen. The harvest default must stay above the
+    # readable-set size.
+    db = _db()
+    for i in range(6):
+        _mk(db, f"c{i}", score=100 - i, watching=False)
+    head = [slug for _, slug, _, _ in _community_hosts(db, limit=3)]
+    assert head == ["c0", "c1", "c2"]
+    full = [slug for _, slug, _, _ in _community_hosts(db, limit=50)]
+    assert full[-3:] == ["c3", "c4", "c5"]  # only reachable with a high enough limit
+
+
+def test_harvest_default_cap_is_high_enough_for_a_large_readable_set():
+    from circle_leads.harvest import harvest
+    import inspect as _inspect
+    default = _inspect.signature(harvest).parameters["max_communities"].default
+    assert default >= 120
+
+
 def test_watched_only_filters_to_the_watchlist():
     db = _db()
     _mk(db, "big", 90, False)
