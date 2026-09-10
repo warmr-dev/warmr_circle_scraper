@@ -318,6 +318,23 @@
       <p class="muted" style="font-size:12px;margin-top:6px">
         The background worker checks this each run and harvests only when the interval has elapsed.
       </p>
+      <div class="row" style="margin-top:14px">
+        <label style="font-size:13px">Search for new communities
+          <select id="cfg-discovery" style="min-width:150px;margin-left:6px">
+            <option value="every_run">Every harvest</option>
+            <option value="every_6h">Every 6 hours</option>
+            <option value="every_12h">Every 12 hours</option>
+            <option value="daily">Once a day</option>
+            <option value="weekly">Once a week</option>
+            <option value="off">Off (read known only)</option>
+          </select>
+        </label>
+        <span id="discovery-status" class="muted" style="font-size:13px"></span>
+      </div>
+      <p class="muted" style="font-size:12px;margin-top:6px">
+        Reading known communities runs every harvest. The web search (Exa + DuckDuckGo) that
+        finds <em>new</em> communities is metered and rate-limited, so it runs on this slower cadence.
+      </p>
     </div>
     <div class="panel">
       <h2>What counts as a lead</h2>
@@ -1326,19 +1343,24 @@ async function loadSchedule() {
     $('cfg-schedule').value = sch;
   }
   toggleCustom();
+  if (d.discovery_schedule) $('cfg-discovery').value = d.discovery_schedule;
   $('schedule-status').textContent = d.last_run
     ? `Last harvest: ${d.last_run.slice(0,16).replace('T',' ')}` : 'Not run yet';
+  $('discovery-status').textContent = d.last_search
+    ? `Last search: ${d.last_search.slice(0,16).replace('T',' ')}` : 'Not searched yet';
 }
 $('cfg-schedule').addEventListener('change', toggleCustom);
-$('cfg-schedule-save').addEventListener('click', async () => {
+async function saveSchedule() {
   let schedule = $('cfg-schedule').value;
   if (schedule === 'custom') schedule = 'custom:' + (parseInt($('cfg-custom-hours').value) || 3);
   const d = await api('/api/schedule', {
     method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ schedule }),
+    body: JSON.stringify({ schedule, discovery_schedule: $('cfg-discovery').value }),
   });
   if (d) { toast('Schedule saved'); loadSchedule(); }
-});
+}
+$('cfg-schedule-save').addEventListener('click', saveSchedule);
+$('cfg-discovery').addEventListener('change', saveSchedule);
 
 async function loadConfig() {
   await loadSchedule();

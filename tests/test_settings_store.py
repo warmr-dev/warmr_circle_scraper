@@ -6,10 +6,15 @@ import pytest
 
 from circle_leads.storage.database import Database
 from circle_leads.storage.settings_store import (
+    DEFAULT_DISCOVERY,
     DEFAULT_SCHEDULE,
+    get_discovery_schedule,
     get_schedule,
+    is_discovery_due,
     is_harvest_due,
+    mark_discovery_run,
     mark_harvest_run,
+    set_discovery_schedule,
     set_schedule,
     get_setting,
     set_setting,
@@ -86,6 +91,57 @@ def test_invalid_custom_schedule_rejected(db):
         set_schedule(db, "custom:abc")
     with pytest.raises(ValueError):
         set_schedule(db, "custom:0")
+
+
+# --- Discovery (web-search) sub-schedule ----------------------------------
+
+def test_discovery_default_is_daily(db):
+    assert get_discovery_schedule(db) == DEFAULT_DISCOVERY == "daily"
+
+
+def test_discovery_every_run_is_always_due(db):
+    set_discovery_schedule(db, "every_run")
+    mark_discovery_run(db)
+    assert is_discovery_due(db) is True  # just searched, but "every_run"
+
+
+def test_discovery_off_is_never_due(db):
+    set_discovery_schedule(db, "off")
+    assert is_discovery_due(db) is False
+
+
+def test_discovery_due_when_never_searched(db):
+    set_discovery_schedule(db, "daily")
+    assert is_discovery_due(db) is True
+
+
+def test_discovery_not_due_right_after_a_search(db):
+    set_discovery_schedule(db, "daily")
+    mark_discovery_run(db)
+    soon = datetime.utcnow() + timedelta(hours=6)
+    assert is_discovery_due(db, now=soon) is False
+
+
+def test_discovery_due_again_after_a_day(db):
+    set_discovery_schedule(db, "daily")
+    mark_discovery_run(db)
+    later = datetime.utcnow() + timedelta(hours=25)
+    assert is_discovery_due(db, now=later) is True
+
+
+def test_discovery_independent_of_harvest_schedule(db):
+    # Reading schedule and discovery schedule are separate keys.
+    set_schedule(db, "every_6h")
+    set_discovery_schedule(db, "weekly")
+    assert get_schedule(db) == "every_6h"
+    assert get_discovery_schedule(db) == "weekly"
+
+
+def test_discovery_invalid_rejected(db):
+    with pytest.raises(ValueError):
+        set_discovery_schedule(db, "sometimes")
+    with pytest.raises(ValueError):
+        set_discovery_schedule(db, "custom:nope")
 
 
 # --- Sub-hourly (near-real-time) schedules ---------------------------------

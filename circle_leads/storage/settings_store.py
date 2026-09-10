@@ -135,6 +135,68 @@ def mark_harvest_run(db: Database, *, now: datetime | None = None) -> None:
     set_setting(db, KEY_LAST_RUN, now.isoformat())
 
 
+# --- Discovery (web-search) sub-schedule ----------------------------------
+#
+# Every harvest has two phases: DISCOVER new communities (web search -- Exa +
+# DuckDuckGo, both rate-limited and metered) and READ the communities we
+# already know (free conditional GETs). Reading is cheap and wants to run
+# often; discovery is expensive and only needs to run occasionally. This
+# second schedule gates the discovery phase independently of the harvest
+# schedule, so the worker can e.g. read every 6h but search only once a day.
+
+KEY_DISCOVERY = "harvest_search"
+KEY_DISCOVERY_LAST_RUN = "harvest_last_search"
+DEFAULT_DISCOVERY = "daily"
+
+# "every_run" -> search on every harvest (the old always-on behaviour).
+# "off"       -> never search (read-only harvests).
+# any preset / custom:<n> -> search only when that interval has elapsed.
+_DISCOVERY_SCHEDULES = _NAMED_SCHEDULES | {"every_run"}
+
+
+def get_discovery_schedule(db: Database) -> str:
+    return get_setting(db, KEY_DISCOVERY, DEFAULT_DISCOVERY) or DEFAULT_DISCOVERY
+
+
+def set_discovery_schedule(db: Database, schedule: str) -> None:
+    if schedule.startswith("custom:"):
+        if _schedule_minutes(schedule) is None:
+            raise ValueError(
+                f"Invalid custom schedule {schedule!r}; use custom:<hours> or "
+                f"custom:<n>m (e.g. custom:5m)"
+            )
+    elif schedule not in _DISCOVERY_SCHEDULES:
+        raise ValueError(
+            f"Unknown discovery schedule {schedule!r}; choose from "
+            f"{sorted(_DISCOVERY_SCHEDULES)} or custom:<hours> / custom:<n>m"
+        )
+    set_setting(db, KEY_DISCOVERY, schedule)
+
+
+def is_discovery_due(db: Database, *, now: datetime | None = None) -> bool:
+    """True when the discovery (web-search) phase should run on this harvest.
+
+    'every_run' -> always; 'off' -> never; otherwise the configured interval
+    must have elapsed since the last recorded discovery run.
+    """
+    schedule = get_discovery_schedule(db)
+    if schedule == "every_run":
+        return True
+    minutes = _schedule_minutes(schedule)
+    if minutes is None:
+        return False  # 'off'
+    now = now or datetime.now(timezone.utc).replace(tzinfo=None)
+    last = _parse_ts(get_setting(db, KEY_DISCOVERY_LAST_RUN))
+    if last is None:
+        return True  # never searched
+    return now - last >= timedelta(minutes=minutes)
+
+
+def mark_discovery_run(db: Database, *, now: datetime | None = None) -> None:
+    now = now or datetime.now(timezone.utc).replace(tzinfo=None)
+    set_setting(db, KEY_DISCOVERY_LAST_RUN, now.isoformat())
+
+
 # --- Lead requirements override (stored in the DB, not the file) -----------
 #
 # The packaged requirements.yaml is read-only on a serverless deploy
