@@ -573,7 +573,9 @@ def read_public_cmd(ctx, community_host, space_ids, list_spaces, all_spaces, com
 @click.argument("niches", nargs=-1)
 @click.option("--no-search", is_flag=True, help="Skip discovery; only re-read known communities.")
 @click.option("--only-new", is_flag=True, help="Only read communities not read before.")
-@click.option("--max-communities", type=int, default=40, show_default=True)
+@click.option("--max-communities", type=int, default=150, show_default=True,
+              help="Cap on readable communities touched in one run; keep it above "
+                   "the readable-set size or the low-ranked tail is never harvested.")
 @click.option("--use-llm", is_flag=True)
 @click.option("--verbose-log", is_flag=True,
               help="Log every post's classify decision (which layer, why) to the activity feed.")

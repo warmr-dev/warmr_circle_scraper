@@ -156,7 +156,7 @@ def harvest(
     niches: list[str] | None = None,
     search: bool = True,
     only_new: bool = False,
-    max_communities: int = 40,
+    max_communities: int = 150,
     max_pages: int = 5,
     use_llm: bool = False,
     min_score: int = 20,
@@ -179,6 +179,12 @@ def harvest(
     - ``only_new`` (default False) reads only communities never read before --
       use it to focus a run purely on fresh discoveries.
     - ``recency_days`` bounds how far back to look for a never-read community.
+    - ``max_communities`` caps how many readable communities a single run
+      touches (watched first, then by score). Set high enough to cover the
+      whole readable set -- a lower cap permanently hides the tail, since the
+      order is stable and the same head is picked every run. Re-reads are
+      cheap (incremental watermark), so the cost of a high cap is one slow
+      first pass per community, not repeated work.
     """
     niches = niches or _niches_from_config(requirements)
     result = HarvestResult(niches=niches)
