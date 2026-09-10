@@ -144,6 +144,25 @@ def test_discovery_invalid_rejected(db):
         set_discovery_schedule(db, "custom:nope")
 
 
+def test_due_checks_tolerate_a_tz_aware_stored_timestamp(db):
+    # A timestamp set by hand via SQL (now()::text) carries a "+00" offset.
+    # The due-checks must not raise "can't subtract offset-naive and
+    # offset-aware datetimes" on it.
+    set_discovery_schedule(db, "daily")
+    set_setting(db, "harvest_last_search", "2026-09-10 01:02:28.926005+00")
+    set_schedule(db, "every_6h")
+    set_setting(db, "harvest_last_run", "2026-09-10 01:02:28.926005+00:00")
+    assert is_discovery_due(db) is False   # < 24h ago, no crash
+    assert is_harvest_due(db) is False     # < 6h ago, no crash
+
+
+def test_parse_ts_normalises_tz_aware_to_naive_utc():
+    from circle_leads.storage.settings_store import _parse_ts
+    dt = _parse_ts("2026-09-10 12:00:00+02:00")
+    assert dt is not None and dt.tzinfo is None
+    assert dt == datetime(2026, 9, 10, 10, 0, 0)  # shifted to UTC, tz dropped
+
+
 # --- Sub-hourly (near-real-time) schedules ---------------------------------
 
 from circle_leads.storage.settings_store import _schedule_minutes, set_schedule

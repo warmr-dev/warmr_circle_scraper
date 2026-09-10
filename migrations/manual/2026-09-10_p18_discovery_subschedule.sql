@@ -19,13 +19,20 @@
 --
 -- This sets it to once a day. Reading stays on harvest_schedule (every_6h).
 
-INSERT INTO settings (key, value) VALUES ('harvest_search', 'daily')
-ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
+-- settings.updated_at is NOT NULL with no server default (the ORM fills it),
+-- so raw SQL must set it. Timestamps stored here must be NAIVE UTC -- the
+-- due-check parses them and compares against a naive now(); a value with a
+-- "+00" offset (plain now()::text) would raise "can't subtract offset-naive
+-- and offset-aware datetimes". Use (now() AT TIME ZONE 'UTC').
+INSERT INTO settings (key, value, updated_at)
+VALUES ('harvest_search', 'daily', now())
+ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();
 
--- Optional: also seed the last-search timestamp so the next harvest does NOT
--- immediately search (it would otherwise, since the key is unset). Comment out
--- if you want one discovery pass on the next run.
--- INSERT INTO settings (key, value) VALUES ('harvest_last_search', now()::text)
--- ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
+-- Also seed the last-search timestamp so the next harvest does NOT immediately
+-- run a discovery pass (it would otherwise, since the key is unset). Drop this
+-- statement if you want one discovery pass on the next run.
+INSERT INTO settings (key, value, updated_at)
+VALUES ('harvest_last_search', (now() AT TIME ZONE 'UTC')::text, now())
+ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();
 
 SELECT key, value FROM settings WHERE key IN ('harvest_schedule', 'harvest_search', 'harvest_last_run', 'harvest_last_search');
