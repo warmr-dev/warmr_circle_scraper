@@ -105,12 +105,21 @@ def set_schedule(db: Database, schedule: str) -> None:
 
 
 def _parse_ts(raw: str | None) -> datetime | None:
+    """Parse a stored ISO timestamp as a naive-UTC datetime.
+
+    Timestamps we write are naive UTC, but a value set by hand via SQL
+    (``now()::text``) carries a ``+00`` offset. Normalise to naive UTC so the
+    ``now - last`` comparisons in the due-checks never mix aware and naive.
+    """
     if not raw:
         return None
     try:
-        return datetime.fromisoformat(raw)
+        dt = datetime.fromisoformat(raw)
     except ValueError:
         return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
 
 
 def is_harvest_due(db: Database, *, now: datetime | None = None) -> bool:
