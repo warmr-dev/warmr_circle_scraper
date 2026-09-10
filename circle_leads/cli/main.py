@@ -603,7 +603,8 @@ def harvest_cmd(ctx, niches, no_search, only_new, max_communities, use_llm, verb
     import time as _time
     from circle_leads.harvest import harvest
     from circle_leads.storage.settings_store import (
-        is_harvest_due, mark_harvest_run, get_schedule, load_effective_requirements,
+        is_discovery_due, is_harvest_due, mark_discovery_run, mark_harvest_run,
+        get_schedule, load_effective_requirements,
     )
 
     # --loop makes this a standalone worker: it repeatedly checks the
@@ -614,10 +615,14 @@ def harvest_cmd(ctx, niches, no_search, only_new, max_communities, use_llm, verb
     def _run_once() -> bool:
         """One pass. Returns True if a harvest actually ran (was due)."""
         nonlocal use_llm
+        do_search = not no_search
         if scheduled:
             if not is_harvest_due(ctx.obj["db"]):
                 return False
             mark_harvest_run(ctx.obj["db"])
+            # Discovery runs on its own (slower) schedule; reading known
+            # communities happens every scheduled harvest.
+            do_search = do_search and is_discovery_due(ctx.obj["db"])
             # Unattended: escalate ambiguous posts to the LLM if a key is set.
             if not use_llm and os.environ.get("OPENAI_API_KEY"):
                 use_llm = True
@@ -633,10 +638,12 @@ def harvest_cmd(ctx, niches, no_search, only_new, max_communities, use_llm, verb
         res = harvest(
             ctx.obj["db"], req,
             niches=list(niches) or None,
-            search=not no_search, only_new=only_new,
+            search=do_search, only_new=only_new,
             max_communities=max_communities, use_llm=use_llm, verbose_log=verbose_log,
             include_comments=comments, recency_days=recency_days, all_spaces=all_spaces,
         )
+        if scheduled and do_search:
+            mark_discovery_run(ctx.obj["db"])
         click.echo(
             f"\nDiscovered {res.new_communities} new community/communities.\n"
             f"Read {res.communities_read} community/communities "
@@ -1115,7 +1122,8 @@ def worker_cmd(ctx, poll_seconds, use_llm):
     from circle_leads.storage.job_queue import claim_next, complete
     from circle_leads.scanning import cookie_hosts_vip_first, scan_cookie_host
     from circle_leads.storage.settings_store import (
-        is_harvest_due, load_effective_requirements, mark_harvest_run,
+        is_discovery_due, is_harvest_due, load_effective_requirements,
+        mark_discovery_run, mark_harvest_run,
     )
 
     # Read the same config the dashboard writes (DB override on top of the
@@ -1126,16 +1134,23 @@ def worker_cmd(ctx, poll_seconds, use_llm):
     click.echo("Worker started. Draining the scan-job queue; running harvests "
                "when due. Ctrl-C to stop.")
 
-    def _run_harvest(search: bool = True) -> dict:
+    def _run_harvest(search: bool | None = None) -> dict:
         from circle_leads.harvest import harvest
+        # Discovery (web search) runs on its own schedule -- reading known
+        # communities is cheap and frequent, searching for new ones is metered
+        # (Exa) and rate-limited (DuckDuckGo), so it defaults to once a day.
+        if search is None:
+            search = is_discovery_due(db)
         # VIP-first private communities, then the public harvest.
         priv_leads = 0
         for h in cookie_hosts_vip_first(db):
             priv_leads += scan_cookie_host(db, req, h, use_llm=use_llm).get("leads", 0)
         res = harvest(db, req, verbose_log=True, use_llm=use_llm, search=search)
+        if search:
+            mark_discovery_run(db)
         return {"private_leads": priv_leads, "public_leads": res.leads_found,
                 "communities_read": res.communities_read,
-                "new_communities": res.new_communities}
+                "new_communities": res.new_communities, "searched": search}
 
     last_schedule_check = 0.0
     while True:
@@ -1165,7 +1180,7 @@ def worker_cmd(ctx, poll_seconds, use_llm):
                               "leads": sum(r["leads"] for r in results),
                               "detail": f"scanned {len(results)} communities"}
                 elif job.kind == "harvest":
-                    result = _run_harvest(search=True)
+                    result = _run_harvest()
                 else:
                     result = {"detail": f"unknown job kind {job.kind!r}"}
                 complete(db, job.id, result=result)
@@ -1183,7 +1198,7 @@ def worker_cmd(ctx, poll_seconds, use_llm):
                 if is_harvest_due(db):
                     mark_harvest_run(db)
                     click.echo("  scheduled harvest due -- running")
-                    r = _run_harvest(search=True)
+                    r = _run_harvest()
                     click.echo(f"    harvest: {r}")
             except Exception as exc:  # noqa: BLE001
                 click.echo(f"  schedule error: {exc.__class__.__name__}", err=True)

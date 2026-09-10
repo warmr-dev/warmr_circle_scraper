@@ -1259,24 +1259,40 @@ def create_app(
     @app.get("/api/schedule")
     def api_schedule(_: None = Depends(require_auth)) -> dict[str, Any]:
         from circle_leads.storage.settings_store import (
-            get_schedule, get_setting, SCHEDULE_INTERVALS, KEY_LAST_RUN,
+            get_schedule, get_discovery_schedule, get_setting, SCHEDULE_INTERVALS,
+            KEY_LAST_RUN, KEY_DISCOVERY_LAST_RUN,
         )
         return {
             "schedule": get_schedule(db),
             "options": list(SCHEDULE_INTERVALS.keys()),
             "last_run": get_setting(db, KEY_LAST_RUN),
+            # Second schedule: how often the harvest's web-search (discovery)
+            # phase runs. Reading known communities always runs; searching for
+            # new ones is metered, so it runs less often.
+            "discovery_schedule": get_discovery_schedule(db),
+            "discovery_options": ["every_run", "every_6h", "every_12h",
+                                  "daily", "weekly", "off"],
+            "last_search": get_setting(db, KEY_DISCOVERY_LAST_RUN),
         }
 
     @app.post("/api/schedule")
     def api_schedule_save(payload: dict, _: None = Depends(require_auth)) -> dict[str, Any]:
-        from circle_leads.storage.settings_store import set_schedule, get_schedule
+        from circle_leads.storage.settings_store import (
+            set_schedule, get_schedule, set_discovery_schedule, get_discovery_schedule,
+        )
         try:
-            set_schedule(db, str(payload.get("schedule", "")))
+            if payload.get("schedule"):
+                set_schedule(db, str(payload["schedule"]))
+            if payload.get("discovery_schedule"):
+                set_discovery_schedule(db, str(payload["discovery_schedule"]))
         except ValueError as exc:
             raise HTTPException(400, str(exc))
-        log_activity_holder(kind="review",
-                            summary=f"Harvest schedule set to {get_schedule(db)}")
-        return {"ok": True, "schedule": get_schedule(db)}
+        log_activity_holder(
+            kind="review",
+            summary=(f"Harvest schedule {get_schedule(db)}, "
+                     f"discovery {get_discovery_schedule(db)}"))
+        return {"ok": True, "schedule": get_schedule(db),
+                "discovery_schedule": get_discovery_schedule(db)}
 
     @app.get("/api/config")
     def api_config(_: None = Depends(require_auth)) -> dict[str, Any]:
