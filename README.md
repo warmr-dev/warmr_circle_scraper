@@ -269,3 +269,4 @@ pip install -e '.[dev]' && pytest        # 548 tests, offline (no network, no br
 - [`docs/replay_supabase.md`](docs/replay_supabase.md) — encrypted session storage on Supabase.
 - [`deploy/DEPLOY.md`](deploy/DEPLOY.md) — dashboard + worker + Supabase, and the serverless gotchas.
 - [`docs/connector.md`](docs/connector.md) — the optional local connector (a legacy path; the cloud cookie flow supersedes it).
+- [`extension/README.md`](extension/README.md) — browser extension: one click to send a community's session cookie to the dashboard's Join Queue, instead of copy-pasting from DevTools.

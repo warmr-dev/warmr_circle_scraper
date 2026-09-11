@@ -96,6 +96,20 @@ def create_app(
         if not sessions.valid(request.cookies.get(COOKIE_NAME)):
             raise HTTPException(status_code=401, detail="Not authenticated")
 
+    def require_auth_or_extension_token(request: Request) -> None:
+        """Either a signed dashboard session, or the EXTENSION_API_TOKEN secret
+        as the X-Extension-Token header -- so the cookie-grabber browser
+        extension can post a session cookie without logging into the dashboard.
+        Same shape as /api/tick's TICK_TOKEN. Scoped to one route (session
+        storage), not every authed endpoint, so a leaked token can only write a
+        cookie for a host of the caller's choosing -- it can't read leads or
+        change config.
+        """
+        token = os.environ.get("EXTENSION_API_TOKEN", "")
+        if token and request.headers.get("x-extension-token") == token:
+            return
+        require_auth(request)
+
     # --- Auth -------------------------------------------------------------
 
     @app.get("/login", response_class=HTMLResponse)
@@ -560,7 +574,7 @@ def create_app(
 
     @app.post("/api/connections/{host}/session")
     def set_connection_session(
-        host: str, payload: dict, _: None = Depends(require_auth)
+        host: str, payload: dict, _: None = Depends(require_auth_or_extension_token)
     ) -> dict[str, Any]:
         """Store a member session cookie for a community.
 
@@ -621,6 +635,18 @@ def create_app(
         cookies = [{"domain": host, "name": n, "value": v, "path": "/",
                     "secure": True, "session": True} for n, v in got.items()]
         store_session(db, host, cookies)
+
+        # Auto-create the CircleConnection row if this is a brand-new host, so
+        # pasting a cookie is the ONLY step needed -- no separate "Add
+        # community" first. Both scan_cookie_host() and cookie_hosts_vip_first()
+        # key off this row existing, so without it the worker would never pick
+        # the host up despite the cookie being stored. Mirrors what a manual
+        # "Scan now" already does as a side effect.
+        from circle_leads.storage.models import CircleConnection, ConnectionState
+        with db.session() as s:
+            if s.scalar(select(CircleConnection).where(CircleConnection.host == host)) is None:
+                s.add(CircleConnection(host=host, state=ConnectionState.NOT_CONNECTED.value))
+
         log_activity_holder(kind="review", community=host.split(".")[0],
                             summary=f"Session cookies stored for {host}")
         return {"ok": True, "host": host, "cookies": len(cookies),
@@ -1177,6 +1203,66 @@ def create_app(
     def api_new_communities(limit: int = 50, _: None = Depends(require_auth)) -> dict[str, Any]:
         from circle_leads.discovery.persist import new_since
         return {"communities": new_since(db, limit=limit)}
+
+    @app.get("/api/join-queue")
+    def api_join_queue(_: None = Depends(require_auth)) -> dict[str, Any]:
+        """Actionable items for a human: communities that need joining (free ->
+        test account, paid -> main account), and connections whose cookie has
+        lapsed and needs re-pasting. Everything else the harvest already does
+        on its own. See circle_leads/discovery/join_type.py for the classifier.
+        """
+        from circle_leads.storage.models import (
+            CircleConnection, ConnectionState, ReplaySession,
+        )
+
+        broken = {
+            ConnectionState.SESSION_EXPIRED.value,
+            ConnectionState.ACCESS_DENIED.value,
+            ConnectionState.ERROR.value,
+        }
+        with db.session() as s:
+            joined_hosts = {r.host for r in s.scalars(select(ReplaySession)).all()}
+            candidates = s.scalars(
+                select(Community)
+                .where(Community.join_type.in_(["free_join", "paid"]))
+                .order_by(Community.relevance_score.desc())
+            ).all()
+            to_join: list[dict[str, Any]] = []
+            for c in candidates:
+                try:
+                    host = _clean_host(c.url)
+                except HTTPException:
+                    continue  # a malformed url must not 500 the whole queue
+                if host in joined_hosts:
+                    continue  # already have a stored session for it
+                to_join.append({
+                    "slug": c.slug, "name": c.name or c.slug, "host": host,
+                    "url": c.url, "join_type": c.join_type,
+                    "score": round(c.relevance_score or 0),
+                    "join_type_checked_at": (
+                        c.join_type_checked_at.isoformat()
+                        if c.join_type_checked_at else None
+                    ),
+                })
+                if len(to_join) >= 50:
+                    break
+
+            to_refresh = sorted(
+                (
+                    {
+                        "host": c.host, "name": c.name or c.host,
+                        "member_label": c.member_label,
+                        "state": c.state, "state_detail": c.state_detail,
+                        "last_sync_at": (
+                            c.last_sync_at.isoformat() if c.last_sync_at else None
+                        ),
+                    }
+                    for c in s.scalars(select(CircleConnection)).all()
+                    if c.state in broken
+                ),
+                key=lambda r: r["host"],
+            )
+        return {"to_join": to_join, "to_refresh": to_refresh}
 
     @app.post("/api/tick")
     @app.get("/api/tick")

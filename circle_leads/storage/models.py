@@ -92,6 +92,14 @@ class Community(Base):
     # column existed -- the harvest falls back to a URL check for those.
     platform: Mapped[str | None] = mapped_column(String(32), index=True)
 
+    # How this community can be joined: "free_join", "paid", "invite_only",
+    # "locked_unknown", or "unknown" -- see discovery/join_type.py. Refreshed
+    # on every harvest read, independent of `platform`/`access_status`: a
+    # community can be free_join and already have public spaces, or paid and
+    # still expose a public board. NULL until the harvest's first read.
+    join_type: Mapped[str | None] = mapped_column(String(32), index=True)
+    join_type_checked_at: Mapped[datetime | None] = mapped_column(DateTime)
+
     access_status: Mapped[str] = mapped_column(
         String(32), default=AccessState.NOT_VISITED.value, index=True
     )

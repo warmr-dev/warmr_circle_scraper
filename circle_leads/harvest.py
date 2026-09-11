@@ -21,6 +21,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 
 from circle_leads.config.settings import Requirements
+from circle_leads.discovery.join_type import fetch_join_classification
 from circle_leads.discovery.persist import persist_finds
 from circle_leads.discovery.validate_finds import (
     is_interstitial_title,
@@ -279,10 +280,30 @@ def harvest(
                              summary=f"Failed to reach {host}: {exc.__class__.__name__}")
             continue
 
+        # Classify how this community can be joined (free/paid/invite-only),
+        # independent of whether its space list is public -- a fully private
+        # community (empty space list, below) is exactly the case join_type
+        # most needs to explain. One extra public JSON call, no cookie; cheap
+        # next to the reads below, and reused every run so pricing changes
+        # over time get picked up rather than frozen at discovery.
+        try:
+            join = fetch_join_classification(host, session=reader.session)
+        except Exception:  # noqa: BLE001 - classification must never fail the read
+            join = None
+        if join is not None:
+            with db.session() as s:
+                c = s.scalar(select(Community).where(Community.slug == slug))
+                if c is not None:
+                    c.join_type = join.join_type
+                    c.join_type_checked_at = datetime.now(timezone.utc).replace(tzinfo=None)
+
         if not spaces:
             with db.session() as s:
-                log_activity(s, kind="read", community=slug,
-                             summary=f"{host}: no public space list (fully private)")
+                log_activity(
+                    s, kind="read", community=slug,
+                    summary=(f"{host}: no public space list (fully private) "
+                             f"[join: {join.join_type if join else 'unknown'}]"),
+                )
             _mark_synced(db, slug)
             continue
 

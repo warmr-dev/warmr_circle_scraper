@@ -1,0 +1,33 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Warmr Circle Cookie Sync — Settings</title>
+<style>
+  body { font: 14px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+         max-width: 480px; margin: 24px auto; padding: 0 16px; color: #1a1a1a; }
+  label { display: block; margin-top: 14px; font-weight: 600; font-size: 13px; }
+  input { width: 100%; padding: 8px; font-size: 13px; margin-top: 4px; box-sizing: border-box; }
+  button { margin-top: 16px; padding: 8px 16px; font-size: 13px; font-weight: 600;
+           border: none; border-radius: 6px; background: #2563eb; color: #fff; cursor: pointer; }
+  .hint { font-size: 12px; color: #666; margin-top: 4px; }
+  #saved { margin-top: 10px; color: #16a34a; font-size: 13px; min-height: 18px; }
+</style>
+</head>
+<body>
+  <h2>Warmr Circle Cookie Sync</h2>
+  <p class="hint">Set once per browser. The token must match <code>EXTENSION_API_TOKEN</code>
+     on the dashboard (Vercel env var) — ask whoever set that up, or set it yourself.</p>
+
+  <label for="dashboardUrl">Dashboard URL</label>
+  <input id="dashboardUrl" placeholder="https://warmr-circle-scraper.vercel.app">
+
+  <label for="extensionToken">Extension token</label>
+  <input id="extensionToken" type="password" placeholder="matches EXTENSION_API_TOKEN">
+
+  <button id="save">Save</button>
+  <div id="saved"></div>
+
+  <script src="options.js"></script>
+</body>
+</html>

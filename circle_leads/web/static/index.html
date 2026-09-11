@@ -185,6 +185,7 @@
     <button data-view="leads" aria-selected="false"><span class="ic">🎯</span> Leads</button>
     <button data-view="communities" aria-selected="false"><span class="ic">🌐</span> Communities</button>
     <button data-view="connector" aria-selected="false"><span class="ic">🔌</span> Circle Connector</button>
+    <button data-view="joinqueue" aria-selected="false"><span class="ic">📋</span> Join Queue</button>
     <!-- Remote Browser + Session Replay: proven non-working (Cloudflare-blocked).
          Hidden from the dashboard; the cookie-based HTTP path on the Circle
          Connector tab is the working route. Code kept for the PoC record. -->
@@ -514,6 +515,31 @@
     </div>
   </section>
 
+  <!-- JOIN QUEUE -->
+  <section id="view-joinqueue" hidden>
+    <div class="page-head">
+      <h1>Join Queue</h1>
+      <p>Communities the harvest found that need a human to join, or a session that lapsed. Everything else already runs on its own.</p>
+    </div>
+
+    <div class="panel">
+      <h2 style="margin:0 0 2px">To join</h2>
+      <span class="muted" style="font-size:13px">
+        🆓 Free — join with your <b>test account</b>. 💳 Paid — join with your <b>main account</b>, or skip it.
+        Open the join page, join, then paste the session cookie below — no need to add the community first.
+      </span>
+      <div id="jq-to-join" style="margin-top:12px"><div class="empty">Loading…</div></div>
+    </div>
+
+    <div class="panel">
+      <h2 style="margin:0 0 2px">Cookies to refresh</h2>
+      <span class="muted" style="font-size:13px">
+        Connected before, but the session lapsed or was rejected. Log back in on that community and re-paste.
+      </span>
+      <div id="jq-to-refresh" style="margin-top:12px"><div class="empty">Loading…</div></div>
+    </div>
+  </section>
+
   <!-- REMOTE BROWSER (server-hosted Chromium — proof of concept) -->
   <section id="view-remote" hidden>
     <div class="page-head">
@@ -600,11 +626,11 @@ async function api(path, options) {
 }
 
 // --- Navigation -------------------------------------------------------
-const views = ['leads', 'activity', 'stats', 'communities', 'connector', 'config'];
+const views = ['leads', 'activity', 'stats', 'communities', 'connector', 'joinqueue', 'config'];
 const loaders = {
   leads: loadLeads, activity: loadActivity, stats: loadStats,
   communities: loadCommunities, config: loadConfig,
-  connector: loadConnector,
+  connector: loadConnector, joinqueue: loadJoinQueue,
 };
 
 document.querySelectorAll('nav button[data-view]').forEach(btn => {
@@ -1226,6 +1252,114 @@ document.addEventListener('click', async (event) => {
     finally { scan.disabled = false; scan.textContent = orig; }
     return;
   }
+});
+
+// --- Join Queue ---------------------------------------------------------
+// Communities to join (free -> test account, paid -> main account) and
+// connections whose cookie needs refreshing. Own class names (jq-*) so this
+// doesn't collide with the Circle Connector tab's identical-looking cookie
+// form -- each tab refreshes only itself after a save.
+const JOIN_TYPE_STYLE = {
+  free_join: ['🆓 Free — test account', 'var(--high)'],
+  paid: ['💳 Paid — main account', 'var(--medium)'],
+};
+
+function jqCookieBox(host) {
+  return `
+    <details class="jq-cookie" style="margin-top:8px">
+      <summary style="cursor:pointer;font-size:13px;color:var(--accent-ink)">Paste session cookie</summary>
+      <div class="muted" style="font-size:12px;margin:6px 0">
+        Needs <code>_circle_session</code> + <code>user_session_identifier</code>.
+      </div>
+      <div style="font-size:12px;font-weight:600;margin:6px 0 2px">Option A — full cookie-export JSON</div>
+      <textarea class="jq-cookie-json" data-host="${esc(host)}" placeholder="Paste cookie export JSON" style="min-height:70px;font-size:12px"></textarea>
+      <div style="font-size:12px;font-weight:600;margin:8px 0 2px">Option B — the two values</div>
+      <input class="jq-cookie-cs" data-host="${esc(host)}" placeholder="_circle_session value" style="width:100%;font-size:12px;margin-bottom:4px">
+      <input class="jq-cookie-usi" data-host="${esc(host)}" placeholder="user_session_identifier value" style="width:100%;font-size:12px">
+      <div class="row" style="margin-top:6px">
+        <button class="ghost jq-save-cookie" data-host="${esc(host)}">Save cookie</button>
+      </div>
+    </details>`;
+}
+
+async function loadJoinQueue() {
+  const data = await api('/api/join-queue');
+  if (!data) return;
+
+  const joinBox = $('jq-to-join');
+  if (!data.to_join.length) {
+    joinBox.innerHTML = '<div class="empty">Nothing pending — every known free/paid community already has a session.</div>';
+  } else {
+    joinBox.innerHTML = data.to_join.map(c => {
+      const [label, color] = JOIN_TYPE_STYLE[c.join_type] || ['Unknown', 'var(--muted)'];
+      return `<div class="lead" style="margin-bottom:8px">
+        <div class="lead-head">
+          <b>${esc(c.name)}</b>
+          <span class="meta">${esc(c.host)}</span>
+          <span class="pill" style="color:${color};background:color-mix(in srgb, ${color} 14%, transparent)">${label}</span>
+        </div>
+        <div class="meta">score ${c.score}${c.join_type_checked_at ? ' · checked ' + esc(c.join_type_checked_at.replace('T', ' ').slice(0, 16)) : ''}</div>
+        <div class="row" style="margin-top:8px">
+          <a class="ghost" href="${esc(c.url)}" target="_blank" rel="noopener">Open join page ↗</a>
+        </div>
+        ${jqCookieBox(c.host)}
+      </div>`;
+    }).join('');
+  }
+
+  const refreshBox = $('jq-to-refresh');
+  if (!data.to_refresh.length) {
+    refreshBox.innerHTML = '<div class="empty">No broken sessions.</div>';
+  } else {
+    refreshBox.innerHTML = data.to_refresh.map(c => {
+      const [label, color, icon] = CONN_STATE[c.state] || CONN_STATE.error;
+      return `<div class="lead" style="margin-bottom:8px">
+        <div class="lead-head">
+          <b>${esc(c.name)}</b>
+          <span class="meta">${esc(c.host)}</span>
+          <span class="pill" style="color:${color};background:color-mix(in srgb, ${color} 14%, transparent)">${icon} ${esc(label)}</span>
+        </div>
+        <div class="meta">${c.member_label ? 'as ' + esc(c.member_label) + ' · ' : ''}${c.state_detail ? esc(c.state_detail) : ''}${c.last_sync_at ? ' · last synced ' + esc(c.last_sync_at.replace('T', ' ').slice(0, 16)) : ''}</div>
+        ${jqCookieBox(c.host)}
+      </div>`;
+    }).join('');
+  }
+}
+
+document.addEventListener('click', async (event) => {
+  const save = event.target.closest('.jq-save-cookie');
+  if (!save) return;
+  const host = save.dataset.host;
+  const q = sel => document.querySelector(`${sel}[data-host="${CSS.escape(host)}"]`);
+  const jsonBox = q('.jq-cookie-json');
+  const csBox = q('.jq-cookie-cs');
+  const usiBox = q('.jq-cookie-usi');
+  const jsonText = (jsonBox && jsonBox.value || '').trim();
+  const cs = (csBox && csBox.value || '').trim();
+  const usi = (usiBox && usiBox.value || '').trim();
+
+  let body;
+  if (jsonText) {
+    body = { cookies: jsonText };
+  } else if (cs || usi) {
+    body = { session_cookie: cs, user_session_identifier: usi };
+  } else {
+    return toast('Paste the cookie JSON, or the two values');
+  }
+  save.disabled = true;
+  try {
+    const r = await api(`/api/connections/${encodeURIComponent(host)}/session`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (r && r.missing && r.missing.length) {
+      toast(`Saved, but missing: ${r.missing.join(', ')} — scan may fail`);
+    } else {
+      toast(`Session saved for ${host} — the worker will pick it up`);
+    }
+    loadJoinQueue();
+  } catch (e) { toast(String(e.message || e).slice(0, 200)); }
+  finally { save.disabled = false; }
 });
 
 // --- Triggered jobs (search / read) ----------------------------------

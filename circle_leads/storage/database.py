@@ -160,6 +160,8 @@ class Database:
         additions = [
             ("communities", "watching", "BOOLEAN DEFAULT FALSE"),
             ("communities", "platform", "VARCHAR(32)"),
+            ("communities", "join_type", "VARCHAR(32)"),
+            ("communities", "join_type_checked_at", "TIMESTAMP"),
             ("leads", "external_synced_at", "TIMESTAMP"),
             ("circle_connections", "priority", "VARCHAR(16) DEFAULT 'normal'"),
             ("circle_connections", "notes", "TEXT"),
