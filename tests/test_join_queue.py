@@ -27,7 +27,7 @@ def client(monkeypatch):
     return c
 
 
-def _seed_community(client, slug, *, join_type, score=50, url=None):
+def _seed_community(client, slug, *, join_type, score=50, url=None, platform=None):
     """Insert a Community row directly -- join_type is set by the harvest,
     not through any dashboard endpoint, so tests seed it the same way."""
     db = Database(client._db_url)
@@ -36,6 +36,7 @@ def _seed_community(client, slug, *, join_type, score=50, url=None):
         c.join_type = join_type
         c.relevance_score = score
         c.join_type_checked_at = datetime.utcnow()
+        c.platform = platform
 
 
 def test_join_queue_lists_free_and_paid_ranked_by_score(client):
@@ -48,6 +49,20 @@ def test_join_queue_lists_free_and_paid_ranked_by_score(client):
     slugs = [r["slug"] for r in rows]
     assert slugs == ["high-paid", "low-free"]  # ranked, invite_only/None excluded
     assert {r["join_type"] for r in rows} == {"free_join", "paid"}
+
+
+def test_join_queue_excludes_a_priced_discover_listing_with_no_real_circle_host(client):
+    """A Discover listing gets a join_type from its own price signal even when
+    its real host never resolved to Circle -- but there's nowhere for the
+    harvest to read afterwards, so it must not show up as actionable."""
+    _seed_community(client, "priced-but-unreadable", join_type="paid", score=90,
+                     url="https://discover.circle.so/products/priced-but-unreadable",
+                     platform="discover")
+    _seed_community(client, "readable-circle-host", join_type="free_join", score=10,
+                     url="https://readable-circle-host.circle.so", platform="circle")
+
+    slugs = [r["slug"] for r in client.get("/api/join-queue").json()["to_join"]]
+    assert slugs == ["readable-circle-host"]
 
 
 def test_join_queue_excludes_a_community_that_already_has_a_session(client):

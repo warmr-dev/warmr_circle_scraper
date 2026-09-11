@@ -1204,12 +1204,32 @@ def create_app(
         from circle_leads.discovery.persist import new_since
         return {"communities": new_since(db, limit=limit)}
 
+    def _reads_on_circle(platform: str | None, url: str) -> bool:
+        """Mirror of ``harvest._reads_on_circle``: a community the readers can read.
+
+        A Discover listing (``platform == "discover"``) or any other
+        off-Circle page can carry a ``join_type`` (we derive it from the
+        listing's own price signal), but joining it doesn't lead anywhere our
+        scraper can read -- only a real ``<slug>.circle.so`` subdomain or a
+        custom domain classified as ``circle`` does. Rows created before the
+        ``platform`` column existed carry NULL and fall back to the URL shape.
+        """
+        from circle_leads.discovery.validate_finds import is_subdomain_community
+
+        if platform is not None:
+            return platform == "circle"
+        return is_subdomain_community(url)
+
     @app.get("/api/join-queue")
     def api_join_queue(_: None = Depends(require_auth)) -> dict[str, Any]:
         """Actionable items for a human: communities that need joining (free ->
         test account, paid -> main account), and connections whose cookie has
         lapsed and needs re-pasting. Everything else the harvest already does
         on its own. See circle_leads/discovery/join_type.py for the classifier.
+
+        Only communities we can actually read afterwards are listed -- a
+        Discover listing whose real host never resolved to Circle has nowhere
+        for the harvest to follow up, so it's excluded even if priced.
         """
         from circle_leads.storage.models import (
             CircleConnection, ConnectionState, ReplaySession,
@@ -1229,6 +1249,8 @@ def create_app(
             ).all()
             to_join: list[dict[str, Any]] = []
             for c in candidates:
+                if not _reads_on_circle(c.platform, c.url):
+                    continue  # not a Circle host -- nothing for the harvest to read
                 try:
                     host = _clean_host(c.url)
                 except HTTPException:
