@@ -106,6 +106,26 @@ def test_join_queue_lists_only_broken_connections_for_refresh(client):
     assert hosts == {"expired.circle.so", "denied.circle.so"}
 
 
+def test_join_queue_drops_a_broken_connection_for_a_community_that_left_circle(client):
+    """A community can migrate off Circle to its own platform after we already
+    had a session for it -- the stored connection goes stale, but there's no
+    Circle login to refresh any more, so it must not linger as actionable."""
+    _seed_community(client, "migrated", join_type=None,
+                     url="https://migrated.example.com", platform="other")
+    client.post("/api/connections/add", json={"host": "migrated.example.com"})
+    client.post("/api/connections/add", json={"host": "still-circle.circle.so"})
+
+    db = Database(client._db_url)
+    with db.session() as s:
+        s.scalar(select(CircleConnection).where(CircleConnection.host == "migrated.example.com")
+                 ).state = ConnectionState.SESSION_EXPIRED.value
+        s.scalar(select(CircleConnection).where(CircleConnection.host == "still-circle.circle.so")
+                 ).state = ConnectionState.SESSION_EXPIRED.value
+
+    hosts = {r["host"] for r in client.get("/api/join-queue").json()["to_refresh"]}
+    assert hosts == {"still-circle.circle.so"}
+
+
 # --- EXTENSION_API_TOKEN: the cookie-grabber extension's auth --------------
 
 def _anon_client(monkeypatch, *, extension_token=None):

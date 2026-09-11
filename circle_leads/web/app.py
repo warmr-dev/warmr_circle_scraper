@@ -1242,11 +1242,18 @@ def create_app(
         }
         with db.session() as s:
             joined_hosts = {r.host for r in s.scalars(select(ReplaySession)).all()}
-            candidates = s.scalars(
-                select(Community)
-                .where(Community.join_type.in_(["free_join", "paid"]))
-                .order_by(Community.relevance_score.desc())
-            ).all()
+            all_communities = s.scalars(select(Community)).all()
+            non_circle_hosts: set[str] = set()
+            for c in all_communities:
+                if c.platform is not None and c.platform != "circle":
+                    try:
+                        non_circle_hosts.add(_clean_host(c.url))
+                    except HTTPException:
+                        pass
+            candidates = [
+                c for c in all_communities if c.join_type in ("free_join", "paid")
+            ]
+            candidates.sort(key=lambda c: c.relevance_score or 0, reverse=True)
             to_join: list[dict[str, Any]] = []
             for c in candidates:
                 if not _reads_on_circle(c.platform, c.url):
@@ -1280,7 +1287,7 @@ def create_app(
                         ),
                     }
                     for c in s.scalars(select(CircleConnection)).all()
-                    if c.state in broken
+                    if c.state in broken and c.host not in non_circle_hosts
                 ),
                 key=lambda r: r["host"],
             )
