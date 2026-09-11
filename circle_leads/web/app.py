@@ -96,6 +96,20 @@ def create_app(
         if not sessions.valid(request.cookies.get(COOKIE_NAME)):
             raise HTTPException(status_code=401, detail="Not authenticated")
 
+    def require_auth_or_extension_token(request: Request) -> None:
+        """Either a signed dashboard session, or the EXTENSION_API_TOKEN secret
+        as the X-Extension-Token header -- so the cookie-grabber browser
+        extension can post a session cookie without logging into the dashboard.
+        Same shape as /api/tick's TICK_TOKEN. Scoped to one route (session
+        storage), not every authed endpoint, so a leaked token can only write a
+        cookie for a host of the caller's choosing -- it can't read leads or
+        change config.
+        """
+        token = os.environ.get("EXTENSION_API_TOKEN", "")
+        if token and request.headers.get("x-extension-token") == token:
+            return
+        require_auth(request)
+
     # --- Auth -------------------------------------------------------------
 
     @app.get("/login", response_class=HTMLResponse)
@@ -560,7 +574,7 @@ def create_app(
 
     @app.post("/api/connections/{host}/session")
     def set_connection_session(
-        host: str, payload: dict, _: None = Depends(require_auth)
+        host: str, payload: dict, _: None = Depends(require_auth_or_extension_token)
     ) -> dict[str, Any]:
         """Store a member session cookie for a community.
 

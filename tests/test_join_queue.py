@@ -89,3 +89,57 @@ def test_join_queue_lists_only_broken_connections_for_refresh(client):
 
     hosts = {r["host"] for r in client.get("/api/join-queue").json()["to_refresh"]}
     assert hosts == {"expired.circle.so", "denied.circle.so"}
+
+
+# --- EXTENSION_API_TOKEN: the cookie-grabber extension's auth --------------
+
+def _anon_client(monkeypatch, *, extension_token=None):
+    """A TestClient that never logs in -- for testing the token-only path."""
+    monkeypatch.setenv("DASHBOARD_PASSWORD", "testpassword")
+    monkeypatch.setenv("DASHBOARD_SECRET_KEY", "k")
+    if extension_token:
+        monkeypatch.setenv("EXTENSION_API_TOKEN", extension_token)
+    from circle_leads.web.app import create_app
+    db_url = "sqlite:///" + tempfile.mktemp(suffix=".db")
+    return TestClient(create_app(db_url=db_url))
+
+
+def test_session_endpoint_rejects_no_auth_at_all(monkeypatch):
+    anon = _anon_client(monkeypatch, extension_token="shh-secret")
+    r = anon.post("/api/connections/ext-test.circle.so/session",
+                  json={"session_cookie": "a", "user_session_identifier": "b"})
+    assert r.status_code == 401
+
+
+def test_session_endpoint_rejects_the_wrong_token(monkeypatch):
+    anon = _anon_client(monkeypatch, extension_token="shh-secret")
+    r = anon.post("/api/connections/ext-test.circle.so/session",
+                  json={"session_cookie": "a", "user_session_identifier": "b"},
+                  headers={"X-Extension-Token": "wrong"})
+    assert r.status_code == 401
+
+
+def test_session_endpoint_accepts_the_extension_token_without_login(monkeypatch):
+    anon = _anon_client(monkeypatch, extension_token="shh-secret")
+    r = anon.post("/api/connections/ext-test.circle.so/session",
+                  json={"session_cookie": "a", "user_session_identifier": "b"},
+                  headers={"X-Extension-Token": "shh-secret"})
+    assert r.status_code == 200
+
+
+def test_unset_extension_token_never_authenticates(monkeypatch):
+    """No EXTENSION_API_TOKEN configured -> the header can't do anything,
+    even if a caller happens to send a matching-looking value."""
+    anon = _anon_client(monkeypatch, extension_token=None)
+    r = anon.post("/api/connections/ext-test.circle.so/session",
+                  json={"session_cookie": "a", "user_session_identifier": "b"},
+                  headers={"X-Extension-Token": ""})
+    assert r.status_code == 401
+
+
+def test_extension_token_is_scoped_to_the_session_route_only(monkeypatch):
+    """The token must not open up the rest of the dashboard -- it can store a
+    cookie for a host of the caller's choosing, nothing else."""
+    anon = _anon_client(monkeypatch, extension_token="shh-secret")
+    r = anon.get("/api/join-queue", headers={"X-Extension-Token": "shh-secret"})
+    assert r.status_code == 401

@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "Warmr Circle Cookie Sync",
+  "version": "1.0.0",
+  "description": "One click on a Circle community tab: send its session cookie to the Warmr dashboard.",
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Send this community's cookie to Warmr"
+  },
+  "options_page": "options.html",
+  "permissions": ["cookies", "storage"],
+  "host_permissions": ["<all_urls>"]
+}
