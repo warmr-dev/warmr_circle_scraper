@@ -63,6 +63,51 @@ def test_harvest_reads_public_community(db, reqs, monkeypatch):
     assert result.leads_found == 1  # the hiring post, not the job seeker
 
 
+def test_harvest_classifies_join_type(db, reqs, monkeypatch):
+    """Every read (public or fully private) also classifies join_type."""
+    import circle_leads.harvest as h
+    from sqlalchemy import select
+    from circle_leads.storage.models import Community
+    from circle_leads.discovery.join_type import JoinClassification, JoinType
+
+    class Reader:
+        def __init__(self, host, **kw):
+            self.community_host = host
+            self.base = f"https://{host}"
+            self.session = object()  # only needs to exist; fetch is stubbed below
+
+        def list_spaces(self):
+            return []  # fully private -- exactly the case join_type most matters for
+
+        def read_space(self, sid, **kw):
+            return False, []
+
+    monkeypatch.setattr(h, "PublicReader", Reader)
+    monkeypatch.setattr(
+        h, "fetch_join_classification",
+        lambda host, session=None: JoinClassification(JoinType.FREE_JOIN, "stubbed"),
+    )
+    harvest(db, reqs, search=False)
+    with db.session() as s:
+        c = s.scalar(select(Community).where(Community.slug == "pub"))
+        assert c.join_type == JoinType.FREE_JOIN
+        assert c.join_type_checked_at is not None
+
+
+def test_harvest_join_classification_failure_does_not_break_the_read(db, reqs, monkeypatch):
+    """A classifier exception must not abort the read (matches real readers
+    with no .session attribute -- the AttributeError itself is one example)."""
+    import circle_leads.harvest as h
+
+    monkeypatch.setattr(h, "PublicReader", FakePublicReader)
+    monkeypatch.setattr(
+        h, "fetch_join_classification",
+        lambda host, session=None: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    result = harvest(db, reqs, search=False)
+    assert result.communities_read == 1  # the read still completed
+
+
 def test_harvest_marks_communities_synced(db, reqs, monkeypatch):
     import circle_leads.harvest as h
     from sqlalchemy import select
