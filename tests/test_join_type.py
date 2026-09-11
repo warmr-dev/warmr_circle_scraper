@@ -43,6 +43,21 @@ def test_private_community_is_invite_only():
     assert c.join_type == JoinType.INVITE_ONLY
 
 
+def test_subscription_cancelled_overrides_an_open_signup_flag():
+    """trigify-social-circle: allow_signups_to_public_community reads true from
+    before the operator's Circle plan lapsed, but every visitor now actually
+    gets a "Circle plan has expired" page -- confirmed by hand in a browser.
+    subscription_cancelled must win regardless of what else the payload says.
+    """
+    c = _classify_payload({
+        "is_private": False,
+        "allow_signups_to_public_community": True,
+        "has_non_draft_paywalls": False,
+        "subscription_cancelled": True,
+    })
+    assert c.join_type == JoinType.SUBSCRIPTION_EXPIRED
+
+
 def test_open_signup_is_free_join_even_with_a_paywall():
     """being-freelance: sells paid tiers but the free one is still joinable."""
     c = _classify_payload({

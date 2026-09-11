@@ -33,8 +33,10 @@ class JoinType:
     INVITE_ONLY = "invite_only"        # no public signup at all (private or closed)
     LOCKED_UNKNOWN = "locked_unknown"  # even the public metadata call is refused
     UNKNOWN = "unknown"                # not a reachable/recognizable Circle host
+    SUBSCRIPTION_EXPIRED = "subscription_expired"  # operator's own Circle plan
+    # lapsed -- nobody can get in, member or not, until they pay Circle again
 
-    ALL = (FREE_JOIN, PAID, INVITE_ONLY, LOCKED_UNKNOWN, UNKNOWN)
+    ALL = (FREE_JOIN, PAID, INVITE_ONLY, LOCKED_UNKNOWN, UNKNOWN, SUBSCRIPTION_EXPIRED)
 
 
 @dataclass
@@ -50,7 +52,15 @@ def _classify_payload(data: dict) -> JoinClassification:
     present -- ``being-freelance``, ``talentcollective`` and others sell paid
     tiers but still let anyone sign up for the free one, which is what the
     test account can use.
+
+    ``subscription_cancelled`` overrides everything else: the operator's own
+    Circle plan lapsed, so ``allow_signups_to_public_community`` can still
+    read ``true`` from before the lapse while the live site actually serves
+    every visitor a "Circle plan has expired" page (``trigify-social-circle``:
+    flagged free_join by this payload, confirmed dead by hand).
     """
+    if data.get("subscription_cancelled"):
+        return JoinClassification(JoinType.SUBSCRIPTION_EXPIRED, "subscription_cancelled=true")
     if data.get("is_private"):
         return JoinClassification(JoinType.INVITE_ONLY, "is_private=true")
     if data.get("allow_signups_to_public_community"):
