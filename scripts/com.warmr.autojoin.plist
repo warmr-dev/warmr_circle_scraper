@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.warmr.autojoin</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/erkeblanzappar/Documents/Work/Projects/warmr/scripts/auto_join_launchd.sh</string>
+    </array>
+
+    <!-- Every 4 hours. Deliberately not more frequent: today's session found
+         that ~94 community visits from one account in one day triggered
+         fresh 2FA challenges on a few previously-fine hosts -- a wider
+         spacing keeps this looking like occasional human browsing. -->
+    <key>StartInterval</key>
+    <integer>14400</integer>
+
+    <!-- Don't burst a run the moment this is loaded/on every login. -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/erkeblanzappar/Documents/Work/Projects/warmr/logs/auto_join_launchd.out</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/erkeblanzappar/Documents/Work/Projects/warmr/logs/auto_join_launchd.err</string>
+</dict>
+</plist>

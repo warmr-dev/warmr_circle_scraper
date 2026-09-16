@@ -1,9 +1,11 @@
-"""Version B experiment: cookie parsing, encrypted store, and API routes.
+"""Cookie parsing and the encrypted session store (circle_leads/web/replay_store.py).
 
 No network and no real browser here. These lock down the security-relevant
-behaviour: sessions are stored only encrypted, the store refuses without a key,
-routes require the dashboard session, and cookie metadata (never the cookies)
-is what the dashboard sees.
+behaviour: sessions are stored only encrypted (or plainly, by explicit choice),
+and cookie metadata (never the cookies) is what list_sessions() exposes. This
+module is live, load-bearing code -- scanning.py and the auto-join bot use it
+directly -- unlike the now-deleted /api/replay/* dashboard routes that used to
+be tested here too; see the note further down.
 """
 
 from __future__ import annotations
@@ -12,7 +14,6 @@ import json
 import tempfile
 
 import pytest
-from fastapi.testclient import TestClient
 
 from circle_leads.remote_browser.replay import (
     has_session_cookie, parse_cookies, _primary_host,
@@ -107,53 +108,9 @@ def test_store_encrypts_and_round_trips(monkeypatch):
     assert "encrypted_cookies" not in meta  # never exposed
 
 
-# --- routes ----------------------------------------------------------------
-
-@pytest.fixture
-def client(monkeypatch):
-    monkeypatch.setenv("DASHBOARD_PASSWORD", "testpassword")
-    monkeypatch.setenv("DASHBOARD_SECRET_KEY", "k")
-    monkeypatch.setenv("CIRCLE_CRED_KEY", "a-strong-key")
-    from circle_leads.web.app import create_app
-    c = TestClient(create_app(db_url="sqlite:///" + tempfile.mktemp(suffix=".db")))
-    c.post("/login", data={"password": "testpassword"})
-    return c
-
-
-def test_routes_require_the_dashboard_session():
-    import os
-    os.environ["DASHBOARD_PASSWORD"] = "testpassword"
-    os.environ["DASHBOARD_SECRET_KEY"] = "k"
-    from circle_leads.web.app import create_app
-    anon = TestClient(create_app(db_url="sqlite:///" + tempfile.mktemp(suffix=".db")))
-    assert anon.get("/api/replay/sessions").status_code == 401
-    assert anon.post("/api/replay/store", json={}).status_code == 401
-    assert anon.post("/api/replay/test", json={}).status_code == 401
-
-
-def test_store_rejects_an_export_without_a_session_cookie(client):
-    r = client.post("/api/replay/store", json={
-        "host": "x.circle.so",
-        "cookies": [{"domain": "x.circle.so", "name": "_ga", "value": "1"}],
-    })
-    assert r.status_code == 400
-    assert "session cookie" in r.json()["detail"].lower()
-
-
-def test_store_then_list_shows_metadata_only(client):
-    r = client.post("/api/replay/store", json={
-        "host": "www.yourspinstate.com", "cookies": SAMPLE})
-    assert r.status_code == 200 and r.json()["cookie_count"] == 3
-    rows = client.get("/api/replay/sessions").json()["sessions"]
-    assert rows[0]["host"] == "www.yourspinstate.com"
-    assert "cookies" not in rows[0] and "encrypted_cookies" not in rows[0]
-
-
-def test_test_route_404s_without_a_stored_session(client):
-    assert client.post("/api/replay/test", json={"host": "nope.circle.so"}).status_code == 404
-
-
-def test_delete_removes_the_session(client):
-    client.post("/api/replay/store", json={"host": "x.circle.so", "cookies": SAMPLE})
-    client.post("/api/replay/delete", json={"host": "x.circle.so"})
-    assert client.get("/api/replay/sessions").json()["sessions"] == []
+# The /api/replay/* routes that used to be tested here (built by the now-
+# deleted circle_leads/web/remote_browser_api.py) were removed outright: the
+# "Session replay experiment (Version B)" panel was explicitly labeled an
+# experiment and was the only caller of those routes. The encrypted store
+# above (replay_store.py) is untouched -- it's the live mechanism scanning.py
+# and the auto-join bot use directly, with no HTTP route needed.

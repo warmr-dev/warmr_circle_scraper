@@ -121,7 +121,7 @@ def test_leads_endpoint_returns_triaged_leads(auth_client):
     assert data["count"] >= 1
     lead = data["leads"][0]
     assert lead["classification"] == "LEAD"
-    assert lead["reply_draft"]
+    assert "reply_draft" not in lead
     assert lead["review_status"] == "pending_review"
 
 
@@ -229,33 +229,36 @@ def test_communities_endpoint_shows_permission_state(auth_client):
 # --- Triggered jobs ---------------------------------------------------------
 
 
-def test_search_job_requires_niche(auth_client):
-    assert auth_client.post("/api/jobs/search", json={}).status_code == 400
-
-
 def test_read_job_requires_host_and_space(auth_client):
     assert auth_client.post("/api/jobs/read", json={"host": "x.circle.so"}).status_code == 400
 
 
 def test_jobs_require_auth(client):
     assert client.get("/api/jobs").status_code == 401
-    assert client.post("/api/jobs/search", json={"niche": "x"}).status_code == 401
+    assert client.post("/api/jobs/harvest", json={}).status_code == 401
 
 
 def test_job_status_404_for_unknown(auth_client):
     assert auth_client.get("/api/jobs/nope").status_code == 404
 
 
-def test_search_job_starts_and_is_listed(auth_client, monkeypatch):
-    # Stub the search so no network call happens.
-    import circle_leads.discovery.web_search as ws
+def test_discover_directory_job_starts_and_is_listed(auth_client, monkeypatch):
+    # Stub the crawl so no browser/network call happens.
+    import circle_leads.discovery.circle_directory as cd
 
-    class FakeDisc:
-        backend = "stub"
-        ranked = []
+    class FakeResult:
+        goals = []
+        listings = []
+        errors = []
 
-    monkeypatch.setattr(ws, "discover_by_search", lambda *a, **k: FakeDisc())
-    resp = auth_client.post("/api/jobs/search", json={"niche": "test"})
+    class FakePersisted:
+        new_count = 0
+        updated = []
+        unchanged = 0
+
+    monkeypatch.setattr(cd, "crawl_directory", lambda *a, **k: FakeResult())
+    monkeypatch.setattr(cd, "persist_crawl_result", lambda *a, **k: FakePersisted())
+    resp = auth_client.post("/api/jobs/discover-directory")
     assert resp.status_code == 200
     job_id = resp.json()["job"]["id"]
 

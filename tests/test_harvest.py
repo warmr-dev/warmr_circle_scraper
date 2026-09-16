@@ -208,6 +208,35 @@ def test_harvest_reads_a_circle_custom_domain(db, reqs, monkeypatch):
     assert "forum.joelpilger.com" in read
 
 
+def test_harvest_strips_a_deep_link_path_from_the_stored_url(db, reqs, monkeypatch):
+    """A circle_directory-resolved join_url can be a deep link (checkout page,
+    invitation link), not the community's origin. A naive scheme-strip left
+    that path glued onto the host, breaking every API call built from it."""
+    import circle_leads.harvest as h
+    from circle_leads.scraper.public_reader import PublicSpace
+
+    with db.session() as s:
+        c = get_or_create_community(
+            s, slug="aifire",
+            url="https://community.aifire.co/c/welcome-checklist/?utm_source=circle_discover",
+        )
+        c.platform = "circle"
+        c.relevance_score = 40
+
+    read = []
+    class Reader:
+        def __init__(self, host, **kw):
+            self.base = f"https://{host}"; read.append(host)
+        def list_spaces(self):
+            return [PublicSpace("1", "job-posts", "Job Posts")]
+        def read_space(self, sid, **kw):
+            return True, []
+        def community_name(self): return "AI Fire"
+    monkeypatch.setattr(h, "PublicReader", Reader)
+    harvest(db, reqs, search=False)
+    assert "community.aifire.co" in read
+
+
 def test_harvest_skips_non_circle_platforms(db, reqs, monkeypatch):
     """A find classified as facebook/slack is never read."""
     import circle_leads.harvest as h

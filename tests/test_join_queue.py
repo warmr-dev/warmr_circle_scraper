@@ -1,6 +1,12 @@
-"""Dashboard join queue: communities to join + connections needing a fresh
-cookie. No network, no real Circle session -- an in-memory SQLite DB and the
-FastAPI TestClient, same pattern as test_connector.py.
+"""Dashboard's cookie-refresh list (relocated to the Circle Connector tab):
+connections needing a fresh cookie. No network, no real Circle session -- an
+in-memory SQLite DB and the FastAPI TestClient, same pattern as
+test_connector.py.
+
+The old manual "to join" list (/api/join-queue's ``to_join``) was removed
+outright -- superseded by the auto-join bot (circle_leads/join/, built
+separately) -- so its tests went with it; only the "cookies to refresh"
+behaviour survives, now under /api/connections/to-refresh.
 """
 from __future__ import annotations
 
@@ -39,42 +45,6 @@ def _seed_community(client, slug, *, join_type, score=50, url=None, platform=Non
         c.platform = platform
 
 
-def test_join_queue_lists_free_and_paid_ranked_by_score(client):
-    _seed_community(client, "low-free", join_type="free_join", score=20)
-    _seed_community(client, "high-paid", join_type="paid", score=80)
-    _seed_community(client, "closed", join_type="invite_only", score=90)
-    _seed_community(client, "unclassified", join_type=None, score=95)
-
-    rows = client.get("/api/join-queue").json()["to_join"]
-    slugs = [r["slug"] for r in rows]
-    assert slugs == ["high-paid", "low-free"]  # ranked, invite_only/None excluded
-    assert {r["join_type"] for r in rows} == {"free_join", "paid"}
-
-
-def test_join_queue_excludes_a_priced_discover_listing_with_no_real_circle_host(client):
-    """A Discover listing gets a join_type from its own price signal even when
-    its real host never resolved to Circle -- but there's nowhere for the
-    harvest to read afterwards, so it must not show up as actionable."""
-    _seed_community(client, "priced-but-unreadable", join_type="paid", score=90,
-                     url="https://discover.circle.so/products/priced-but-unreadable",
-                     platform="discover")
-    _seed_community(client, "readable-circle-host", join_type="free_join", score=10,
-                     url="https://readable-circle-host.circle.so", platform="circle")
-
-    slugs = [r["slug"] for r in client.get("/api/join-queue").json()["to_join"]]
-    assert slugs == ["readable-circle-host"]
-
-
-def test_join_queue_excludes_a_community_that_already_has_a_session(client):
-    _seed_community(client, "founderscupid", join_type="free_join",
-                     url="https://founderscupid.circle.so")
-    client.post("/api/connections/founderscupid.circle.so/session",
-                json={"session_cookie": "abc", "user_session_identifier": "def"})
-
-    rows = client.get("/api/join-queue").json()["to_join"]
-    assert not any(r["slug"] == "founderscupid" for r in rows)
-
-
 def test_pasting_a_cookie_for_a_brand_new_host_auto_creates_the_connection(client):
     """No /api/connections/add call first -- pasting the cookie is enough for
     the worker's cookie_hosts_vip_first() to pick the host up next run."""
@@ -88,7 +58,7 @@ def test_pasting_a_cookie_for_a_brand_new_host_auto_creates_the_connection(clien
     assert row["state"] == ConnectionState.NOT_CONNECTED.value
 
 
-def test_join_queue_lists_only_broken_connections_for_refresh(client):
+def test_to_refresh_lists_only_broken_connections(client):
     client.post("/api/connections/add", json={"host": "ok.circle.so"})
     client.post("/api/connections/add", json={"host": "expired.circle.so"})
     client.post("/api/connections/add", json={"host": "denied.circle.so"})
@@ -102,11 +72,11 @@ def test_join_queue_lists_only_broken_connections_for_refresh(client):
         s.scalar(select(CircleConnection).where(CircleConnection.host == "denied.circle.so")
                  ).state = ConnectionState.ACCESS_DENIED.value
 
-    hosts = {r["host"] for r in client.get("/api/join-queue").json()["to_refresh"]}
+    hosts = {r["host"] for r in client.get("/api/connections/to-refresh").json()["to_refresh"]}
     assert hosts == {"expired.circle.so", "denied.circle.so"}
 
 
-def test_join_queue_drops_a_broken_connection_for_a_community_that_left_circle(client):
+def test_to_refresh_drops_a_broken_connection_for_a_community_that_left_circle(client):
     """A community can migrate off Circle to its own platform after we already
     had a session for it -- the stored connection goes stale, but there's no
     Circle login to refresh any more, so it must not linger as actionable."""
@@ -122,7 +92,7 @@ def test_join_queue_drops_a_broken_connection_for_a_community_that_left_circle(c
         s.scalar(select(CircleConnection).where(CircleConnection.host == "still-circle.circle.so")
                  ).state = ConnectionState.SESSION_EXPIRED.value
 
-    hosts = {r["host"] for r in client.get("/api/join-queue").json()["to_refresh"]}
+    hosts = {r["host"] for r in client.get("/api/connections/to-refresh").json()["to_refresh"]}
     assert hosts == {"still-circle.circle.so"}
 
 
@@ -176,5 +146,5 @@ def test_extension_token_is_scoped_to_the_session_route_only(monkeypatch):
     """The token must not open up the rest of the dashboard -- it can store a
     cookie for a host of the caller's choosing, nothing else."""
     anon = _anon_client(monkeypatch, extension_token="shh-secret")
-    r = anon.get("/api/join-queue", headers={"X-Extension-Token": "shh-secret"})
+    r = anon.get("/api/connections/to-refresh", headers={"X-Extension-Token": "shh-secret"})
     assert r.status_code == 401

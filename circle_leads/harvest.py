@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlparse
 
 from sqlalchemy import select
 
@@ -92,7 +93,13 @@ def _community_hosts(
                 continue  # Discover listings / FB / Slack / dead hosts can't be read
             if watched_only and not c.watching:
                 continue
-            host = c.url.replace("https://", "").replace("http://", "").strip("/")
+            # A stored url is sometimes a deep link, not the community's origin
+            # (a circle_directory-resolved join_url can be a /checkout/... or
+            # /join?invitation_token=... page) -- a naive scheme-strip left that
+            # path glued onto every API call built from it (PublicReader's own
+            # base, and fetch_join_classification below), breaking both against
+            # a nonsense URL. urlparse().hostname discards the path/query.
+            host = urlparse(c.url).hostname or c.url.replace("https://", "").replace("http://", "").strip("/")
             out.append((host, c.slug, c.last_synced_at, bool(c.watching)))
             if len(out) >= limit:
                 break
@@ -449,7 +456,37 @@ def harvest(
             leads_found=result.leads_found,
         )
 
+    _register_monitored_communities(db)
     return result
+
+
+def _register_monitored_communities(db: Database) -> None:
+    """Push every monitored community to the Warmr portal intake endpoint.
+
+    Best-effort and env-gated: a no-op unless COMMUNITY_INTAKE_API_SECRET is
+    set, and a portal outage must never fail a harvest.
+    """
+    try:
+        from circle_leads.export.community_intake import push_monitored_communities
+
+        res = push_monitored_communities(db)
+        if res.sent or res.errors:
+            with db.session() as s:
+                log_activity(
+                    s,
+                    kind="export",
+                    level="error" if res.errors else "success",
+                    summary=(
+                        f"Community intake: registered {res.sent} community/ies "
+                        f"with the portal"
+                        + (f" — {res.errors[0]}" if res.errors else "")
+                    ),
+                    detail={"sent": res.sent, "attempted": res.attempted,
+                            "skipped": res.skipped,
+                            "errors": "; ".join(res.errors[:3])},
+                )
+    except Exception as exc:  # noqa: BLE001 - the sync must never break a harvest
+        logger.warning("Community intake push failed: %s", exc)
 
 
 def _ago(when: datetime) -> str:

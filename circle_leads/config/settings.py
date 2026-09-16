@@ -48,6 +48,36 @@ class RateLimitConfig(BaseModel):
     max_backoff_seconds: float = 60.0
 
 
+class JoinPersona(BaseModel):
+    """The fixed identity the auto-join bot presents on a community's custom
+    application/onboarding form (circle_leads/join/application_form.py).
+
+    Circle communities with a free-but-gated signup often ask "who are you /
+    what do you do / why do you want to join" -- an LLM answers each question
+    using this persona as context, not by inventing one per community.
+    """
+
+    company_name: str = ""
+    company_description: str = ""
+    contact_name: str = ""
+    contact_role: str = ""
+    why_joining: str = ""
+
+
+class JoinPacingConfig(BaseModel):
+    """Rate limits for the auto-join bot's one Circle account.
+
+    One account joining dozens of communities a day should look like a person
+    exploring communities, not a script -- these bound how fast and how much it
+    does, independent of how large the ICP-qualified backlog is.
+    """
+
+    min_delay_seconds: int = 30
+    jitter_seconds: int = 60
+    max_joins_per_day: int = 25
+    max_join_attempts: int = 2
+
+
 class Requirements(BaseModel):
     """The user-editable lead specification."""
 
@@ -80,6 +110,12 @@ class Requirements(BaseModel):
     excluded_content: list[str] = Field(default_factory=lambda: list(DEFAULT_EXCLUDED_CONTENT))
     retention_days: int = 30
     rate_limit: RateLimitConfig = Field(default_factory=RateLimitConfig)
+    # Escalation cutoff for classifier/icp_relevance.py's rules layer -- the score
+    # band inside which a community's ICP fit is ambiguous enough to ask the LLM,
+    # mirroring llm_escalation_threshold's role for lead classification.
+    icp_escalation_threshold: int = 20
+    join_persona: JoinPersona = Field(default_factory=JoinPersona)
+    join_pacing: JoinPacingConfig = Field(default_factory=JoinPacingConfig)
 
     @field_validator("minimum_confidence")
     @classmethod
@@ -158,6 +194,20 @@ def requirements_to_dict(req: "Requirements") -> dict:
             "max_retries": req.rate_limit.max_retries,
             "backoff_base_seconds": req.rate_limit.backoff_base_seconds,
             "max_backoff_seconds": req.rate_limit.max_backoff_seconds,
+        },
+        "icp_escalation_threshold": req.icp_escalation_threshold,
+        "join_persona": {
+            "company_name": req.join_persona.company_name,
+            "company_description": req.join_persona.company_description,
+            "contact_name": req.join_persona.contact_name,
+            "contact_role": req.join_persona.contact_role,
+            "why_joining": req.join_persona.why_joining,
+        },
+        "join_pacing": {
+            "min_delay_seconds": req.join_pacing.min_delay_seconds,
+            "jitter_seconds": req.join_pacing.jitter_seconds,
+            "max_joins_per_day": req.join_pacing.max_joins_per_day,
+            "max_join_attempts": req.join_pacing.max_join_attempts,
         },
     }
 

@@ -165,8 +165,10 @@ def _dash(monkeypatch):
     monkeypatch.setenv("DASHBOARD_SECRET_KEY", "k")
     monkeypatch.setenv("CIRCLE_CRED_KEY", "test-key")
     from circle_leads.web.app import create_app
-    c = _TC(create_app(db_url="sqlite:///" + _tempfile.mktemp(suffix=".db")))
+    db_url = "sqlite:///" + _tempfile.mktemp(suffix=".db")
+    c = _TC(create_app(db_url=db_url))
     c.post("/login", data={"password": "testpassword"})
+    c._db_url = db_url  # no HTTP route exposes stored sessions; tests read the store directly
     return c
 
 
@@ -185,7 +187,11 @@ def test_store_session_cookie_strips_name_prefix_and_encrypts(monkeypatch):
                      "user_session_identifier": "USI_VALUE"})
     assert r.status_code == 200 and r.json()["cookies"] == 2
     # It's listed as a stored session (metadata only; the blob is encrypted).
-    sessions = c.get("/api/replay/sessions").json()["sessions"]
+    # No HTTP route exposes this (the Version B replay experiment that once did
+    # was removed); read the store directly, same as replay_store's own tests.
+    from circle_leads.storage.database import Database
+    from circle_leads.web.replay_store import list_sessions
+    sessions = list_sessions(Database(c._db_url))
     assert any(s["host"] == "x.circle.so" for s in sessions)
 
 
@@ -284,7 +290,9 @@ def test_removing_a_community_drops_its_stored_session(monkeypatch):
               {"domain": "a.circle.so", "name": "user_session_identifier", "value": "U"}]
     c.post("/api/connections/a.circle.so/session", json={"cookies": json.dumps(export)})
     c.post("/api/connections/a.circle.so/remove")
-    assert c.get("/api/replay/sessions").json()["sessions"] == []   # no orphan credential
+    from circle_leads.storage.database import Database
+    from circle_leads.web.replay_store import list_sessions
+    assert list_sessions(Database(c._db_url)) == []   # no orphan credential
 
 
 def test_clear_session_requires_auth(monkeypatch):

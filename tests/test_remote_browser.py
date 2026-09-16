@@ -1,16 +1,14 @@
-"""Server-hosted remote browser: challenge policy, routes, and the PoC report.
+"""Server-hosted remote browser: challenge policy and the PoC report.
 
 No real browser and no network here. The point of these tests is the policy:
 a verification challenge must STOP the run and be reported, never retried or
-worked around; and no route may accept or emit a Circle cookie/session token.
+worked around. (The dashboard routes that used to expose this -- the Remote
+Browser tab -- were removed outright; see the note further down.)
 """
 
 from __future__ import annotations
 
-import tempfile
-
 import pytest
-from fastapi.testclient import TestClient
 
 from circle_leads.remote_browser.probe import probe_authenticated, probe_environment
 from circle_leads.remote_browser.session import (
@@ -147,66 +145,13 @@ def test_report_carries_no_credentials():
         assert banned not in blob
 
 
-# --- routes ----------------------------------------------------------------
-
-@pytest.fixture
-def client(monkeypatch):
-    monkeypatch.setenv("DASHBOARD_PASSWORD", "testpassword")
-    monkeypatch.setenv("DASHBOARD_SECRET_KEY", "k")
-    from circle_leads.web.app import create_app
-    from circle_leads.web.remote_browser_api import reset_browser
-
-    reset_browser()
-    c = TestClient(create_app(db_url="sqlite:///" + tempfile.mktemp(suffix=".db")))
-    c.post("/login", data={"password": "testpassword"})
-    yield c
-    reset_browser()
-
-
-def test_status_reports_disabled_by_default(client):
-    r = client.get("/api/remote-browser/status")
-    assert r.status_code == 200
-    assert r.json()["enabled"] is False
-
-
-def test_routes_require_the_dashboard_session(monkeypatch):
-    monkeypatch.setenv("DASHBOARD_PASSWORD", "testpassword")
-    monkeypatch.setenv("DASHBOARD_SECRET_KEY", "k")
-    from circle_leads.web.app import create_app
-
-    anon = TestClient(create_app(db_url="sqlite:///" + tempfile.mktemp(suffix=".db")))
-    for method, path in [
-        ("get", "/api/remote-browser/status"),
-        ("post", "/api/remote-browser/start"),
-        ("post", "/api/remote-browser/stop"),
-        ("get", "/api/remote-browser/screenshot"),
-        ("post", "/api/remote-browser/input"),
-        ("post", "/api/remote-browser/probe"),
-        ("post", "/api/remote-browser/navigate"),
-    ]:
-        resp = (anon.get(path) if method == "get" else anon.post(path, json={}))
-        assert resp.status_code == 401, f"{path} was reachable without a session"
-
-
-def test_disabled_blocks_every_action_route(client):
-    for path in ("/api/remote-browser/start", "/api/remote-browser/stop",
-                 "/api/remote-browser/probe", "/api/remote-browser/navigate"):
-        assert client.post(path, json={"host": "x.circle.so"}).status_code == 503
-    assert client.get("/api/remote-browser/screenshot").status_code == 503
-
-
-def test_enabled_validates_the_host(client, monkeypatch):
-    monkeypatch.setenv("REMOTE_BROWSER_ENABLED", "true")
-    assert client.post("/api/remote-browser/probe", json={"host": ""}).status_code == 400
-    assert client.post("/api/remote-browser/navigate", json={"host": "nodots"}).status_code == 400
-
-
-def test_there_is_no_route_that_imports_a_session(client):
-    """Cookie/session import-and-replay is out of scope; no such route exists."""
-    paths = {getattr(r, "path", "") for r in client.app.routes}
-    for banned in ("/api/remote-browser/cookies", "/api/remote-browser/import",
-                   "/api/remote-browser/session", "/api/remote-browser/restore"):
-        assert banned not in paths
+# The dashboard routes that used to be tested here (/api/remote-browser/*,
+# built by circle_leads/web/remote_browser_api.py) were removed outright: the
+# Remote Browser tab was explicitly labeled "proven non-working
+# (Cloudflare-blocked)... kept for the PoC record" and shipped hidden. The
+# underlying circle_leads/remote_browser/ package (challenge detection, the
+# PoC report, the browser thread) stays -- it's not dashboard-specific and
+# untouched by that cleanup -- so its unit tests below still apply.
 
 
 # --- the browser thread ----------------------------------------------------

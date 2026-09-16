@@ -23,9 +23,8 @@ from circle_leads.config.settings import (
 from circle_leads.export.exporters import query_leads
 from circle_leads.storage.activity import log_activity, recent_activity
 from circle_leads.storage.database import Database
-from circle_leads.storage.models import Community, Lead, Post
+from circle_leads.storage.models import Community, JoinStatus, Lead, Post
 from circle_leads.triage.pipeline import triage_text
-from circle_leads.triage.reply import draft_reply
 from circle_leads.web.jobs import JobRegistry
 from circle_leads.web.auth import (
     COOKIE_NAME,
@@ -213,9 +212,6 @@ def create_app(
                 if lead_id
                 else "pending_review"
             )
-            row["reply_draft"] = draft_reply(
-                row
-            ).text
 
         if status:
             rows = [r for r in rows if r.get("review_status") == status]
@@ -592,7 +588,7 @@ def create_app(
             pasted individually.
         """
         import json as _json
-        from circle_leads.web.replay_store import store_session
+        from circle_leads.web.replay_store import connect_host
         from circle_leads.scraper.member_api_reader import SESSION_COOKIE_NAMES
 
         host = _clean_host(host)
@@ -634,18 +630,10 @@ def create_app(
 
         cookies = [{"domain": host, "name": n, "value": v, "path": "/",
                     "secure": True, "session": True} for n, v in got.items()]
-        store_session(db, host, cookies)
-
-        # Auto-create the CircleConnection row if this is a brand-new host, so
-        # pasting a cookie is the ONLY step needed -- no separate "Add
-        # community" first. Both scan_cookie_host() and cookie_hosts_vip_first()
-        # key off this row existing, so without it the worker would never pick
-        # the host up despite the cookie being stored. Mirrors what a manual
-        # "Scan now" already does as a side effect.
-        from circle_leads.storage.models import CircleConnection, ConnectionState
-        with db.session() as s:
-            if s.scalar(select(CircleConnection).where(CircleConnection.host == host)) is None:
-                s.add(CircleConnection(host=host, state=ConnectionState.NOT_CONNECTED.value))
+        # connect_host() stores the cookie AND auto-creates the CircleConnection
+        # row if this is a brand-new host, so pasting a cookie is the ONLY step
+        # needed -- no separate "Add community" first.
+        connect_host(db, host, cookies)
 
         log_activity_holder(kind="review", community=host.split(".")[0],
                             summary=f"Session cookies stored for {host}")
@@ -902,30 +890,50 @@ def create_app(
 
     # --- Triggered jobs (search / read) -----------------------------------
 
-    @app.post("/api/jobs/search")
-    def start_search(payload: dict, _: None = Depends(require_auth)) -> dict[str, Any]:
-        niche = str(payload.get("niche") or "").strip()
-        if not niche:
-            raise HTTPException(400, "Give a niche to search for.")
-        min_score = int(payload.get("min_score", 15))
+    @app.post("/api/jobs/discover-directory")
+    def start_discover_directory(_: None = Depends(require_auth)) -> dict[str, Any]:
+        """Bulk-crawl Circle's own discovery marketplace (discover.circle.so)
+        and persist the results. This is the Communities tab's "Sync directory
+        now" button.
 
+        Deviation note: the plan (§7) suggested wiring this through the durable
+        ScanJob queue like /api/connections/*/scan, so the always-on Railway
+        worker (which will carry the Playwright/Chromium image) runs it instead
+        of the dashboard process. That queue's worker loop lives outside
+        circle_leads/web/ (out of scope here) and today only dispatches
+        scan/scan_all/harvest kinds, so a queued "discover_directory" job would
+        never be claimed. Per the plan's own fallback allowance, this instead
+        reuses the JobRegistry background-thread pattern already used by
+        /api/jobs/harvest -- same UI polling shape, no worker-side change
+        needed. `crawl_directory` requires Playwright/Chromium (not installed
+        on a serverless/Vercel dashboard); it already raises a clear error in
+        that case, which surfaces here as the job's error detail.
+        """
         def run(job):
-            from circle_leads.discovery.web_search import discover_by_search
-            from circle_leads.discovery.persist import persist_finds
-
-            job.detail = f"Searching '{niche}'..."
-            disc = discover_by_search(niche)
-            res = persist_finds(
-                db, disc.ranked, niche=niche, min_score=min_score, source="dashboard",
+            from circle_leads.discovery.circle_directory import (
+                crawl_directory, persist_crawl_result,
             )
-            job.result = {
-                "new": res.new_count, "updated": len(res.updated),
-                "backend": disc.backend,
-                "new_names": [c.name or c.slug for c in res.new[:10]],
-            }
-            job.detail = f"{res.new_count} new community/communities found."
 
-        job = jobs.start("search", f"Search: {niche}", run)
+            job.detail = "Crawling discover.circle.so (this can take a while)..."
+            result = crawl_directory()
+            persisted = persist_crawl_result(db, result)
+            job.result = {
+                "goals": len(result.goals), "listings": len(result.listings),
+                "new": persisted.new_count, "updated": len(persisted.updated),
+                "unchanged": persisted.unchanged,
+                "errors": result.errors,
+            }
+            job.detail = (
+                f"{len(result.goals)} goal(s), {len(result.listings)} listing(s) -- "
+                f"{persisted.new_count} new, {len(persisted.updated)} updated."
+            )
+            log_activity_holder(
+                kind="discover", level="success" if persisted.new_count else "info",
+                summary=(f"Directory sync: {persisted.new_count} new, "
+                         f"{len(persisted.updated)} updated community/communities"),
+            )
+
+        job = jobs.start("discover_directory", "Sync Circle directory", run)
         return {"job": job.as_dict()}
 
     @app.post("/api/jobs/read")
@@ -1066,9 +1074,10 @@ def create_app(
 
     @app.get("/api/jobs")
     def list_jobs(_: None = Depends(require_auth)) -> dict[str, Any]:
-        return {"jobs": jobs.list(), "search_running": jobs.active("search"),
+        return {"jobs": jobs.list(),
                 "read_running": jobs.active("read"),
-                "harvest_running": jobs.active("harvest")}
+                "harvest_running": jobs.active("harvest"),
+                "discover_directory_running": jobs.active("discover_directory")}
 
     @app.get("/api/jobs/{job_id}")
     def job_status(job_id: str, _: None = Depends(require_auth)) -> dict[str, Any]:
@@ -1081,11 +1090,18 @@ def create_app(
 
     @app.get("/api/stats")
     def api_stats(_: None = Depends(require_auth)) -> dict[str, Any]:
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         with db.session() as s:
             communities = s.scalar(select(func.count()).select_from(Community)) or 0
             posts = s.scalar(select(func.count()).select_from(Post)) or 0
             leads = s.scalar(
                 select(func.count()).select_from(Lead).where(Lead.classification == "LEAD")
+            ) or 0
+            leads_today = s.scalar(
+                select(func.count()).select_from(Lead).where(
+                    Lead.classification == "LEAD", Lead.created_at >= today_start,
+                )
             ) or 0
             by_priority = dict(
                 s.execute(
@@ -1097,20 +1113,83 @@ def create_app(
                     select(Lead.review_status, func.count()).group_by(Lead.review_status)
                 ).all()
             )
-            by_community = dict(
-                s.execute(
-                    select(Community.slug, func.count(Lead.id))
-                    .join(Post, Post.community_id == Community.id)
-                    .join(Lead, Lead.post_id == Post.id)
-                    .group_by(Community.slug)
-                ).all()
-            )
-            skill_rows = s.scalars(select(Lead.skills)).all()
             decided = dict(
                 s.execute(
                     select(Lead.decided_by, func.count()).group_by(Lead.decided_by)
                 ).all()
             )
+
+            # Overview additions for the ICP/auto-join pivot: communities by
+            # platform, how many passed the ICP filter, how many the bot has
+            # actually joined, and how big the free-join backlog still is.
+            # "Backlog remaining" mirrors classify_icp_pending's own join-queue
+            # gate (icp_flag AND circle AND free_join/paid AND not_attempted).
+            by_platform = dict(
+                s.execute(
+                    select(Community.platform, func.count()).group_by(Community.platform)
+                ).all()
+            )
+            icp_flagged = s.scalar(
+                select(func.count()).select_from(Community).where(Community.icp_flag.is_(True))
+            ) or 0
+            joined_count = s.scalar(
+                select(func.count()).select_from(Community)
+                .where(Community.join_status == JoinStatus.JOINED.value)
+            ) or 0
+            joined_today = s.scalar(
+                select(func.count()).select_from(Community).where(
+                    Community.join_status == JoinStatus.JOINED.value,
+                    Community.join_attempted_at.is_not(None),
+                    Community.join_attempted_at >= today_start,
+                )
+            ) or 0
+            free_join_backlog = s.scalar(
+                select(func.count()).select_from(Community).where(
+                    Community.icp_flag.is_(True),
+                    Community.platform == "circle",
+                    Community.join_type.in_(["free_join", "paid"]),
+                    Community.join_status == JoinStatus.NOT_ATTEMPTED.value,
+                )
+            ) or 0
+
+            # The community-scraping funnel: found (persisted) -> analyzed (ICP
+            # scored) -> queued for the scraper (ICP-fit, not attempted yet) ->
+            # actually put on the scraper (harvest.py has synced it at least
+            # once -- ScrapeRun/pipeline.py is the older, consent-gated path
+            # and isn't written by the live public-read worker, so it can't be
+            # used here). Each stage's "found"/"analyzed" split by today vs
+            # all-time; the queue is a point-in-time depth, not a rate, so it
+            # gets no today figure.
+            found_today = s.scalar(
+                select(func.count()).select_from(Community)
+                .where(Community.discovered_at >= today_start)
+            ) or 0
+            analyzed_total = s.scalar(
+                select(func.count()).select_from(Community)
+                .where(Community.icp_checked_at.is_not(None))
+            ) or 0
+            analyzed_today = s.scalar(
+                select(func.count()).select_from(Community).where(
+                    Community.icp_checked_at.is_not(None),
+                    Community.icp_checked_at >= today_start,
+                )
+            ) or 0
+            queued_for_scraper = s.scalar(
+                select(func.count()).select_from(Community).where(
+                    Community.icp_flag.is_(True),
+                    Community.join_status == JoinStatus.NOT_ATTEMPTED.value,
+                )
+            ) or 0
+            on_scraper_total = s.scalar(
+                select(func.count()).select_from(Community)
+                .where(Community.last_synced_at.is_not(None))
+            ) or 0
+            on_scraper_today = s.scalar(
+                select(func.count()).select_from(Community).where(
+                    Community.last_synced_at.is_not(None),
+                    Community.last_synced_at >= today_start,
+                )
+            ) or 0
 
             # Leads and communities per day for the last fortnight (drives the
             # Overview growth chart).
@@ -1121,11 +1200,6 @@ def create_app(
             community_daily_rows = s.execute(
                 select(Community.discovered_at).where(Community.discovered_at >= cutoff)
             ).all()
-
-        skills = Counter()
-        for row in skill_rows:
-            for skill in row or []:
-                skills[skill] += 1
 
         def daily_timeline(rows: list) -> list[dict[str, Any]]:
             counts = Counter(d[0].date().isoformat() for d in rows if d[0])
@@ -1149,11 +1223,26 @@ def create_app(
             "communities": communities,
             "posts": posts,
             "leads": leads,
+            "leads_today": leads_today,
             "by_priority": by_priority,
             "by_status": by_status,
-            "by_community": by_community,
-            "top_skills": skills.most_common(10),
             "decided_by": decided,
+            "by_platform": by_platform,
+            "icp_flagged": icp_flagged,
+            "joined_count": joined_count,
+            "joined_today": joined_today,
+            "free_join_backlog": free_join_backlog,
+            # The scraping pipeline funnel: found -> analyzed -> queued for the
+            # scraper -> actually on the scraper. See api_stats for definitions.
+            "funnel": {
+                "found_today": found_today,
+                "found_total": communities,
+                "analyzed_today": analyzed_today,
+                "analyzed_total": analyzed_total,
+                "queued_for_scraper": queued_for_scraper,
+                "on_scraper_today": on_scraper_today,
+                "on_scraper_total": on_scraper_total,
+            },
             # "timeline" kept for backward compatibility with older clients;
             # new dashboards should use leads_timeline / communities_timeline.
             "timeline": leads_timeline,
@@ -1172,7 +1261,7 @@ def create_app(
     def api_communities(_: None = Depends(require_auth)) -> dict[str, Any]:
         with db.session() as s:
             rows = s.scalars(
-                select(Community).order_by(Community.relevance_score.desc())
+                select(Community).order_by(Community.icp_score.desc())
             ).all()
             return {
                 "communities": [
@@ -1181,13 +1270,15 @@ def create_app(
                         "name": c.name,
                         "url": c.url,
                         "platform": c.platform,
-                        "price_label": c.price_label,
-                        "relevance_score": c.relevance_score,
-                        "relevance_reasons": c.relevance_reasons or [],
+                        "icp_score": c.icp_score,
+                        "icp_flag": bool(c.icp_flag),
+                        "join_type": c.join_type,
+                        "join_status": c.join_status,
+                        "join_status_detail": c.join_status_detail,
+                        "discovery_source": c.discovery_source,
                         "discovered_at": (
                             c.discovered_at.isoformat() if c.discovered_at else None
                         ),
-                        "relevant": c.relevant,
                         "watching": bool(c.watching),
                         "access_status": c.access_status,
                         "permission_status": c.permission_status,
@@ -1204,36 +1295,16 @@ def create_app(
         from circle_leads.discovery.persist import new_since
         return {"communities": new_since(db, limit=limit)}
 
-    def _reads_on_circle(platform: str | None, url: str) -> bool:
-        """Mirror of ``harvest._reads_on_circle``: a community the readers can read.
-
-        A Discover listing (``platform == "discover"``) or any other
-        off-Circle page can carry a ``join_type`` (we derive it from the
-        listing's own price signal), but joining it doesn't lead anywhere our
-        scraper can read -- only a real ``<slug>.circle.so`` subdomain or a
-        custom domain classified as ``circle`` does. Rows created before the
-        ``platform`` column existed carry NULL and fall back to the URL shape.
+    @app.get("/api/connections/to-refresh")
+    def api_connections_to_refresh(_: None = Depends(require_auth)) -> dict[str, Any]:
+        """Connections whose stored session cookie has lapsed or been rejected
+        and needs re-pasting. Lives under Circle Connector (relocated from the
+        old Join Queue tab's "cookies to refresh" list) since that's where the
+        cookie-paste flow already is; the rest of the old Join Queue -- the
+        manual "to join" list -- is superseded by the auto-join bot
+        (circle_leads/join/, built separately) and has been removed outright.
         """
-        from circle_leads.discovery.validate_finds import is_subdomain_community
-
-        if platform is not None:
-            return platform == "circle"
-        return is_subdomain_community(url)
-
-    @app.get("/api/join-queue")
-    def api_join_queue(_: None = Depends(require_auth)) -> dict[str, Any]:
-        """Actionable items for a human: communities that need joining (free ->
-        test account, paid -> main account), and connections whose cookie has
-        lapsed and needs re-pasting. Everything else the harvest already does
-        on its own. See circle_leads/discovery/join_type.py for the classifier.
-
-        Only communities we can actually read afterwards are listed -- a
-        Discover listing whose real host never resolved to Circle has nowhere
-        for the harvest to follow up, so it's excluded even if priced.
-        """
-        from circle_leads.storage.models import (
-            CircleConnection, ConnectionState, ReplaySession,
-        )
+        from circle_leads.storage.models import CircleConnection, ConnectionState
 
         broken = {
             ConnectionState.SESSION_EXPIRED.value,
@@ -1241,8 +1312,10 @@ def create_app(
             ConnectionState.ERROR.value,
         }
         with db.session() as s:
-            joined_hosts = {r.host for r in s.scalars(select(ReplaySession)).all()}
             all_communities = s.scalars(select(Community)).all()
+            # A community can migrate off Circle after we already had a
+            # session for it; there's no Circle login left to refresh, so
+            # exclude it rather than showing a permanently-broken row.
             non_circle_hosts: set[str] = set()
             for c in all_communities:
                 if c.platform is not None and c.platform != "circle":
@@ -1250,32 +1323,6 @@ def create_app(
                         non_circle_hosts.add(_clean_host(c.url))
                     except HTTPException:
                         pass
-            candidates = [
-                c for c in all_communities if c.join_type in ("free_join", "paid")
-            ]
-            candidates.sort(key=lambda c: c.relevance_score or 0, reverse=True)
-            to_join: list[dict[str, Any]] = []
-            for c in candidates:
-                if not _reads_on_circle(c.platform, c.url):
-                    continue  # not a Circle host -- nothing for the harvest to read
-                try:
-                    host = _clean_host(c.url)
-                except HTTPException:
-                    continue  # a malformed url must not 500 the whole queue
-                if host in joined_hosts:
-                    continue  # already have a stored session for it
-                to_join.append({
-                    "slug": c.slug, "name": c.name or c.slug, "host": host,
-                    "url": c.url, "join_type": c.join_type,
-                    "score": round(c.relevance_score or 0),
-                    "join_type_checked_at": (
-                        c.join_type_checked_at.isoformat()
-                        if c.join_type_checked_at else None
-                    ),
-                })
-                if len(to_join) >= 50:
-                    break
-
             to_refresh = sorted(
                 (
                     {
@@ -1291,7 +1338,59 @@ def create_app(
                 ),
                 key=lambda r: r["host"],
             )
-        return {"to_join": to_join, "to_refresh": to_refresh}
+        return {"to_refresh": to_refresh}
+
+    @app.get("/api/join-activity")
+    def api_join_activity(_: None = Depends(require_auth)) -> dict[str, Any]:
+        """Monitoring view for the auto-join bot (circle_leads/join/, built as
+        a separate milestone): counts of communities by join_status, and the
+        most recent attempts. This is what replaced the old Join Queue tab's
+        role -- a report of what the bot has done, not a list of things to
+        click (that manual workflow is gone; see api_connections_to_refresh
+        for the one bit of it that's still relevant).
+        """
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        week_start = now - timedelta(days=7)
+        with db.session() as s:
+            by_status = dict(
+                s.execute(
+                    select(Community.join_status, func.count()).group_by(Community.join_status)
+                ).all()
+            )
+            attempted_today = s.scalar(
+                select(func.count()).select_from(Community).where(
+                    Community.join_attempted_at.is_not(None),
+                    Community.join_attempted_at >= today_start,
+                )
+            ) or 0
+            attempted_week = s.scalar(
+                select(func.count()).select_from(Community).where(
+                    Community.join_attempted_at.is_not(None),
+                    Community.join_attempted_at >= week_start,
+                )
+            ) or 0
+            recent_rows = s.execute(
+                select(Community.slug, Community.name, Community.url,
+                       Community.join_status, Community.join_status_detail,
+                       Community.join_attempted_at)
+                .where(Community.join_attempted_at.is_not(None))
+                .order_by(Community.join_attempted_at.desc())
+                .limit(20)
+            ).all()
+        recent = []
+        for slug, name, url, status, detail, attempted_at in recent_rows:
+            try:
+                host = _clean_host(url)
+            except HTTPException:
+                host = url
+            recent.append({
+                "slug": slug, "name": name or slug, "host": host,
+                "join_status": status, "join_status_detail": detail,
+                "join_attempted_at": attempted_at.isoformat() if attempted_at else None,
+            })
+        return {"by_status": by_status, "attempted_today": attempted_today,
+                "attempted_week": attempted_week, "recent": recent}
 
     @app.post("/api/tick")
     @app.get("/api/tick")
@@ -1450,17 +1549,14 @@ def create_app(
         log_activity_holder(kind="review", summary="Lead requirements updated via dashboard")
         return {"ok": True, "config": canonical}
 
-    # --- Remote browser (server-hosted interactive Chromium) --------------
-    # Proof of concept: the Circle session originates in a browser that lives
-    # here, so nothing is exported from another machine and replayed. Opt-in
-    # via REMOTE_BROWSER_ENABLED; every route requires the dashboard session.
-    from circle_leads.web.remote_browser_api import (
-        build_replay_router as _replay_router, build_router as _rb_router,
-    )
-
-    app.include_router(_rb_router(require_auth))
-    # Version B experiment: cookie store + server-side replay (opt-in, encrypted).
-    app.include_router(_replay_router(require_auth, db))
+    # Remote Browser (server-hosted interactive Chromium PoC) and the Session
+    # Replay experiment (Version B) were removed outright -- both were
+    # explicitly marked "proven non-working (Cloudflare-blocked)" / "kept for
+    # the PoC record" and shipped hidden. Their routes lived in
+    # circle_leads/web/remote_browser_api.py, now deleted; the underlying
+    # circle_leads/remote_browser/ package and web/replay_store.py are
+    # untouched (replay_store.py is live: scanning.py and the auto-join bot
+    # use store_session/load_cookies directly, no HTTP route needed).
 
     return app
 

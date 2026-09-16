@@ -185,11 +185,7 @@
     <button data-view="leads" aria-selected="false"><span class="ic">🎯</span> Leads</button>
     <button data-view="communities" aria-selected="false"><span class="ic">🌐</span> Communities</button>
     <button data-view="connector" aria-selected="false"><span class="ic">🔌</span> Circle Connector</button>
-    <button data-view="joinqueue" aria-selected="false"><span class="ic">📋</span> Join Queue</button>
-    <!-- Remote Browser + Session Replay: proven non-working (Cloudflare-blocked).
-         Hidden from the dashboard; the cookie-based HTTP path on the Circle
-         Connector tab is the working route. Code kept for the PoC record. -->
-    <button data-view="remote" aria-selected="false" hidden><span class="ic">🖥️</span> Remote Browser</button>
+    <button data-view="joinqueue" aria-selected="false"><span class="ic">📋</span> Join Activity</button>
     <button data-view="activity" aria-selected="false"><span class="ic">📡</span> Activity</button>
     <div class="sep"></div>
     <button data-view="config" aria-selected="false"><span class="ic">⚙️</span> Config</button>
@@ -223,6 +219,7 @@
         <button class="action" id="f-apply">Filter</button>
       </div>
     </div>
+    <div id="leads-count" class="meta" style="margin:8px 2px"></div>
     <div id="leads-list"><div class="empty">Loading…</div></div>
   </section>
 
@@ -259,6 +256,12 @@
     </div>
     <div class="grid" id="stat-cards"></div>
 
+    <div class="panel">
+      <h2 style="margin:0 0 2px">Воронка сообществ</h2>
+      <span class="muted" style="font-size:13px">Найдено поиском → проанализировано (ICP) → в очереди на скрапер → поставлено на скрапер.</span>
+      <div class="grid" id="funnel-cards" style="margin-top:10px"></div>
+    </div>
+
     <div class="overview-grid">
       <div class="panel">
         <h2>Growth — last 14 days</h2>
@@ -271,22 +274,10 @@
       </div>
     </div>
 
-    <div class="overview-grid-3">
-      <div class="panel">
-        <h2>By review status</h2>
-        <div id="donut-status"></div>
-      </div>
-      <div class="panel">
-        <h2>Decided by</h2>
-        <div id="donut-decided"></div>
-      </div>
-      <div class="panel">
-        <h2>Most requested skills</h2>
-        <div id="by-skill"></div>
-      </div>
+    <div class="panel">
+      <h2>Communities by platform</h2>
+      <div id="donut-platform"></div>
     </div>
-
-    <div class="panel"><h2>By community</h2><div id="by-community"></div></div>
   </section>
 
   <!-- CONFIG -->
@@ -358,6 +349,9 @@
           <input id="cfg-conf" type="number" step="0.05" min="0" max="1" style="width:80px;margin-left:6px"></label>
         <label style="font-size:13px">AI escalates below score
           <input id="cfg-llm" type="number" min="0" max="200" style="width:80px;margin-left:6px"></label>
+        <label style="font-size:13px" title="Same idea as the lead-escalation threshold above, but for scoring a discovered community's ICP (ideal-customer-profile) fit -- the score band inside which classifier/icp_relevance.py asks the LLM instead of deciding from rules alone.">
+          ICP escalates below score
+          <input id="cfg-icp-llm" type="number" min="0" max="200" style="width:80px;margin-left:6px"></label>
         <label style="font-size:13px">HIGH ≥
           <input id="cfg-high" type="number" min="0" max="100" style="width:70px;margin-left:6px"></label>
         <label style="font-size:13px">MEDIUM ≥
@@ -373,12 +367,23 @@
           <input id="cfg-max-age" type="number" min="0" max="3650" style="width:70px;margin-left:6px"> days</label>
         <label class="muted" style="font-size:13px;display:flex;align-items:center;gap:6px">
           <input id="cfg-all-spaces" type="checkbox" style="width:auto"> Read all public spaces (not just hiring-named)</label>
-        <label style="font-size:13px" title="How many of your target roles/skills to search each harvest. More = more coverage but more search calls. 0 = search all.">
-          Search top <input id="cfg-max-niches" type="number" min="0" max="50" style="width:60px;margin:0 4px"> roles</label>
       </div>
-      <p class="muted" style="font-size:12px;margin-top:6px">
-        Search uses your <b>Target roles</b> above as the niches (plus a few skills). Add roles → they get searched.
-      </p>
+      <details style="margin-top:12px">
+        <summary class="muted" style="font-size:12.5px;cursor:pointer;font-weight:600">Legacy search (manual fallback only)</summary>
+        <p class="muted" style="font-size:12px;margin:8px 0">
+          Automatic discovery now runs off the Circle directory crawl (Communities tab → "Sync directory
+          now"), not this web search — it stays only for the manual <code>search-web</code>/
+          <code>search-watch</code> CLI commands, so its settings aren't deleted, just no longer primary.
+        </p>
+        <div class="row" style="gap:14px;flex-wrap:wrap;align-items:center">
+          <span id="cfg-search-backend" class="muted" style="font-size:13px"></span>
+          <label style="font-size:13px" title="How many of your target roles/skills to search each harvest. More = more coverage but more search calls. 0 = search all.">
+            Search top <input id="cfg-max-niches" type="number" min="0" max="50" style="width:60px;margin:0 4px"> roles</label>
+        </div>
+        <p class="muted" style="font-size:12px;margin-top:6px">
+          Search uses your <b>Target roles</b> above as the niches (plus a few skills). Add roles → they get searched.
+        </p>
+      </details>
       <p class="muted" style="font-size:12.5px;margin:12px 0 6px">
         Each lead scores 0–100. These are the points added when a signal is present, then the total is scaled by confidence:
       </p>
@@ -412,6 +417,42 @@
       </details>
     </div>
     <div class="panel">
+      <h2>Auto-join</h2>
+      <p class="muted" style="margin-top:-6px">The persona and pacing the auto-join bot (built separately) uses when it joins a community on your behalf.</p>
+      <div class="row" style="gap:20px;flex-wrap:wrap;margin-top:10px">
+        <div style="flex:1;min-width:220px">
+          <label style="display:block;font-weight:600;font-size:13px">Company name</label>
+          <input id="jp-company-name" style="width:100%;margin-top:4px">
+        </div>
+        <div style="flex:1;min-width:220px">
+          <label style="display:block;font-weight:600;font-size:13px">Contact name</label>
+          <input id="jp-contact-name" style="width:100%;margin-top:4px">
+        </div>
+        <div style="flex:1;min-width:220px">
+          <label style="display:block;font-weight:600;font-size:13px">Contact role</label>
+          <input id="jp-contact-role" style="width:100%;margin-top:4px">
+        </div>
+      </div>
+      <label style="display:block;margin-top:12px;font-weight:600;font-size:13px">Company description</label>
+      <textarea id="jp-company-desc" style="min-height:60px"></textarea>
+      <label style="display:block;margin-top:12px;font-weight:600;font-size:13px">Why joining
+        <span class="muted" style="font-weight:400">— what the bot tells a community when a custom application/onboarding form asks</span></label>
+      <textarea id="jp-why" style="min-height:60px"></textarea>
+      <p class="muted" style="font-size:12.5px;margin:14px 0 6px">
+        Pacing bounds how fast and how much the one auto-join account does, so it doesn't look scripted:
+      </p>
+      <div class="row" style="gap:18px;flex-wrap:wrap">
+        <label style="font-size:13px">Min delay
+          <input id="jpc-min-delay" type="number" min="0" style="width:80px;margin-left:6px"> sec</label>
+        <label style="font-size:13px">Jitter
+          <input id="jpc-jitter" type="number" min="0" style="width:80px;margin-left:6px"> sec</label>
+        <label style="font-size:13px">Max joins/day
+          <input id="jpc-max-joins" type="number" min="0" style="width:80px;margin-left:6px"></label>
+        <label style="font-size:13px">Max attempts per community
+          <input id="jpc-max-attempts" type="number" min="0" style="width:80px;margin-left:6px"></label>
+      </div>
+    </div>
+    <div class="panel">
       <div class="row">
         <button class="action" id="cfg-save">Save &amp; re-classify</button>
         <button class="ghost" id="cfg-save-harvest">Save &amp; run full harvest</button>
@@ -427,23 +468,13 @@
   <section id="view-communities" hidden>
     <div class="page-head">
       <h1>Communities</h1>
-      <p>Discovered Circle communities. Subscribe (★) to poll one first on the fast lane.</p>
+      <p>Discovered Circle communities, and where each stands in the pipeline.</p>
     </div>
     <div class="panel">
-      <h2 style="margin:0 0 2px">Find leads</h2>
-      <span class="muted" style="font-size:13px">Discover public communities and read their public spaces for hiring posts — no login.</span>
+      <h2 style="margin:0 0 2px">Sync directory</h2>
+      <span class="muted" style="font-size:13px">Bulk-crawl Circle's own discovery marketplace (discover.circle.so) for new communities — replaces the old per-niche web search.</span>
       <div class="row" style="margin-top:10px">
-        <input id="c-niche" placeholder="Niche (optional) — e.g. AI startup founders. Blank = your default niches"
-               style="flex:1;min-width:260px">
-        <button class="action" id="c-harvest">Find leads</button>
-      </div>
-      <div class="row" style="gap:14px;font-size:13px;margin-top:8px">
-        <label class="muted" style="display:flex;gap:6px;align-items:center">
-          <input type="checkbox" id="h-fullsearch" style="width:auto"> Re-check communities already read</label>
-        <label class="muted" style="display:flex;gap:6px;align-items:center">
-          <input type="checkbox" id="h-llm" style="width:auto"> Use AI for ambiguous posts <span class="muted" style="font-size:11px">(on by default when an AI key is set)</span></label>
-        <label class="muted" style="display:flex;gap:6px;align-items:center">
-          <input type="checkbox" id="h-comments" style="width:auto"> Read comments too</label>
+        <button class="action" id="c-sync-directory">Sync directory now</button>
       </div>
       <div id="jobs-strip" class="muted" style="margin-top:10px;font-size:13px"></div>
     </div>
@@ -458,6 +489,19 @@
       <div id="c-add-result" class="muted" style="margin-top:8px;font-size:13px"></div>
     </div>
 
+    <div class="panel">
+      <div class="row">
+        <select id="c-filter-platform"><option value="">Any platform</option></select>
+        <select id="c-filter-icp">
+          <option value="">Any ICP fit</option>
+          <option value="1">🎯 ICP-flagged only</option>
+          <option value="0">Not flagged</option>
+        </select>
+        <select id="c-filter-join-status"><option value="">Any join status</option></select>
+      </div>
+    </div>
+
+    <div id="communities-count" class="meta" style="margin:8px 2px"></div>
     <div class="panel"><div id="communities-table"><div class="empty">Loading…</div></div></div>
   </section>
 
@@ -499,6 +543,14 @@
       <div id="connections-table" style="margin-top:12px"><div class="empty">No private communities yet.</div></div>
     </div>
 
+    <div class="panel">
+      <h2 style="margin:0 0 2px">Cookies to refresh</h2>
+      <span class="muted" style="font-size:13px">
+        Connected before, but the session lapsed or was rejected. Log back in on that community and re-paste.
+      </span>
+      <div id="conn-to-refresh" style="margin-top:12px"><div class="empty">Loading…</div></div>
+    </div>
+
     <div class="panel" style="background:var(--soft2)">
       <h2 style="margin:0 0 6px">How it works — cloud scan with your session cookie</h2>
       <ol class="muted" style="font-size:13px;margin:0;padding-left:18px;line-height:1.7">
@@ -515,90 +567,24 @@
     </div>
   </section>
 
-  <!-- JOIN QUEUE -->
+  <!-- JOIN ACTIVITY (replaces the old Join Queue's manual "to join" list,
+       superseded by the auto-join bot -- circle_leads/join/, built separately) -->
   <section id="view-joinqueue" hidden>
     <div class="page-head">
-      <h1>Join Queue</h1>
-      <p>Communities the harvest found that need a human to join, or a session that lapsed. Everything else already runs on its own.</p>
+      <h1>Join Activity</h1>
+      <p>What the auto-join bot has done so far. A monitoring view, not a work queue — the old manual "click join yourself" list is gone.</p>
+    </div>
+
+    <div class="grid" id="ja-stat-cards"></div>
+
+    <div class="panel">
+      <h2 style="margin:0 0 2px">By join status</h2>
+      <div id="ja-by-status"></div>
     </div>
 
     <div class="panel">
-      <h2 style="margin:0 0 2px">To join</h2>
-      <span class="muted" style="font-size:13px">
-        🆓 Free — join with your <b>test account</b>. 💳 Paid — join with your <b>main account</b>, or skip it.
-        Open the join page, join, then paste the session cookie below — no need to add the community first.
-      </span>
-      <div id="jq-to-join" style="margin-top:12px"><div class="empty">Loading…</div></div>
-    </div>
-
-    <div class="panel">
-      <h2 style="margin:0 0 2px">Cookies to refresh</h2>
-      <span class="muted" style="font-size:13px">
-        Connected before, but the session lapsed or was rejected. Log back in on that community and re-paste.
-      </span>
-      <div id="jq-to-refresh" style="margin-top:12px"><div class="empty">Loading…</div></div>
-    </div>
-  </section>
-
-  <!-- REMOTE BROWSER (server-hosted Chromium — proof of concept) -->
-  <section id="view-remote" hidden>
-    <div class="page-head">
-      <h1>Remote Browser <span class="muted" style="font-size:13px;font-weight:400">proof of concept</span></h1>
-      <p>A Chromium that runs <b>on the server</b>. You log into Circle inside it, so the session originates here — nothing is copied from your Mac and replayed. If Circle shows a verification challenge, this stops and reports it.</p>
-    </div>
-
-    <div class="panel">
-      <div class="row">
-        <input id="rb-host" placeholder="altea.circle.so" style="flex:1;min-width:240px">
-        <button class="action" id="rb-start">Start &amp; open</button>
-        <button class="action" id="rb-probe">Run PoC (env)</button>
-        <button class="action" id="rb-probe-auth">Run PoC (signed in)</button>
-        <button class="action" id="rb-stop">Stop</button>
-      </div>
-      <div id="rb-status" class="muted" style="margin-top:10px;font-size:13px">Loading…</div>
-    </div>
-
-    <div class="panel">
-      <h2 style="margin:0 0 2px">Live view</h2>
-      <span class="muted" style="font-size:13px">Click the image to click in the remote browser; type to send keystrokes. Use this to sign in to Circle yourself. Keystrokes are relayed straight to the browser and are never logged or stored.</span>
-      <div style="margin-top:10px">
-        <img id="rb-screen" alt="Remote browser view"
-             style="max-width:100%;border:1px solid var(--line);border-radius:8px;cursor:crosshair;display:none">
-        <div id="rb-screen-empty" class="empty">Not running. Enter a host and press “Start &amp; open”.</div>
-      </div>
-      <div class="row" style="margin-top:10px">
-        <input id="rb-keys" placeholder="Type here, then press Send (or Enter)" style="flex:1;min-width:240px">
-        <button class="action" id="rb-send">Send text</button>
-        <button class="action" id="rb-enter">Press Enter</button>
-        <label class="muted" style="font-size:13px;display:flex;align-items:center;gap:6px">
-          <input type="checkbox" id="rb-live" checked> auto-refresh
-        </label>
-      </div>
-    </div>
-
-    <div class="panel">
-      <h2 style="margin:0 0 6px">PoC report</h2>
-      <div id="rb-report"><div class="empty">Run the PoC to see the verdict.</div></div>
-    </div>
-
-    <div class="panel" style="border:1px dashed var(--medium)">
-      <h2 style="margin:0 0 2px">⚗️ Session replay <span class="muted" style="font-size:12px;font-weight:400">experiment — Version B</span></h2>
-      <span class="muted" style="font-size:13px">
-        Paste a cookie export from a browser where you're logged into Circle. It's
-        stored <b>encrypted</b> (needs <code>CIRCLE_CRED_KEY</code>) and replayed
-        from the server. Expect Cloudflare to re-challenge it — this measures whether
-        it works, it does not try to bypass anything.
-      </span>
-      <div class="row" style="margin-top:10px">
-        <input id="rp-host" placeholder="www.yourspinstate.com" style="flex:1;min-width:220px">
-      </div>
-      <textarea id="rp-cookies" placeholder='Paste the cookie JSON array here'
-                style="margin-top:8px;min-height:120px"></textarea>
-      <div class="row" style="margin-top:8px">
-        <button class="action" id="rp-store">Store (encrypted)</button>
-        <button class="action" id="rp-test">Test replay from server</button>
-      </div>
-      <div id="rp-sessions" style="margin-top:12px"><div class="empty">No stored sessions.</div></div>
+      <h2 style="margin:0 0 2px">Recent attempts</h2>
+      <div id="ja-recent"><div class="empty">Loading…</div></div>
     </div>
   </section>
 </main>
@@ -630,7 +616,7 @@ const views = ['leads', 'activity', 'stats', 'communities', 'connector', 'joinqu
 const loaders = {
   leads: loadLeads, activity: loadActivity, stats: loadStats,
   communities: loadCommunities, config: loadConfig,
-  connector: loadConnector, joinqueue: loadJoinQueue,
+  connector: loadConnector, joinqueue: loadJoinActivity,
 };
 
 document.querySelectorAll('nav button[data-view]').forEach(btn => {
@@ -658,11 +644,18 @@ function leadCard(lead) {
     lead.hire_target && `<span class="tag">${esc(lead.hire_target)}</span>`,
   ].filter(Boolean).join('');
 
-  const statuses = ['pending_review', 'contacted', 'replied', 'won', 'rejected'];
-  const buttons = lead.id ? statuses.map(s =>
-    `<button class="ghost" data-status="${s}" data-id="${lead.id}"
-       aria-pressed="${lead.review_status === s}">${s.replace('_', ' ')}</button>`
-  ).join('') : '';
+  // Full post content can run long; collapse behind "show more" instead of
+  // always dumping it verbatim -- the one spot a raw field was rendered in full.
+  const content = String(lead.content ?? '');
+  const CONTENT_PREVIEW_LEN = 420;
+  const isLongContent = content.length > CONTENT_PREVIEW_LEN;
+  const shortContent = isLongContent ? content.slice(0, CONTENT_PREVIEW_LEN) + '…' : content;
+  const postHtml = `<div class="post"><span class="post-text">${esc(shortContent)}</span></div>` +
+    (isLongContent
+      ? `<button class="ghost show-more-btn" data-expanded="false"
+           data-full="${esc(content)}" data-short="${esc(shortContent)}"
+           style="margin-top:-4px;margin-bottom:9px">Show more</button>`
+      : '');
 
   return `<div class="lead">
     <div class="lead-head">
@@ -673,13 +666,8 @@ function leadCard(lead) {
         · ${esc(lead.decided_by)} · confidence ${lead.confidence}</span>
     </div>
     <div class="tags">${tags}</div>
-    <div class="post">${esc(lead.content)}</div>
+    ${postHtml}
     ${lead.url ? `<div class="meta"><a href="${esc(lead.url)}" target="_blank" rel="noopener">Open thread ↗</a></div>` : ''}
-    ${lead.reply_draft ? `<div class="draft">${esc(lead.reply_draft)}</div>
-      <div class="row" style="margin-top:7px">
-        <button class="ghost copy" data-text="${esc(lead.reply_draft)}">Copy reply</button>
-        ${buttons}
-      </div>` : `<div class="row" style="margin-top:7px">${buttons}</div>`}
   </div>`;
 }
 
@@ -690,54 +678,27 @@ async function loadLeads() {
   if ($('f-priority').value) params.set('priority', $('f-priority').value);
   if ($('f-status').value) params.set('status', $('f-status').value);
 
-  const data = await api('/api/leads?' + params);
+  const [data, stats] = await Promise.all([api('/api/leads?' + params), api('/api/stats')]);
   if (!data) return;
   $('leads-list').innerHTML = data.leads.length
     ? data.leads.map(leadCard).join('')
     : '<div class="empty">No leads match those filters yet.</div>';
+  $('leads-count').textContent = stats
+    ? `Показано ${data.count} из ${stats.leads}`
+    : `Показано ${data.count}`;
 }
 
 $('f-apply').addEventListener('click', loadLeads);
 
 document.addEventListener('click', async (event) => {
-  const copy = event.target.closest('.copy');
-  if (copy) {
-    await navigator.clipboard.writeText(copy.dataset.text);
-    toast('Reply copied');
+  const showMore = event.target.closest('.show-more-btn');
+  if (showMore) {
+    const expanded = showMore.dataset.expanded === 'true';
+    const postText = showMore.previousElementSibling?.querySelector('.post-text');
+    if (postText) postText.textContent = expanded ? showMore.dataset.short : showMore.dataset.full;
+    showMore.dataset.expanded = String(!expanded);
+    showMore.textContent = expanded ? 'Show more' : 'Show less';
     return;
-  }
-  const joinedBtn = event.target.closest('.mark-joined');
-  if (joinedBtn) {
-    await api(`/api/communities/${joinedBtn.dataset.slug}/visited`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ state: joinedBtn.dataset.state }),
-    });
-    toast(joinedBtn.dataset.state === 'joined' ? 'Marked joined' : 'Reset');
-    loadCommunities();
-    return;
-  }
-  const watchBtn = event.target.closest('.watch-toggle');
-  if (watchBtn) {
-    const nowWatching = watchBtn.dataset.watching !== '1';
-    await api(`/api/communities/${watchBtn.dataset.slug}/watch`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ watching: nowWatching }),
-    });
-    toast(nowWatching ? 'Subscribed — polled first on fast lane' : 'Unsubscribed');
-    loadCommunities();
-    return;
-  }
-  const status = event.target.closest('[data-status]');
-  if (status) {
-    await api(`/api/leads/${status.dataset.id}/status`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status: status.dataset.status }),
-    });
-    toast('Marked ' + status.dataset.status.replace('_', ' '));
-    loadLeads();
   }
 });
 
@@ -784,16 +745,6 @@ $('a-refresh').addEventListener('click', loadActivity);
 $('a-kind').addEventListener('change', loadActivity);
 
 // --- Stats / Overview charts -------------------------------------------
-function bars(target, entries, colorFor) {
-  const items = Object.entries(entries || {}).filter(([, v]) => v);
-  if (!items.length) { $(target).innerHTML = '<div class="muted">No data yet.</div>'; return; }
-  const max = Math.max(...items.map(([, v]) => v));
-  $(target).innerHTML = items.sort((a, b) => b[1] - a[1]).map(([k, v], i) => `
-    <div class="bar"><span class="label ellipsis" title="${esc(k)}">${esc(k)}</span>
-      <span class="track"><span class="fill" style="width:${(v / max) * 100}%;background:${colorFor ? colorFor(k, i) : 'var(--accent)'}"></span></span>
-      <span class="val">${v}</span></div>`).join('');
-}
-
 // Catmull-Rom -> cubic Bezier smoothing, so lines look like smooth curves
 // instead of sharp zig-zags between daily data points.
 function smoothPath(points) {
@@ -903,22 +854,31 @@ function renderDonut(elId, entries, colorFor) {
 }
 
 const PRIORITY_COLOR = { HIGH: 'var(--high)', MEDIUM: 'var(--medium)', LOW: 'var(--low)' };
-const STATUS_COLOR = {
-  pending_review: 'var(--medium)', contacted: 'var(--info)', replied: 'var(--violet)',
-  won: 'var(--high)', rejected: 'var(--danger)',
+const PLATFORM_COLOR = {
+  circle: 'var(--accent)', discover: 'var(--info)', other: 'var(--low)',
 };
-const DECIDED_COLOR = { rule: 'var(--info)', llm: 'var(--violet)', ai: 'var(--violet)' };
-const PALETTE = ['var(--accent)', 'var(--info)', 'var(--violet)', 'var(--high)', 'var(--medium)', 'var(--low)'];
 
 async function loadStats() {
   const data = await api('/api/stats');
   if (!data) return;
 
+  const circleCount = (data.by_platform || {}).circle || 0;
   $('stat-cards').innerHTML = [
-    ['Leads', data.leads, '🎯', 'people looking to hire', 'var(--accent)'],
-    ['Posts read', data.posts, '📄', 'classified from feeds', 'var(--info)'],
-    ['Communities', data.communities, '🌐', 'discovered', 'var(--violet)'],
-    ['High priority', data.by_priority.HIGH || 0, '🔥', 'strongest hiring intent', 'var(--high)'],
+    ['ICP-flagged', data.icp_flagged || 0, '🎯', `of ${data.communities} communities fit the ICP`, 'var(--accent)'],
+    ['Joined', data.joined_count || 0, '✅', `+${data.joined_today || 0} today · ${data.free_join_backlog || 0} backlog remaining`, 'var(--high)'],
+    ['Circle communities', circleCount, '🌐', `of ${data.communities} discovered total`, 'var(--violet)'],
+    ['Leads', data.leads || 0, '🔥', `+${data.leads_today || 0} today · ${data.by_priority.HIGH || 0} high priority`, 'var(--medium)'],
+  ].map(([k, n, ic, sub, color]) =>
+    `<div class="stat"><span class="ic" style="background:color-mix(in srgb, ${color} 16%, transparent);color:${color}">${ic}</span>
+       <div class="k">${k}</div><div class="n">${n}</div>
+       <div class="sub">${sub}</div></div>`).join('');
+
+  const f = data.funnel || {};
+  $('funnel-cards').innerHTML = [
+    ['Найдено', f.found_total || 0, '🔎', `+${f.found_today || 0} сегодня`, 'var(--info)'],
+    ['Проанализировано', f.analyzed_total || 0, '🧭', `+${f.analyzed_today || 0} сегодня`, 'var(--accent)'],
+    ['В очереди на скрапер', f.queued_for_scraper || 0, '⏳', 'сейчас в очереди', 'var(--medium)'],
+    ['Поставлено на скрапер', f.on_scraper_total || 0, '⚙️', `+${f.on_scraper_today || 0} сегодня`, 'var(--high)'],
   ].map(([k, n, ic, sub, color]) =>
     `<div class="stat"><span class="ic" style="background:color-mix(in srgb, ${color} 16%, transparent);color:${color}">${ic}</span>
        <div class="k">${k}</div><div class="n">${n}</div>
@@ -936,96 +896,120 @@ async function loadStats() {
     <span class="item"><span class="dot" style="background:var(--info)"></span>New communities</span>`;
 
   renderDonut('donut-priority', data.by_priority, (k) => PRIORITY_COLOR[k] || 'var(--low)');
-  renderDonut('donut-status', data.by_status, (k) => STATUS_COLOR[k] || 'var(--low)');
-  renderDonut('donut-decided', data.decided_by, (k) => DECIDED_COLOR[k] || 'var(--low)');
-
-  bars('by-community', data.by_community, (_, i) => PALETTE[i % PALETTE.length]);
-  bars('by-skill', Object.fromEntries(data.top_skills || []), (_, i) => PALETTE[i % PALETTE.length]);
+  renderDonut('donut-platform', data.by_platform, (k) => PLATFORM_COLOR[k] || 'var(--low)');
 }
 
 // --- Communities ------------------------------------------------------
-// access_status -> [label, color]. Colors are reused consistently with the
-// pill/badge styling used elsewhere (Leads priority, Connector states).
-const ACCESS_META = {
-  not_visited: ['Not visited', 'var(--muted)'],
-  visited: ['Visited', 'var(--info)'],
-  joined: ['Joined', 'var(--high)'],
+const PLATFORM_LABEL = {
+  circle: 'Circle', discover: 'Discover listing', circle_infra: 'Circle infra',
+  facebook: 'Facebook', slack: 'Slack', skool: 'Skool', mighty_networks: 'Mighty Networks',
+  discord: 'Discord', linkedin: 'LinkedIn', other: 'Other',
+};
+// join_type (how a community CAN be joined -- discovery/join_type.py) -> [label, color].
+const JOIN_TYPE_META = {
+  free_join: ['🆓 Free', 'var(--high)'],
+  paid: ['💳 Paid', 'var(--medium)'],
+  invite_only: ['🔒 Invite only', 'var(--muted)'],
+  locked_unknown: ['🔒 Unknown', 'var(--muted)'],
+  subscription_expired: ['Subscription expired', 'var(--danger)'],
+  unknown: ['Unknown', 'var(--muted)'],
+};
+// join_status (what OUR auto-join bot actually did -- models.JoinStatus) -> [label, color].
+const JOIN_STATUS_META = {
+  not_attempted: ['Not attempted', 'var(--muted)'],
+  queued: ['Queued', 'var(--info)'],
   pending_approval: ['Pending approval', 'var(--medium)'],
-  requires_manual_action: ['Needs action', 'var(--danger)'],
-  not_accessible: ['Not accessible', 'var(--danger)'],
+  joined: ['Joined', 'var(--high)'],
+  paid_skip: ['Paid — skipped', 'var(--muted)'],
+  invite_skip: ['Invite-only — skipped', 'var(--muted)'],
+  subscription_expired_skip: ['Subscription expired — skipped', 'var(--muted)'],
+  failed: ['Failed', 'var(--danger)'],
 };
 
-function scoreColor(score) {
-  if (score >= 70) return 'var(--high)';
-  if (score >= 40) return 'var(--medium)';
-  return 'var(--low)';
+let allCommunities = [];
+
+// Rebuild the platform/join-status filter dropdowns from whatever values are
+// actually present, preserving the currently chosen filter if still valid.
+function populateCommunityFilters(rows) {
+  const platSel = $('c-filter-platform');
+  const curPlat = platSel.value;
+  const platforms = [...new Set(rows.map(c => c.platform || 'unknown'))].sort();
+  platSel.innerHTML = '<option value="">Any platform</option>' +
+    platforms.map(p => `<option value="${esc(p)}">${esc(PLATFORM_LABEL[p] || p)}</option>`).join('');
+  platSel.value = curPlat;
+
+  const statusSel = $('c-filter-join-status');
+  const curStatus = statusSel.value;
+  const statuses = [...new Set(rows.map(c => c.join_status || 'not_attempted'))].sort();
+  statusSel.innerHTML = '<option value="">Any join status</option>' +
+    statuses.map(st => `<option value="${esc(st)}">${esc((JOIN_STATUS_META[st] || [st])[0])}</option>`).join('');
+  statusSel.value = curStatus;
+}
+
+function filteredCommunities() {
+  const platform = $('c-filter-platform').value;
+  const icp = $('c-filter-icp').value;
+  const joinStatus = $('c-filter-join-status').value;
+  return allCommunities.filter(c => {
+    if (platform && (c.platform || 'unknown') !== platform) return false;
+    if (icp === '1' && !c.icp_flag) return false;
+    if (icp === '0' && c.icp_flag) return false;
+    if (joinStatus && (c.join_status || 'not_attempted') !== joinStatus) return false;
+    return true;
+  });
+}
+
+function renderCommunitiesTable() {
+  const rows = filteredCommunities();
+  if (!rows.length) {
+    $('communities-table').innerHTML = '<div class="empty">No communities match those filters.</div>';
+    return;
+  }
+  $('communities-count').textContent = `Показано ${rows.length} из ${allCommunities.length} сообществ`;
+  $('communities-table').innerHTML = `<div class="table-wrap"><table>
+    <thead><tr>
+      <th>Community</th><th>Platform</th><th>ICP</th>
+      <th title="Как вообще можно вступить в это сообщество (публично, платно, по инвайту)">Join type</th>
+      <th title="Что сделал наш бот автовступления с этим сообществом">Join status</th>
+      <th>Discovered</th><th>Actions</th>
+    </tr></thead>
+    <tbody>${rows.map(c => {
+      const platLabel = PLATFORM_LABEL[c.platform] || c.platform || 'Unknown';
+      const icpCell = c.icp_flag
+        ? `<span class="pill" style="color:var(--high);background:color-mix(in srgb, var(--high) 14%, transparent)">🎯 ${Math.round(c.icp_score)}</span>`
+        : `<span class="muted" style="font-size:12px">${c.icp_score ? Math.round(c.icp_score) : '—'}</span>`;
+      const [jtLabel, jtColor] = JOIN_TYPE_META[c.join_type] || [null, 'var(--muted)'];
+      const [jsLabel, jsColor] = JOIN_STATUS_META[c.join_status] || JOIN_STATUS_META.not_attempted;
+      return `<tr>
+        <td><a href="${esc(c.url)}" target="_blank" rel="noopener" class="ellipsis" style="max-width:220px">${esc(c.name || c.slug)} ↗</a></td>
+        <td><span class="pill" style="color:var(--muted);background:color-mix(in srgb, var(--muted) 12%, transparent)">${esc(platLabel)}</span></td>
+        <td>${icpCell}</td>
+        <td>${jtLabel
+          ? `<span class="pill" style="color:${jtColor};background:color-mix(in srgb, ${jtColor} 14%, transparent)">${jtLabel}</span>`
+          : '<span class="muted">—</span>'}</td>
+        <td><span class="pill" style="color:${jsColor};background:color-mix(in srgb, ${jsColor} 14%, transparent)">${jsLabel}</span></td>
+        <td class="muted ellipsis" title="${esc(c.discovered_at || '')}">${esc(c.discovery_source || '—')}</td>
+        <td><a class="ghost" href="${esc(c.url)}" target="_blank" rel="noopener" style="text-decoration:none">Open</a></td>
+      </tr>`;
+    }).join('')}</tbody></table></div>`;
 }
 
 async function loadCommunities() {
   const data = await api('/api/communities');
   if (!data) return;
-  if (!data.communities.length) {
+  allCommunities = data.communities;
+  if (!allCommunities.length) {
     $('communities-table').innerHTML =
-      '<div class="empty">No communities yet. Run <code>circle-leads search-watch</code>.</div>';
+      '<div class="empty">No communities yet. Run <code>circle-leads discover-directory</code>.</div>';
     return;
   }
-  $('communities-table').innerHTML = `<div class="table-wrap"><table>
-    <thead><tr>
-      <th>Community</th><th>Price</th><th class="num">Score</th><th>Discovered</th>
-      <th>Why relevant</th><th>Watch</th><th>Status</th><th>Actions</th>
-    </tr></thead>
-    <tbody>${data.communities.map(c => {
-      const joined = c.access_status !== 'not_visited';
-      const price = c.price_label || '';
-      const isPaid = price.includes('$');
-      const isFree = price.toLowerCase() === 'free';
-      const priceBadge = isFree
-        ? '<span class="pill" style="color:var(--high);background:color-mix(in srgb, var(--high) 14%, transparent)">Free</span>'
-        : isPaid
-        ? `<span class="pill" style="color:var(--medium);background:color-mix(in srgb, var(--medium) 14%, transparent)">${esc(price)}</span>`
-        : '<span class="muted" style="font-size:12px">On site</span>';
-      const why = (c.relevance_reasons || []).filter(r => !r.startsWith('not:') && r !== 'paid').slice(0, 4).join(', ');
-      const score = Math.round(c.relevance_score);
-      const sColor = scoreColor(score);
-      const [statusLabel, statusColor] = ACCESS_META[c.access_status] || ACCESS_META.not_visited;
-      const isCircle = c.platform
-        ? c.platform === 'circle'
-        : (c.url && c.url.includes('.circle.so') && !c.url.includes('discover'));
-      const PLAT_LABEL = { discover: 'Discover listing', circle_infra: 'Circle infra',
-        facebook: 'Facebook', slack: 'Slack', skool: 'Skool', mighty_networks: 'Mighty Networks',
-        discord: 'Discord', linkedin: 'LinkedIn', other: 'Not Circle' };
-      const platBadge = (!isCircle && c.platform && PLAT_LABEL[c.platform])
-        ? ` <span class="pill" style="font-size:11px;color:var(--muted);background:color-mix(in srgb, var(--muted) 12%, transparent)">${PLAT_LABEL[c.platform]}</span>`
-        : '';
-      return `<tr>
-        <td><a href="${esc(c.url)}" target="_blank" rel="noopener" class="ellipsis" style="max-width:220px">${esc(c.name || c.slug)} ↗</a>${platBadge}</td>
-        <td>${priceBadge}</td>
-        <td class="num"><span class="score-badge" style="color:${sColor};background:color-mix(in srgb, ${sColor} 14%, transparent)">${score}</span></td>
-        <td class="muted" title="${esc(c.discovered_at || '')}">${c.discovered_at ? esc(c.discovered_at.slice(0, 10)) : '—'}</td>
-        <td class="muted ellipsis" title="${esc(why || '')}">${esc(why || '—')}</td>
-        <td>${isCircle
-          ? `<button class="ghost watch-toggle" data-slug="${esc(c.slug)}"
-               data-watching="${c.watching ? '1' : '0'}" aria-pressed="${!!c.watching}"
-               title="Subscribe: poll this community first on the 5-min fast lane"
-               style="${c.watching ? 'color:#b45309;border-color:#fde68a;background:#fffbeb;font-weight:600' : ''}">
-               ${c.watching ? '★ Watching' : '☆ Watch'}</button>`
-          : '<span class="muted">—</span>'}</td>
-        <td><span class="pill" style="color:${statusColor};background:color-mix(in srgb, ${statusColor} 14%, transparent)">${esc(statusLabel)}</span></td>
-        <td>
-          <div class="row" style="gap:6px;flex-wrap:nowrap">
-            <a class="ghost" href="${esc(c.url)}" target="_blank" rel="noopener" style="text-decoration:none">Open</a>
-            <button class="ghost mark-joined" data-slug="${esc(c.slug)}"
-               data-state="${joined ? 'not_visited' : 'joined'}"
-               aria-pressed="${joined}">${joined ? 'Undo' : 'Mark joined'}</button>
-            ${isCircle
-              ? `<button class="ghost read-feed" data-host="${esc(c.url.replace('https://', '').replace(/\/.*/, ''))}"
-                   data-slug="${esc(c.slug)}" title="Read this community's feed (must be signed in)">Read feed</button>`
-              : ''}
-          </div>
-        </td>
-      </tr>`;
-    }).join('')}</tbody></table></div>`;
+  populateCommunityFilters(allCommunities);
+  renderCommunitiesTable();
 }
+
+['c-filter-platform', 'c-filter-icp', 'c-filter-join-status'].forEach(id => {
+  $(id).addEventListener('change', renderCommunitiesTable);
+});
 
 // --- Circle Connector (private communities) --------------------------
 const CONN_STATE = {
@@ -1066,6 +1050,7 @@ async function pollScanJobs() {
 
 async function loadConnector() {
   pollScanJobs();
+  loadConnectionsToRefresh();
   const data = await api('/api/connections');
   if (!data) return;
   if (!data.connections.length) {
@@ -1254,86 +1239,60 @@ document.addEventListener('click', async (event) => {
   }
 });
 
-// --- Join Queue ---------------------------------------------------------
-// Communities to join (free -> test account, paid -> main account) and
-// connections whose cookie needs refreshing. Own class names (jq-*) so this
-// doesn't collide with the Circle Connector tab's identical-looking cookie
-// form -- each tab refreshes only itself after a save.
-const JOIN_TYPE_STYLE = {
-  free_join: ['🆓 Free — test account', 'var(--high)'],
-  paid: ['💳 Paid — main account', 'var(--medium)'],
-};
-
-function jqCookieBox(host) {
+// --- Cookies to refresh (Circle Connector tab) -------------------------
+// Relocated from the old Join Queue tab: connections whose session lapsed or
+// was rejected. Own class names (cr-*) so this doesn't collide with the main
+// connections list's identical-looking cookie form -- both can show the same
+// host at once, and each refreshes independently after a save.
+function crCookieBox(host) {
   return `
-    <details class="jq-cookie" style="margin-top:8px">
+    <details class="cr-cookie" style="margin-top:8px">
       <summary style="cursor:pointer;font-size:13px;color:var(--accent-ink)">Paste session cookie</summary>
       <div class="muted" style="font-size:12px;margin:6px 0">
         Needs <code>_circle_session</code> + <code>user_session_identifier</code>.
       </div>
       <div style="font-size:12px;font-weight:600;margin:6px 0 2px">Option A — full cookie-export JSON</div>
-      <textarea class="jq-cookie-json" data-host="${esc(host)}" placeholder="Paste cookie export JSON" style="min-height:70px;font-size:12px"></textarea>
+      <textarea class="cr-cookie-json" data-host="${esc(host)}" placeholder="Paste cookie export JSON" style="min-height:70px;font-size:12px"></textarea>
       <div style="font-size:12px;font-weight:600;margin:8px 0 2px">Option B — the two values</div>
-      <input class="jq-cookie-cs" data-host="${esc(host)}" placeholder="_circle_session value" style="width:100%;font-size:12px;margin-bottom:4px">
-      <input class="jq-cookie-usi" data-host="${esc(host)}" placeholder="user_session_identifier value" style="width:100%;font-size:12px">
+      <input class="cr-cookie-cs" data-host="${esc(host)}" placeholder="_circle_session value" style="width:100%;font-size:12px;margin-bottom:4px">
+      <input class="cr-cookie-usi" data-host="${esc(host)}" placeholder="user_session_identifier value" style="width:100%;font-size:12px">
       <div class="row" style="margin-top:6px">
-        <button class="ghost jq-save-cookie" data-host="${esc(host)}">Save cookie</button>
+        <button class="ghost cr-save-cookie" data-host="${esc(host)}">Save cookie</button>
       </div>
     </details>`;
 }
 
-async function loadJoinQueue() {
-  const data = await api('/api/join-queue');
+async function loadConnectionsToRefresh() {
+  const data = await api('/api/connections/to-refresh');
   if (!data) return;
-
-  const joinBox = $('jq-to-join');
-  if (!data.to_join.length) {
-    joinBox.innerHTML = '<div class="empty">Nothing pending — every known free/paid community already has a session.</div>';
-  } else {
-    joinBox.innerHTML = data.to_join.map(c => {
-      const [label, color] = JOIN_TYPE_STYLE[c.join_type] || ['Unknown', 'var(--muted)'];
-      return `<div class="lead" style="margin-bottom:8px">
-        <div class="lead-head">
-          <b>${esc(c.name)}</b>
-          <span class="meta">${esc(c.host)}</span>
-          <span class="pill" style="color:${color};background:color-mix(in srgb, ${color} 14%, transparent)">${label}</span>
-        </div>
-        <div class="meta">score ${c.score}${c.join_type_checked_at ? ' · checked ' + esc(c.join_type_checked_at.replace('T', ' ').slice(0, 16)) : ''}</div>
-        <div class="row" style="margin-top:8px">
-          <a class="ghost" href="${esc(c.url)}" target="_blank" rel="noopener">Open join page ↗</a>
-        </div>
-        ${jqCookieBox(c.host)}
-      </div>`;
-    }).join('');
-  }
-
-  const refreshBox = $('jq-to-refresh');
+  const box = $('conn-to-refresh');
+  if (!box) return;
   if (!data.to_refresh.length) {
-    refreshBox.innerHTML = '<div class="empty">No broken sessions.</div>';
-  } else {
-    refreshBox.innerHTML = data.to_refresh.map(c => {
-      const [label, color, icon] = CONN_STATE[c.state] || CONN_STATE.error;
-      return `<div class="lead" style="margin-bottom:8px">
-        <div class="lead-head">
-          <b>${esc(c.name)}</b>
-          <span class="meta">${esc(c.host)}</span>
-          <span class="pill" style="color:${color};background:color-mix(in srgb, ${color} 14%, transparent)">${icon} ${esc(label)}</span>
-        </div>
-        <div class="meta">${c.member_label ? 'as ' + esc(c.member_label) + ' · ' : ''}${c.state_detail ? esc(c.state_detail) : ''}${c.last_sync_at ? ' · last synced ' + esc(c.last_sync_at.replace('T', ' ').slice(0, 16)) : ''}</div>
-        ${jqCookieBox(c.host)}
-      </div>`;
-    }).join('');
+    box.innerHTML = '<div class="empty">No broken sessions.</div>';
+    return;
   }
+  box.innerHTML = data.to_refresh.map(c => {
+    const [label, color, icon] = CONN_STATE[c.state] || CONN_STATE.error;
+    return `<div class="lead" style="margin-bottom:8px">
+      <div class="lead-head">
+        <b>${esc(c.name)}</b>
+        <span class="meta">${esc(c.host)}</span>
+        <span class="pill" style="color:${color};background:color-mix(in srgb, ${color} 14%, transparent)">${icon} ${esc(label)}</span>
+      </div>
+      <div class="meta">${c.member_label ? 'as ' + esc(c.member_label) + ' · ' : ''}${c.state_detail ? esc(c.state_detail) : ''}${c.last_sync_at ? ' · last synced ' + esc(c.last_sync_at.replace('T', ' ').slice(0, 16)) : ''}</div>
+      ${crCookieBox(c.host)}
+    </div>`;
+  }).join('');
 }
 
 document.addEventListener('click', async (event) => {
-  const save = event.target.closest('.jq-save-cookie');
+  const save = event.target.closest('.cr-save-cookie');
   if (!save) return;
   const host = save.dataset.host;
   const q = sel => document.querySelector(`${sel}[data-host="${CSS.escape(host)}"]`);
-  const jsonBox = q('.jq-cookie-json');
-  const csBox = q('.jq-cookie-cs');
-  const usiBox = q('.jq-cookie-usi');
+  const jsonBox = q('.cr-cookie-json');
+  const csBox = q('.cr-cookie-cs');
+  const usiBox = q('.cr-cookie-usi');
   const jsonText = (jsonBox && jsonBox.value || '').trim();
   const cs = (csBox && csBox.value || '').trim();
   const usi = (usiBox && usiBox.value || '').trim();
@@ -1357,10 +1316,47 @@ document.addEventListener('click', async (event) => {
     } else {
       toast(`Session saved for ${host} — the worker will pick it up`);
     }
-    loadJoinQueue();
+    loadConnectionsToRefresh();
+    loadConnector();
   } catch (e) { toast(String(e.message || e).slice(0, 200)); }
   finally { save.disabled = false; }
 });
+
+// --- Join Activity -------------------------------------------------------
+// Monitoring view for the auto-join bot (circle_leads/join/, built as a
+// separate milestone): counts by join_status, and the most recent attempts.
+// Not a work queue -- the old Join Queue tab's manual "to join" list is gone.
+async function loadJoinActivity() {
+  const data = await api('/api/join-activity');
+  if (!data) return;
+
+  const byStatus = data.by_status || {};
+  $('ja-stat-cards').innerHTML = [
+    ['Joined', byStatus.joined || 0, '✅', 'var(--high)'],
+    ['Pending approval', byStatus.pending_approval || 0, '⏳', 'var(--medium)'],
+    ['Attempted today', data.attempted_today || 0, '📅', 'var(--info)'],
+    ['Attempted this week', data.attempted_week || 0, '🗓️', 'var(--violet)'],
+  ].map(([k, n, ic, color]) =>
+    `<div class="stat"><span class="ic" style="background:color-mix(in srgb, ${color} 16%, transparent);color:${color}">${ic}</span>
+       <div class="k">${k}</div><div class="n">${n}</div></div>`).join('');
+
+  renderDonut('ja-by-status', byStatus, (k) => (JOIN_STATUS_META[k] || [null, 'var(--low)'])[1]);
+
+  const recent = data.recent || [];
+  $('ja-recent').innerHTML = recent.length ? `<div class="table-wrap"><table>
+    <thead><tr><th>Community</th><th>Host</th><th>Join status</th><th>Detail</th><th>When</th></tr></thead>
+    <tbody>${recent.map(r => {
+      const [label, color] = JOIN_STATUS_META[r.join_status] || [r.join_status, 'var(--muted)'];
+      return `<tr>
+        <td>${esc(r.name)}</td>
+        <td class="muted">${esc(r.host)}</td>
+        <td><span class="pill" style="color:${color};background:color-mix(in srgb, ${color} 14%, transparent)">${label}</span></td>
+        <td class="muted ellipsis" title="${esc(r.join_status_detail || '')}">${esc(r.join_status_detail || '—')}</td>
+        <td class="muted">${r.join_attempted_at ? esc(r.join_attempted_at.replace('T', ' ').slice(0, 16)) : '—'}</td>
+      </tr>`;
+    }).join('')}</tbody></table></div>`
+    : '<div class="empty">No join attempts yet — the auto-join bot hasn\'t run.</div>';
+}
 
 // --- Triggered jobs (search / read) ----------------------------------
 let jobPollTimer = null;
@@ -1391,32 +1387,18 @@ async function pollJobs() {
   }
 }
 
-$('c-harvest').addEventListener('click', async () => {
-  // One action: find communities (optionally for a typed niche) AND read them
-  // for leads. Blank niche = your default niches.
-  const niche = $('c-niche').value.trim();
-  $('c-harvest').disabled = true;
-  $('c-harvest').textContent = 'Working…';
+$('c-sync-directory').addEventListener('click', async () => {
+  const btn = $('c-sync-directory');
+  btn.disabled = true;
+  btn.textContent = 'Syncing…';
   try {
-    const body = {
-      // A typed niche always forces a fresh search of all niches; the checkbox
-      // re-checks communities already read.
-      only_new: !niche && !($('h-fullsearch') && $('h-fullsearch').checked),
-      no_search: false,
-      include_comments: !!($('h-comments') && $('h-comments').checked),
-    };
-    // Only send use_llm when the box is checked; leaving it out lets the server
-    // default AI on whenever an OpenAI key is configured.
-    if ($('h-llm') && $('h-llm').checked) body.use_llm = true;
-    if (niche) body.niches = [niche];
-    const data = await api('/api/jobs/harvest', {
-      method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify(body),
-    });
-    if (data) { toast(niche ? `Finding leads for "${niche}"…` : 'Finding leads…'); pollJobs(); if (!jobPollTimer) jobPollTimer = setInterval(pollJobs, 3000); }
+    const data = await api('/api/jobs/discover-directory', { method: 'POST' });
+    if (data) { toast('Syncing the Circle directory…'); pollJobs(); if (!jobPollTimer) jobPollTimer = setInterval(pollJobs, 3000); }
+  } catch (e) {
+    toast(String(e.message || e).slice(0, 200));
   } finally {
-    $('c-harvest').disabled = false;
-    $('c-harvest').textContent = 'Find leads';
+    btn.disabled = false;
+    btn.textContent = 'Sync directory now';
   }
 });
 
@@ -1443,20 +1425,6 @@ $('c-add').addEventListener('click', async () => {
     $('c-add').disabled = false;
     $('c-add').textContent = 'Add & check';
   }
-});
-
-document.addEventListener('click', async (event) => {
-  const rf = event.target.closest('.read-feed');
-  if (!rf) return;
-  const host = rf.dataset.host, slug = rf.dataset.slug;
-  const raw = prompt(`Read feed for ${host}\n\nEnter space id(s), comma-separated (find them in DevTools -> Network -> internal_api/spaces/<ID>/posts):`);
-  if (!raw) return;
-  const space_ids = raw.split(',').map(s => s.trim()).filter(Boolean);
-  const data = await api('/api/jobs/read', {
-    method: 'POST', headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({ host, slug, space_ids }),
-  });
-  if (data) { toast('Reading feed…'); pollJobs(); if (!jobPollTimer) jobPollTimer = setInterval(pollJobs, 3000); }
 });
 
 // --- Config editor ----------------------------------------------------
@@ -1506,6 +1474,7 @@ async function loadConfig() {
   $('cfg-kw-exclude').value = csv(c.keywords.exclude);
   $('cfg-conf').value = c.minimum_confidence;
   $('cfg-llm').value = c.llm_escalation_threshold;
+  $('cfg-icp-llm').value = c.icp_escalation_threshold;
   $('cfg-high').value = c.priority_thresholds.high;
   $('cfg-med').value = c.priority_thresholds.medium;
   $('cfg-exclude-seekers').checked = c.exclude_job_seekers;
@@ -1519,7 +1488,41 @@ async function loadConfig() {
   $('sc-budget').value = c.scoring.budget_mentioned;
   $('sc-company').value = c.scoring.company_identified;
   $('sc-recent').value = c.scoring.recent_post;
-  $('cfg-status').textContent = (c.llm_available ? `AI on (${c.llm_provider || 'LLM'})` : 'AI off (set OPENAI_API_KEY)') + `  ·  Search: ${c.search_backend || '?'}`;
+  const jp = c.join_persona || {};
+  $('jp-company-name').value = jp.company_name || '';
+  $('jp-company-desc').value = jp.company_description || '';
+  $('jp-contact-name').value = jp.contact_name || '';
+  $('jp-contact-role').value = jp.contact_role || '';
+  $('jp-why').value = jp.why_joining || '';
+  const jpc = c.join_pacing || {};
+  $('jpc-min-delay').value = jpc.min_delay_seconds;
+  $('jpc-jitter').value = jpc.jitter_seconds;
+  $('jpc-max-joins').value = jpc.max_joins_per_day;
+  $('jpc-max-attempts').value = jpc.max_join_attempts;
+  $('cfg-search-backend').textContent = `Search backend: ${c.search_backend || '?'}`;
+  $('cfg-status').textContent = c.llm_available ? `AI on (${c.llm_provider || 'LLM'})` : 'AI off (set OPENAI_API_KEY)';
+}
+
+// join_persona + join_pacing fields, read the same way as the other config
+// panels above -- included in both save bodies below so editing them doesn't
+// get silently discarded by an unrelated Save click.
+function joinConfigFields() {
+  return {
+    icp_escalation_threshold: parseInt($('cfg-icp-llm').value),
+    join_persona: {
+      company_name: $('jp-company-name').value.trim(),
+      company_description: $('jp-company-desc').value.trim(),
+      contact_name: $('jp-contact-name').value.trim(),
+      contact_role: $('jp-contact-role').value.trim(),
+      why_joining: $('jp-why').value.trim(),
+    },
+    join_pacing: {
+      min_delay_seconds: parseInt($('jpc-min-delay').value),
+      jitter_seconds: parseInt($('jpc-jitter').value),
+      max_joins_per_day: parseInt($('jpc-max-joins').value),
+      max_join_attempts: parseInt($('jpc-max-attempts').value),
+    },
+  };
 }
 
 $('cfg-save').addEventListener('click', async () => {
@@ -1540,6 +1543,7 @@ $('cfg-save').addEventListener('click', async () => {
       target_skill_match: parseInt($('sc-skill').value), budget_mentioned: parseInt($('sc-budget').value),
       company_identified: parseInt($('sc-company').value), recent_post: parseInt($('sc-recent').value),
     },
+    ...joinConfigFields(),
   };
   $('cfg-save').disabled = true; $('cfg-status').textContent = 'Saving…';
   try {
@@ -1592,6 +1596,7 @@ async function saveConfigOnly() {
       target_skill_match: parseInt($('sc-skill').value), budget_mentioned: parseInt($('sc-budget').value),
       company_identified: parseInt($('sc-company').value), recent_post: parseInt($('sc-recent').value),
     },
+    ...joinConfigFields(),
   };
   const resp = await fetch('/api/config', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
   if (resp.status === 401) { window.location='/login'; return false; }
@@ -1601,226 +1606,6 @@ async function saveConfigOnly() {
 loadStats();
 pollJobs();
 
-// --- Remote browser (server-hosted Chromium, PoC) ---------------------
-// The live view is a screenshot poll plus an input relay: clicks and
-// keystrokes are forwarded to the browser running on the server, so you can
-// sign into Circle there. Nothing typed here is stored by the dashboard.
-let rbTimer = null;
-
-function rbStateBadge(st) {
-  const map = {
-    authenticated: ['🟢', 'Signed in'],
-    awaiting_login: ['🟡', 'Not signed in'],
-    challenged:    ['🛑', 'Verification challenge — stopped'],
-    starting:      ['⏳', 'Starting'],
-    stopped:       ['⚪', 'Stopped'],
-    error:         ['🔴', 'Error'],
-  };
-  const [icon, label] = map[st] || ['⚪', st || 'unknown'];
-  return `${icon} <b>${esc(label)}</b>`;
-}
-
-async function loadRemote() {
-  const st = await api('/api/remote-browser/status');
-  if (!st) return;
-  if (st.enabled === false) {
-    $('rb-status').innerHTML =
-      'Disabled. Set <code>REMOTE_BROWSER_ENABLED=true</code> and deploy an image with Chromium.';
-    rbShowScreen(false);
-    return;
-  }
-  const bits = [rbStateBadge(st.state)];
-  if (st.member_label) bits.push(`as <b>${esc(st.member_label)}</b>`);
-  if (st.host) bits.push(esc(st.host));
-  if (st.detail) bits.push(`<span class="muted">${esc(st.detail)}</span>`);
-  $('rb-status').innerHTML = bits.join(' · ');
-  if (st.host && !$('rb-host').value) $('rb-host').value = st.host;
-
-  const live = st.state !== 'stopped';
-  rbShowScreen(live);
-  if (live) rbTick();
-  loadReplaySessions();
-}
-
-function rbShowScreen(on) {
-  $('rb-screen').style.display = on ? 'block' : 'none';
-  $('rb-screen-empty').hidden = on;
-  if (rbTimer) { clearInterval(rbTimer); rbTimer = null; }
-  if (on && $('rb-live').checked) rbTimer = setInterval(rbTick, 2000);
-}
-
-function rbTick() {
-  // Cache-bust so each poll gets the current frame.
-  $('rb-screen').src = `/api/remote-browser/screenshot?t=${Date.now()}`;
-}
-
-$('rb-start').addEventListener('click', async () => {
-  const host = $('rb-host').value.trim();
-  if (!host) return toast('Enter a community host');
-  $('rb-start').disabled = true;
-  try {
-    await api('/api/remote-browser/start', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ host }),
-    });
-    await loadRemote();
-  } catch (e) { toast(String(e.message || e).slice(0, 200)); }
-  finally { $('rb-start').disabled = false; }
-});
-
-$('rb-stop').addEventListener('click', async () => {
-  await api('/api/remote-browser/stop', { method: 'POST' });
-  await loadRemote();
-});
-
-// Map a click on the screenshot to the same point in the remote viewport.
-$('rb-screen').addEventListener('click', async (ev) => {
-  const img = $('rb-screen');
-  const rect = img.getBoundingClientRect();
-  const x = Math.round((ev.clientX - rect.left) * (img.naturalWidth || rect.width) / rect.width);
-  const y = Math.round((ev.clientY - rect.top) * (img.naturalHeight || rect.height) / rect.height);
-  await api('/api/remote-browser/input', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ kind: 'click', x, y }),
-  });
-  setTimeout(rbTick, 400);
-});
-
-async function rbSendText() {
-  const box = $('rb-keys');
-  const text = box.value;
-  if (!text) return;
-  box.value = '';            // don't leave credentials sitting in the field
-  await api('/api/remote-browser/input', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ kind: 'type', text }),
-  });
-  setTimeout(rbTick, 400);
-}
-
-$('rb-send').addEventListener('click', rbSendText);
-$('rb-keys').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') { e.preventDefault(); rbSendText(); }
-});
-$('rb-enter').addEventListener('click', async () => {
-  await api('/api/remote-browser/input', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ kind: 'press', key: 'Enter' }),
-  });
-  setTimeout(rbTick, 600);
-});
-$('rb-live').addEventListener('change', () => rbShowScreen($('rb-screen').style.display === 'block'));
-
-async function rbProbe(mode) {
-  const host = $('rb-host').value.trim();
-  if (!host) return toast('Enter a community host');
-  $('rb-report').innerHTML = '<div class="empty">Running…</div>';
-  let r;
-  try {
-    r = await api('/api/remote-browser/probe', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ host, mode }),
-    });
-  } catch (e) {
-    $('rb-report').innerHTML = `<div class="empty">${esc(String(e.message || e).slice(0, 400))}</div>`;
-    return;
-  }
-  if (!r) return;
-  const colour = { VIABLE: 'var(--high)', BLOCKED_BY_CHALLENGE: 'var(--danger)',
-                   NO_BROWSER: 'var(--medium)', NEEDS_LOGIN: 'var(--medium)',
-                   FAILED: 'var(--danger)' }[r.verdict] || 'var(--muted)';
-  const steps = (r.steps || []).map(s =>
-    `<tr><td>${s.ok ? '✅' : '❌'}</td><td>${esc(s.name)}</td>
-     <td class="muted">${esc(s.detail || '')}</td></tr>`).join('');
-  $('rb-report').innerHTML = `
-    <div style="font-size:16px;font-weight:700;color:${colour}">${esc(r.verdict)}</div>
-    <p class="muted" style="margin:6px 0 12px">${esc(r.summary || '')}</p>
-    <table><tbody>${steps}</tbody></table>
-    <p class="muted" style="font-size:12px;margin-top:10px">
-      Environment: ${esc(r.environment?.platform || '')}
-      ${r.environment?.is_datacenter ? ' · datacenter (Railway)' : ' · local machine'}
-    </p>`;
-  await loadRemote();
-}
-
-$('rb-probe').addEventListener('click', () => rbProbe('environment'));
-$('rb-probe-auth').addEventListener('click', () => rbProbe('authenticated'));
-
-// --- Session replay experiment (Version B) ----------------------------
-const RP_RESULT_COLOR = {
-  ok: 'var(--high)', challenged: 'var(--danger)',
-  expired: 'var(--medium)', error: 'var(--danger)',
-};
-
-async function loadReplaySessions() {
-  const d = await api('/api/replay/sessions');
-  if (!d) return;
-  const rows = d.sessions || [];
-  if (!rows.length) {
-    $('rp-sessions').innerHTML = '<div class="empty">No stored sessions.</div>';
-    return;
-  }
-  $('rp-sessions').innerHTML = rows.map(r => {
-    const color = RP_RESULT_COLOR[r.last_result] || 'var(--muted)';
-    const badge = r.last_result
-      ? `<span class="pill" style="color:${color};background:color-mix(in srgb, ${color} 14%, transparent)">${esc(r.last_result)}</span>`
-      : '<span class="muted" style="font-size:12px">not tested</span>';
-    return `<div class="lead" style="margin-bottom:8px">
-      <div class="lead-head"><b>${esc(r.host)}</b> ${badge}
-        <span class="meta">${r.cookie_count} cookie(s)${r.member_label ? ' · ' + esc(r.member_label) : ''}</span></div>
-      ${r.last_detail ? `<div class="meta" style="margin-top:4px">${esc(r.last_detail)}</div>` : ''}
-      <div class="row" style="margin-top:8px">
-        <button class="ghost rp-test" data-host="${esc(r.host)}">Test replay</button>
-        <button class="ghost rp-del" data-host="${esc(r.host)}">Delete</button>
-      </div>
-    </div>`;
-  }).join('');
-}
-
-$('rp-store').addEventListener('click', async () => {
-  const host = $('rp-host').value.trim();
-  const text = $('rp-cookies').value.trim();
-  if (!host || !text) return toast('Host and cookie JSON are both required');
-  let cookies;
-  try { cookies = JSON.parse(text); }
-  catch { return toast('Cookie box is not valid JSON'); }
-  try {
-    const r = await api('/api/replay/store', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ host, cookies }),
-    });
-    if (r) { $('rp-cookies').value = ''; toast(`Stored ${r.cookie_count} cookie(s) — encrypted`); loadReplaySessions(); }
-  } catch (e) { toast(String(e.message || e).slice(0, 200)); }
-});
-
-async function rpTest(host) {
-  toast('Replaying from server…');
-  try {
-    const r = await api('/api/replay/test', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ host }),
-    });
-    if (r) { toast(`${host}: ${r.result}`); loadReplaySessions(); }
-  } catch (e) { toast(String(e.message || e).slice(0, 200)); }
-}
-
-$('rp-test').addEventListener('click', () => {
-  const host = $('rp-host').value.trim();
-  if (!host) return toast('Enter a host (or store one first)');
-  rpTest(host);
-});
-
-document.addEventListener('click', async (ev) => {
-  const t = ev.target.closest('.rp-test'); const d = ev.target.closest('.rp-del');
-  if (t) rpTest(t.dataset.host);
-  if (d) {
-    await api('/api/replay/delete', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ host: d.dataset.host }),
-    });
-    loadReplaySessions();
-  }
-});
 </script>
 </body>
 </html>

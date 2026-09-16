@@ -100,6 +100,34 @@ class Community(Base):
     join_type: Mapped[str | None] = mapped_column(String(32), index=True)
     join_type_checked_at: Mapped[datetime | None] = mapped_column(DateTime)
 
+    # Provenance from the Circle discovery-directory crawl (discovery/circle_directory.py):
+    # the directory's own id (for dedup/incremental refresh) and which goal
+    # categories it was listed under. NULL for rows found by other means.
+    external_directory_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    directory_goals: Mapped[list | None] = mapped_column(JSON, default=list)
+    directory_synced_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+    # ICP (ideal-customer-profile) fit for a software development company's lead
+    # gen -- see classifier/icp_relevance.py. Deliberately separate from
+    # relevance_score/relevant below (the older web-search ranking heuristic):
+    # the two are not yet proven to agree, so don't collapse them prematurely.
+    icp_score: Mapped[float] = mapped_column(Float, default=0.0, index=True)
+    icp_flag: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    icp_reasons: Mapped[list | None] = mapped_column(JSON, default=list)
+    icp_checked_at: Mapped[datetime | None] = mapped_column(DateTime)
+    icp_decided_by: Mapped[str | None] = mapped_column(String(32))
+
+    # Outcome of the auto-join bot's attempt (circle_leads/join/), independent of
+    # `join_type` above: join_type is a property of the community (how it CAN be
+    # joined), join_status is what OUR bot actually did about it.
+    join_status: Mapped[str] = mapped_column(
+        String(32), default="not_attempted", index=True
+    )
+    join_status_detail: Mapped[str | None] = mapped_column(Text)
+    join_attempted_at: Mapped[datetime | None] = mapped_column(DateTime)
+    joined_at: Mapped[datetime | None] = mapped_column(DateTime)
+    join_attempts: Mapped[int] = mapped_column(Integer, default=0)
+
     access_status: Mapped[str] = mapped_column(
         String(32), default=AccessState.NOT_VISITED.value, index=True
     )
@@ -318,6 +346,23 @@ class ScrapeRun(Base):
     error: Mapped[str | None] = mapped_column(Text)
 
 
+class JoinStatus(str, enum.Enum):
+    """Outcome of the auto-join bot's attempt on one community (circle_leads/join/).
+
+    Separate from `Community.join_type` (how a community CAN be joined, refreshed
+    on every harvest read): this tracks what OUR bot actually did about it.
+    """
+
+    NOT_ATTEMPTED = "not_attempted"
+    QUEUED = "queued"
+    PENDING_APPROVAL = "pending_approval"
+    JOINED = "joined"
+    PAID_SKIP = "paid_skip"
+    INVITE_SKIP = "invite_skip"
+    SUBSCRIPTION_EXPIRED_SKIP = "subscription_expired_skip"
+    FAILED = "failed"
+
+
 class ConnectionState(str, enum.Enum):
     """Auth state of a private-community connection, driven by the local
     connector. Deliberately distinguishes 'logged in' from 'can access the
@@ -456,6 +501,12 @@ class ReplaySession(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     host: Mapped[str] = mapped_column(String(255), index=True)
 
+    # Where this session came from: "extension" (Chrome cookie-capture
+    # extension, the original path) or "join_bot" (circle_leads/join/, minted
+    # directly on the server by the auto-join bot). Same table, same encryption,
+    # same scanning.py consumption -- this is purely for observability.
+    source: Mapped[str] = mapped_column(String(16), default="extension")
+
     # AES-GCM ciphertext of the cookies JSON. Plaintext is never persisted.
     encrypted_cookies: Mapped[str] = mapped_column(Text)
     # Non-sensitive metadata for the dashboard.
@@ -493,9 +544,11 @@ class ScanJob(Base):
     __table_args__ = (Index("ix_scan_jobs_pick", "state", "priority", "created_at"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    # "scan" (one host) | "scan_all" | "harvest"
+    # "scan" (one host) | "scan_all" | "harvest" | "join" (circle_leads/join/,
+    # host = the community to auto-join; claimed only by the VPS join-worker,
+    # never by Railway's worker -- see storage/job_queue.py::claim_next)
     kind: Mapped[str] = mapped_column(String(32), index=True)
-    host: Mapped[str | None] = mapped_column(String(255))   # for kind=scan
+    host: Mapped[str | None] = mapped_column(String(255))   # for kind=scan|join
     priority: Mapped[int] = mapped_column(Integer, default=1)  # 0=VIP first
 
     state: Mapped[str] = mapped_column(
