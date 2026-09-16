@@ -127,20 +127,9 @@ def _classify_payload(data: dict) -> JoinClassification:
     return JoinClassification(JoinType.INVITE_ONLY, "no public signup, no paywall detected")
 
 
-def fetch_join_classification(
-    host: str, *, session: requests.Session | None = None, timeout: int = 12
+def _fetch_join_classification_once(
+    host: str, *, http: requests.Session, timeout: int
 ) -> JoinClassification:
-    """Classify one host's join requirement. Never raises.
-
-    A 401/403 on this metadata call is its own outcome (``locked_unknown``):
-    the community is locked down even further than a private space list, and
-    free vs. paid genuinely can't be told apart without a human on the join
-    page.
-    """
-    http = session or shared_session()
-    host = (host or "").replace("https://", "").replace("http://", "").strip("/")
-    if not host:
-        return JoinClassification(JoinType.UNKNOWN, "empty host")
     try:
         resp = http.get(
             f"https://{host}/internal_api/communities/current",
@@ -170,6 +159,44 @@ def fetch_join_classification(
         return JoinClassification(JoinType.UNKNOWN, "response missing expected fields")
 
     return _classify_payload(data)
+
+
+def fetch_join_classification(
+    host: str, *, session: requests.Session | None = None, timeout: int = 12
+) -> JoinClassification:
+    """Classify one host's join requirement. Never raises.
+
+    A 401/403 on this metadata call is its own outcome (``locked_unknown``):
+    the community is locked down even further than a private space list, and
+    free vs. paid genuinely can't be told apart without a human on the join
+    page.
+
+    Retries once against ``www.<host>`` when the apex host comes back
+    UNKNOWN (never LOCKED_UNKNOWN -- a 401/403 already means something real
+    is there, just refusing us). Confirmed by hand on 3 BuiltWith custom
+    domains that this isn't a hypothetical: bravelybeingyou.com and
+    grocommunity.se both 404 on the bare apex for this exact path with no
+    redirect (though their homepage *does* redirect to www), and icenet.work
+    hits a redirect loop on the apex that simply isn't there on www -- all
+    three return a normal 200 + valid payload on the www host. Requests
+    already follows an HTTP redirect when the host issues one (e.g.
+    creativeleader.net's apex 301s to www before its 401), so this only
+    covers the cases where no such redirect exists for this specific path.
+    """
+    http = session or shared_session()
+    host = (host or "").replace("https://", "").replace("http://", "").strip("/")
+    if not host:
+        return JoinClassification(JoinType.UNKNOWN, "empty host")
+
+    classification = _fetch_join_classification_once(host, http=http, timeout=timeout)
+    if classification.join_type == JoinType.UNKNOWN and not host.lower().startswith("www."):
+        retry = _fetch_join_classification_once(f"www.{host}", http=http, timeout=timeout)
+        if retry.join_type != JoinType.UNKNOWN:
+            return JoinClassification(
+                retry.join_type,
+                f"{retry.detail} (www retry; apex failed: {classification.detail})",
+            )
+    return classification
 
 
 def classify_join_type_pending(
