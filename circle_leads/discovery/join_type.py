@@ -71,6 +71,28 @@ class JoinClassification:
     detail: str = ""
 
 
+def _price_label_fallback(price_label: str | None) -> JoinClassification | None:
+    """Fallback signal for when the live communities/current check comes back
+    UNKNOWN or LOCKED_UNKNOWN -- Circle's own Discover listing already states
+    a price for any community sourced from a listing crawl (circle_directory,
+    web-search finds), captured at discovery time into ``Community.price_label``
+    and never blocked by the WAFs/apex-www quirks that break the live check on
+    custom domains (confirmed by hand on 6 of these: the API said 404/401 while
+    the real page had a working Join/Login button).
+
+    Stays a fallback, not the primary signal: a "From $X" label only proves the
+    cheapest tier costs money, it doesn't rule out a free tier existing too
+    (``_classify_payload`` above already encodes that a paywall and open
+    signups can coexist).
+    """
+    if not price_label or not price_label.strip():
+        return None
+    label = price_label.strip()
+    if "free" in label.lower() or label.lower() in ("$0", "from $0"):
+        return JoinClassification(JoinType.FREE_JOIN, f"price_label fallback: '{label}'")
+    return JoinClassification(JoinType.PAID, f"price_label fallback: '{label}'")
+
+
 def _classify_payload(data: dict) -> JoinClassification:
     """Pure classification from an already-fetched communities/current payload.
 
@@ -188,6 +210,13 @@ def classify_join_type_pending(
                 community.url.replace("https://", "").replace("http://", "").strip("/")
             )
             classification = fetch_join_classification(host, session=session)
+            if classification.join_type in (JoinType.UNKNOWN, JoinType.LOCKED_UNKNOWN):
+                fallback = _price_label_fallback(community.price_label)
+                if fallback is not None:
+                    classification = JoinClassification(
+                        fallback.join_type,
+                        f"{fallback.detail} (live check inconclusive: {classification.detail})",
+                    )
             community.join_type = classification.join_type
             community.join_type_detail = classification.detail[:2000]
             community.join_type_checked_at = utcnow()
