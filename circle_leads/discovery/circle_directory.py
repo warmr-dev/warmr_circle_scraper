@@ -262,6 +262,7 @@ def recheck_unresolved_join_urls(db, *, limit: int | None = None,
                         c.platform = new_platform
                         if classification is not None:
                             c.join_type = classification.join_type
+                            c.join_type_detail = classification.detail[:2000]
                             c.join_type_checked_at = utcnow()
                     resolved += 1
                 except Exception as exc:  # noqa: BLE001 - e.g. a unique-url clash with an existing row

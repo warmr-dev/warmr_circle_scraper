@@ -253,18 +253,23 @@ def filter_relevant_cmd(ctx, use_llm, limit, recheck):
 
 @cli.command("classify-join-types")
 @click.option("--limit", type=int, default=None, help="Max communities to check this run.")
+@click.option("--recheck", is_flag=True,
+              help="Re-check every community, not just never-checked ones "
+                   "(e.g. to backfill join_type_detail onto already-classified rows).")
 @click.pass_context
-def classify_join_types_cmd(ctx, limit):
+def classify_join_types_cmd(ctx, limit, recheck):
     """Backfill join_type for communities that never got a live check.
 
     One HTTP GET per host, no browser -- see
     circle_leads/discovery/join_type.py::classify_join_type_pending. Only rows
-    with join_type_checked_at IS NULL are touched; the automatic harvest loop
-    already refreshes join_type for communities it already reads regularly.
+    with join_type_checked_at IS NULL are touched by default; the automatic
+    harvest loop already refreshes join_type for communities it reads
+    regularly. --recheck touches everything -- expensive on the full backlog
+    (one live request per row), so scope it with --limit or filter upstream.
     """
     from circle_leads.discovery.join_type import classify_join_type_pending
 
-    stats = classify_join_type_pending(ctx.obj["db"], limit=limit)
+    stats = classify_join_type_pending(ctx.obj["db"], limit=limit, recheck=recheck)
     breakdown = ", ".join(f"{k}={v}" for k, v in stats.items() if k != "checked")
     click.echo(f"Checked {stats['checked']}: {breakdown}")
 

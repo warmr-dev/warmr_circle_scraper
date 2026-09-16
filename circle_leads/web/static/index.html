@@ -493,8 +493,8 @@
       <div class="row">
         <select id="c-filter-platform"><option value="">Any platform</option></select>
         <select id="c-filter-icp">
-          <option value="">Any ICP fit</option>
-          <option value="1">🎯 ICP-flagged only</option>
+          <option value="">Any ICP fit (up to 1000)</option>
+          <option value="1" selected>🎯 ICP-flagged only</option>
           <option value="0">Not flagged</option>
         </select>
         <select id="c-filter-join-status"><option value="">Any join status</option></select>
@@ -965,7 +965,9 @@ function renderCommunitiesTable() {
     $('communities-table').innerHTML = '<div class="empty">No communities match those filters.</div>';
     return;
   }
-  $('communities-count').textContent = `Показано ${rows.length} из ${allCommunities.length} сообществ`;
+  $('communities-count').textContent = allCommunities.length === communitiesTotal
+    ? `Показано ${rows.length} из ${allCommunities.length} сообществ`
+    : `Показано ${rows.length} из ${allCommunities.length} загруженных (всего в базе ${communitiesTotal} — сузьте фильтр, чтобы увидеть больше)`;
   $('communities-table').innerHTML = `<div class="table-wrap"><table>
     <thead><tr>
       <th>Community</th><th>Platform</th><th>ICP</th>
@@ -985,7 +987,7 @@ function renderCommunitiesTable() {
         <td><span class="pill" style="color:var(--muted);background:color-mix(in srgb, var(--muted) 12%, transparent)">${esc(platLabel)}</span></td>
         <td>${icpCell}</td>
         <td>${jtLabel
-          ? `<span class="pill" style="color:${jtColor};background:color-mix(in srgb, ${jtColor} 14%, transparent)">${jtLabel}</span>`
+          ? `<span class="pill" title="${esc(c.join_type_detail || '')}" style="color:${jtColor};background:color-mix(in srgb, ${jtColor} 14%, transparent)">${jtLabel}</span>`
           : '<span class="muted">—</span>'}</td>
         <td><span class="pill" style="color:${jsColor};background:color-mix(in srgb, ${jsColor} 14%, transparent)">${jsLabel}</span></td>
         <td class="muted ellipsis" title="${esc(c.discovered_at || '')}">${esc(c.discovery_source || '—')}</td>
@@ -994,10 +996,17 @@ function renderCommunitiesTable() {
     }).join('')}</tbody></table></div>`;
 }
 
+let communitiesTotal = 0;
+
+// icp_only is server-side (the table is 12k+ rows, too large to ship
+// unfiltered) -- platform/join-status stay client-side filters over
+// whatever subset that fetch returned.
 async function loadCommunities() {
-  const data = await api('/api/communities');
+  const icpOnly = $('c-filter-icp').value === '1';
+  const data = await api(`/api/communities?icp_only=${icpOnly}&limit=1000`);
   if (!data) return;
   allCommunities = data.communities;
+  communitiesTotal = data.total;
   if (!allCommunities.length) {
     $('communities-table').innerHTML =
       '<div class="empty">No communities yet. Run <code>circle-leads discover-directory</code>.</div>';
@@ -1007,7 +1016,8 @@ async function loadCommunities() {
   renderCommunitiesTable();
 }
 
-['c-filter-platform', 'c-filter-icp', 'c-filter-join-status'].forEach(id => {
+$('c-filter-icp').addEventListener('change', loadCommunities);
+['c-filter-platform', 'c-filter-join-status'].forEach(id => {
   $(id).addEventListener('change', renderCommunitiesTable);
 });
 

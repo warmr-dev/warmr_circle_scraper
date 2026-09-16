@@ -99,6 +99,10 @@ class Community(Base):
     # still expose a public board. NULL until the harvest's first read.
     join_type: Mapped[str | None] = mapped_column(String(32), index=True)
     join_type_checked_at: Mapped[datetime | None] = mapped_column(DateTime)
+    # Why -- e.g. "request failed: ConnectionError", "HTTP 404", "is_private=true".
+    # Distinguishes a dead host from a real 401 from a weird response, all of
+    # which otherwise collapse into the same "unknown" bucket.
+    join_type_detail: Mapped[str | None] = mapped_column(Text)
 
     # Provenance from the Circle discovery-directory crawl (discovery/circle_directory.py):
     # the directory's own id (for dedup/incremental refresh) and which goal

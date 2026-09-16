@@ -14,6 +14,7 @@ from circle_leads.discovery import join_type as join_type_module
 from circle_leads.discovery.join_type import (
     JoinType,
     _classify_payload,
+    _price_label_fallback,
     classify_join_type_pending,
     fetch_join_classification,
 )
@@ -191,6 +192,26 @@ def test_empty_host_is_unknown():
     assert c.join_type == JoinType.UNKNOWN
 
 
+# --- _price_label_fallback: Discover's own price tag as a backup signal -----
+
+
+@pytest.mark.parametrize("label", ["Free", "FREE", "$0", "From $0", "Free trial"])
+def test_price_label_fallback_recognizes_free(label):
+    c = _price_label_fallback(label)
+    assert c.join_type == JoinType.FREE_JOIN
+
+
+@pytest.mark.parametrize("label", ["$29/month", "From $9.99/month", "$3,500"])
+def test_price_label_fallback_recognizes_paid(label):
+    c = _price_label_fallback(label)
+    assert c.join_type == JoinType.PAID
+
+
+@pytest.mark.parametrize("label", [None, "", "   "])
+def test_price_label_fallback_is_none_without_a_real_label(label):
+    assert _price_label_fallback(label) is None
+
+
 # --- classify_join_type_pending: the never-checked backlog -------------------
 
 
@@ -257,3 +278,103 @@ def test_classify_join_type_pending_respects_limit(monkeypatch):
 
     stats = classify_join_type_pending(db, limit=1)
     assert stats["checked"] == 1
+
+
+def test_classify_join_type_pending_saves_the_reason_not_just_the_bucket(monkeypatch):
+    db = _db()
+    with db.session() as s:
+        get_or_create_community(s, slug="dead-one", url="https://dead-one.circle.so")
+
+    session = RoutedStubSession({"dead-one": StubResp(404, None)})
+    monkeypatch.setattr(join_type_module, "shared_session", lambda: session)
+
+    classify_join_type_pending(db)
+
+    with db.session() as s:
+        row = s.scalar(select(Community).where(Community.slug == "dead-one"))
+        assert row.join_type == JoinType.UNKNOWN
+        assert row.join_type_detail == "HTTP 404"
+
+
+def test_classify_join_type_pending_falls_back_to_price_label_when_api_is_locked(monkeypatch):
+    """A custom domain from circle_directory: the live API is blocked (401),
+    but Discover's own listing already said "Free" at crawl time -- that
+    shouldn't stay stuck at locked_unknown when the price tag is sitting
+    right there in the row."""
+    db = _db()
+    with db.session() as s:
+        get_or_create_community(
+            s, slug="priced-free", url="https://priced-free.example.com", price_label="Free",
+        )
+
+    session = RoutedStubSession({"priced-free": StubResp(401, None)})
+    monkeypatch.setattr(join_type_module, "shared_session", lambda: session)
+
+    classify_join_type_pending(db)
+
+    with db.session() as s:
+        row = s.scalar(select(Community).where(Community.slug == "priced-free"))
+        assert row.join_type == JoinType.FREE_JOIN
+        assert "price_label fallback: 'Free'" in row.join_type_detail
+        assert "live check inconclusive" in row.join_type_detail
+
+
+def test_classify_join_type_pending_price_label_fallback_handles_paid(monkeypatch):
+    db = _db()
+    with db.session() as s:
+        get_or_create_community(
+            s, slug="priced-paid", url="https://priced-paid.example.com", price_label="$29/month",
+        )
+
+    session = RoutedStubSession({"priced-paid": StubResp(404, None)})
+    monkeypatch.setattr(join_type_module, "shared_session", lambda: session)
+
+    classify_join_type_pending(db)
+
+    with db.session() as s:
+        row = s.scalar(select(Community).where(Community.slug == "priced-paid"))
+        assert row.join_type == JoinType.PAID
+
+
+def test_classify_join_type_pending_ignores_price_label_when_api_is_decisive(monkeypatch):
+    """A price_label must never override a live check that actually answered --
+    it's a fallback for UNKNOWN/LOCKED_UNKNOWN only."""
+    db = _db()
+    with db.session() as s:
+        get_or_create_community(
+            s, slug="decisive", url="https://decisive.circle.so", price_label="$99/month",
+        )
+
+    session = RoutedStubSession({
+        "decisive": StubResp(200, {"is_private": True}),  # -> invite_only
+    })
+    monkeypatch.setattr(join_type_module, "shared_session", lambda: session)
+
+    classify_join_type_pending(db)
+
+    with db.session() as s:
+        row = s.scalar(select(Community).where(Community.slug == "decisive"))
+        assert row.join_type == JoinType.INVITE_ONLY
+
+
+def test_classify_join_type_pending_recheck_touches_already_checked_rows(monkeypatch):
+    db = _db()
+    from circle_leads.storage.models import utcnow
+    with db.session() as s:
+        already = get_or_create_community(s, slug="already-checked", url="https://already.circle.so")
+        already.join_type = JoinType.INVITE_ONLY
+        already.join_type_checked_at = utcnow()
+
+    session = RoutedStubSession({
+        "already": StubResp(200, {"is_private": False,
+                                   "allow_signups_to_public_community": True,
+                                   "has_non_draft_paywalls": False}),
+    })
+    monkeypatch.setattr(join_type_module, "shared_session", lambda: session)
+
+    stats = classify_join_type_pending(db, recheck=True)
+
+    assert stats["checked"] == 1
+    with db.session() as s:
+        row = s.scalar(select(Community).where(Community.slug == "already-checked"))
+        assert row.join_type == JoinType.FREE_JOIN  # overwritten by the recheck

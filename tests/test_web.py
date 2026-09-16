@@ -226,6 +226,34 @@ def test_communities_endpoint_shows_permission_state(auth_client):
     assert all(c["permission_status"] != "approved" for c in rows)
 
 
+def test_communities_icp_only_filters_server_side(tmp_path, monkeypatch):
+    """The table can run into the thousands (bulk discovery imports) -- icp_only
+    must actually narrow what the server sends, not just what the UI shows."""
+    monkeypatch.setenv("DASHBOARD_PASSWORD", PASSWORD)
+    monkeypatch.setenv("DASHBOARD_SECRET_KEY", "test-signing-key")
+
+    from circle_leads.storage.database import get_or_create_community
+
+    db_path = tmp_path / "web.db"
+    db = Database(f"sqlite:///{db_path}")
+    with db.session() as s:
+        fit = get_or_create_community(s, slug="fit", url="https://fit.circle.so")
+        fit.icp_flag = True
+        get_or_create_community(s, slug="not-fit", url="https://not-fit.circle.so")
+
+    from circle_leads.web.app import create_app
+    client = TestClient(create_app(db_url=f"sqlite:///{db_path}", config_path=_DEV_CONFIG))
+    client.post("/login", data={"password": PASSWORD})
+
+    everything = client.get("/api/communities").json()
+    assert everything["total"] == 2
+    assert len(everything["communities"]) == 2
+
+    flagged_only = client.get("/api/communities?icp_only=true").json()
+    assert flagged_only["total"] == 1
+    assert [c["slug"] for c in flagged_only["communities"]] == ["fit"]
+
+
 # --- Triggered jobs ---------------------------------------------------------
 
 

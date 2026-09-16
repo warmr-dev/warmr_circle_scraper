@@ -180,6 +180,11 @@ class Database:
             ("communities", "joined_at", "TIMESTAMP"),
             ("communities", "join_attempts", "INTEGER DEFAULT 0"),
             ("replay_sessions", "source", "VARCHAR(16) DEFAULT 'extension'"),
+            # Why join_type landed where it did -- "unknown" alone doesn't say
+            # whether a host is dead, timed out, or returned something odd;
+            # fetch_join_classification always computes this detail, it just
+            # wasn't persisted before.
+            ("communities", "join_type_detail", "TEXT"),
         ]
         # replay_sessions is a whole new table (Version B experiment); create_all
         # handles it, so no per-column entry is needed here.

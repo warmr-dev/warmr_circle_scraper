@@ -1258,12 +1258,25 @@ def create_app(
             return {"activity": recent_activity(s, limit=limit, kind=kind)}
 
     @app.get("/api/communities")
-    def api_communities(_: None = Depends(require_auth)) -> dict[str, Any]:
+    def api_communities(
+        icp_only: bool = False, limit: int = 1000, _: None = Depends(require_auth)
+    ) -> dict[str, Any]:
+        # The bulk discovery sources (directory crawl, DNS/BuiltWith imports)
+        # pushed this table past 12k rows -- shipping it unfiltered on every
+        # dashboard load stopped being viable. icp_only/limit let the frontend
+        # default to "what's actually actionable" instead; total (pre-limit)
+        # is returned separately so the UI can say how much is being hidden.
         with db.session() as s:
-            rows = s.scalars(
-                select(Community).order_by(Community.icp_score.desc())
-            ).all()
+            query = select(Community).order_by(Community.icp_score.desc())
+            if icp_only:
+                query = query.where(Community.icp_flag.is_(True))
+            total = s.scalar(
+                select(func.count()).select_from(query.order_by(None).subquery())
+            )
+            rows = s.scalars(query.limit(limit)).all()
             return {
+                "total": total,
+                "icp_only": icp_only,
                 "communities": [
                     {
                         "slug": c.slug,
@@ -1273,6 +1286,7 @@ def create_app(
                         "icp_score": c.icp_score,
                         "icp_flag": bool(c.icp_flag),
                         "join_type": c.join_type,
+                        "join_type_detail": c.join_type_detail,
                         "join_status": c.join_status,
                         "join_status_detail": c.join_status_detail,
                         "discovery_source": c.discovery_source,
