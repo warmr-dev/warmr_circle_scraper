@@ -165,6 +165,21 @@ class Database:
             ("leads", "external_synced_at", "TIMESTAMP"),
             ("circle_connections", "priority", "VARCHAR(16) DEFAULT 'normal'"),
             ("circle_connections", "notes", "TEXT"),
+            # P20: bulk directory discovery + ICP filter + join-bot lifecycle.
+            ("communities", "external_directory_id", "VARCHAR(64)"),
+            ("communities", "directory_goals", "JSON"),
+            ("communities", "directory_synced_at", "TIMESTAMP"),
+            ("communities", "icp_score", "FLOAT DEFAULT 0.0"),
+            ("communities", "icp_flag", "BOOLEAN DEFAULT FALSE"),
+            ("communities", "icp_reasons", "JSON"),
+            ("communities", "icp_checked_at", "TIMESTAMP"),
+            ("communities", "icp_decided_by", "VARCHAR(32)"),
+            ("communities", "join_status", "VARCHAR(32) DEFAULT 'not_attempted'"),
+            ("communities", "join_status_detail", "TEXT"),
+            ("communities", "join_attempted_at", "TIMESTAMP"),
+            ("communities", "joined_at", "TIMESTAMP"),
+            ("communities", "join_attempts", "INTEGER DEFAULT 0"),
+            ("replay_sessions", "source", "VARCHAR(16) DEFAULT 'extension'"),
         ]
         # replay_sessions is a whole new table (Version B experiment); create_all
         # handles it, so no per-column entry is needed here.

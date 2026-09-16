@@ -17,7 +17,7 @@ from sqlalchemy import select
 
 from circle_leads.connector.credentials import decrypt, encrypt
 from circle_leads.storage.database import Database
-from circle_leads.storage.models import ReplaySession
+from circle_leads.storage.models import CircleConnection, ConnectionState, ReplaySession
 
 # Marks a blob stored without encryption, so load knows not to decrypt.
 _PLAINTEXT_PREFIX = "plain:"
@@ -66,6 +66,21 @@ def store_session(db: Database, host: str, cookies: list[dict],
         row.last_detail = "Stored; not yet tested from the server."
         rid = row.id
     return {"host": host, "cookie_count": len(cookies)}
+
+
+def connect_host(db: Database, host: str, cookies: list[dict],
+                 *, member_label: str | None = None) -> dict:
+    """Store a session AND make sure the host is scannable -- the two steps
+    every caller needs together (the manual cookie-paste dashboard route, and
+    circle_leads/join/joiner.py after an auto-join). Both scan_cookie_host()
+    and cookie_hosts_vip_first() (circle_leads/scanning.py) key off a
+    CircleConnection row existing; without it the worker would never pick the
+    host up despite the cookie being stored."""
+    result = store_session(db, host, cookies, member_label=member_label)
+    with db.session() as s:
+        if s.scalar(select(CircleConnection).where(CircleConnection.host == host)) is None:
+            s.add(CircleConnection(host=host, state=ConnectionState.NOT_CONNECTED.value))
+    return result
 
 
 def load_cookies(db: Database, host: str) -> list[dict] | None:

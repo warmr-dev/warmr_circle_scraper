@@ -25,6 +25,7 @@ from circle_leads.authentication.browser_session import (
     resolve_admin_credentials,
 )
 from circle_leads.classifier.ai_classifier import LlmBackend, make_backend
+from circle_leads.classifier.icp_relevance import classify_icp_fit
 from circle_leads.classifier.lead_classifier import classify, meets_requirements
 from circle_leads.config.settings import CommunityPermission, Requirements
 from circle_leads.discovery.discover_communities import DiscoveredCommunity
@@ -465,5 +466,68 @@ def classify_pending(
                 )
             elif push.sent:
                 logger.info("Vini ingest sent %d lead(s)", push.sent)
+
+    return stats
+
+
+def classify_icp_pending(
+    db: Database,
+    requirements: Requirements,
+    *,
+    use_llm: bool = False,
+    limit: int | None = None,
+    recheck: bool = False,
+) -> dict[str, int]:
+    """Score discovered communities for ICP fit (classifier/icp_relevance.py).
+
+    Gates the auto-join queue: only icp_flag=True communities are ever queued to
+    join (see join/queue.py). By default only communities never checked are
+    processed; ``recheck`` re-scores everything, e.g. after tuning the rules.
+    """
+    llm: LlmBackend | None = None
+    model_name = None
+    if use_llm:
+        backend = make_backend()
+        if backend is not None:
+            llm, model_name = backend, getattr(backend, "model", "llm")
+        else:
+            logger.warning("ICP LLM escalation requested but no LLM key is set.")
+
+    stats = {"checked": 0, "flagged": 0, "not_flagged": 0}
+
+    with db.session() as s:
+        query = select(Community.id)
+        if not recheck:
+            query = query.where(Community.icp_checked_at.is_(None))
+        query = query.order_by(Community.id)
+        if limit:
+            query = query.limit(limit)
+        pending_ids = list(s.scalars(query).all())
+
+    for community_pk in pending_ids:
+        with db.session() as s:
+            community = s.get(Community, community_pk)
+            if community is None:
+                continue
+
+            goal = (community.directory_goals or [None])[0]
+            result = classify_icp_fit(
+                community.name,
+                community.description,
+                goal=goal,
+                llm=llm,
+                model_name=model_name,
+                escalation_threshold=requirements.icp_escalation_threshold,
+            )
+            community.icp_score = result.score
+            community.icp_flag = result.flag
+            community.icp_reasons = result.reasons
+            community.icp_checked_at = utcnow()
+            community.icp_decided_by = result.decided_by
+
+            stats["checked"] += 1
+            stats["flagged" if result.flag else "not_flagged"] += 1
+
+    return stats
 
     return stats

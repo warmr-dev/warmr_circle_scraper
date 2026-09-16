@@ -25,13 +25,17 @@ from circle_leads.discovery.discover_communities import (
     extract_from_text,
     load_from_file,
 )
+from circle_leads.export.community_intake import (
+    load_community_intake_config,
+    push_monitored_communities,
+)
 from circle_leads.export.exporters import query_leads, to_csv, to_json
 from circle_leads.export.vini_ingest import (
     load_vini_ingest_config,
     push_leads_by_ids,
     push_unsynced_leads,
 )
-from circle_leads.pipeline import classify_pending, discover, ingest_community
+from circle_leads.pipeline import classify_icp_pending, classify_pending, discover, ingest_community
 from circle_leads.storage.database import Database, purge_community, purge_expired
 from circle_leads.storage.models import Community, Lead, Post
 from circle_leads.triage.pipeline import triage_text
@@ -58,7 +62,10 @@ def cli(ctx, db_url, config_path, verbose):
     load_dotenv()  # pick up EXA_API_KEY, ANTHROPIC_API_KEY, DASHBOARD_* from .env
     _setup_logging(verbose)
     ctx.ensure_object(dict)
-    ctx.obj["db"] = Database(db_url)
+    # Same fallback circle_leads/web/app.py already uses -- lets CIRCLE_LEADS_DB
+    # in the environment/.env be the default target without needing --db on
+    # every single command.
+    ctx.obj["db"] = Database(db_url or os.environ.get("CIRCLE_LEADS_DB") or None)
     ctx.obj["requirements"] = load_requirements(config_path)
 
 
@@ -154,6 +161,197 @@ def find_cmd(ctx, from_html, urls, free_only, min_score, limit):
         "`circle-leads triage`."
     )
 
+
+
+@cli.command("discover-directory")
+@click.option("--incremental", is_flag=True,
+              help="Skip listings already synced since the last run (by directory id).")
+@click.option("--no-resolve-join-urls", is_flag=True,
+              help="Skip resolving each listing's real join URL (faster, but "
+                   "leaves platform/join_type undetected until a later pass).")
+@click.option("--min-score", type=int, default=0, show_default=True)
+@click.option("--recheck-unresolved", is_flag=True,
+              help="Instead of a full crawl, re-visit existing platform='discover' "
+                   "rows (a listing whose join-anchor lookup failed before) and "
+                   "update url/platform/join_type where a real host is now found.")
+@click.option("--limit", "recheck_limit", type=int, default=None,
+              help="With --recheck-unresolved: max rows to re-visit this run.")
+@click.pass_context
+def discover_directory_cmd(ctx, incremental, no_resolve_join_urls, min_score,
+                           recheck_unresolved, recheck_limit):
+    """Bulk-crawl Circle's own discovery marketplace (discover.circle.so).
+
+    This is a floor, not the whole platform: the directory lists communities
+    whose owner opted into Circle's marketplace (~2,095 total, confirmed live),
+    a fraction of the platform overall. Requires a real browser -- Cloudflare
+    challenges plain HTTP requests to discover.circle.so; see
+    circle_leads/discovery/circle_directory.py.
+
+    \b
+      circle-leads discover-directory
+      circle-leads discover-directory --incremental
+      circle-leads discover-directory --recheck-unresolved --limit 200
+    """
+    from circle_leads.discovery.circle_directory import (
+        crawl_directory, persist_crawl_result, recheck_unresolved_join_urls,
+    )
+
+    if recheck_unresolved:
+        click.echo("Re-visiting unresolved discover.circle.so listings...", err=True)
+        stats = recheck_unresolved_join_urls(ctx.obj["db"], limit=recheck_limit)
+        click.echo(
+            f"Rechecked {stats['total']}: {stats['resolved']} resolved, "
+            f"{stats['still_unresolved']} still unresolved, {stats['errors']} error(s)."
+        )
+        return
+
+    click.echo("Crawling discover.circle.so (needs a browser; this can take a while)...", err=True)
+    result = crawl_directory(resolve_join_urls=not no_resolve_join_urls)
+    for err in result.errors:
+        click.echo(f"warning: {err}", err=True)
+
+    listings = result.listings
+    if incremental:
+        with ctx.obj["db"].session() as s:
+            known_ids = {
+                row[0] for row in s.execute(
+                    select(Community.external_directory_id).where(
+                        Community.external_directory_id.is_not(None)
+                    )
+                ).all()
+            }
+        listings = [l for l in listings if str(l.external_id) not in known_ids]
+        result.listings = listings
+
+    persisted = persist_crawl_result(ctx.obj["db"], result, min_score=min_score)
+    click.echo(
+        f"Directory crawl: {len(result.goals)} goal(s), {len(listings)} listing(s) "
+        f"processed -- {persisted.new_count} new, {len(persisted.updated)} updated, "
+        f"{persisted.unchanged} unchanged."
+    )
+
+
+@cli.command("filter-relevant")
+@click.option("--use-llm", is_flag=True, help="Escalate ambiguous communities to an LLM.")
+@click.option("--limit", type=int, default=None, help="Max communities to score.")
+@click.option("--recheck", is_flag=True, help="Re-score every community, not just unchecked ones.")
+@click.pass_context
+def filter_relevant_cmd(ctx, use_llm, limit, recheck):
+    """Score discovered communities for fit against the software-dev ICP.
+
+    Gates auto-join (circle_leads/join/): only icp_flag=True communities are
+    ever queued to join. See circle_leads/classifier/icp_relevance.py.
+    """
+    stats = classify_icp_pending(
+        ctx.obj["db"], ctx.obj["requirements"], use_llm=use_llm, limit=limit, recheck=recheck
+    )
+    click.echo(
+        f"Checked {stats['checked']}: {stats['flagged']} flagged as ICP-fit, "
+        f"{stats['not_flagged']} not."
+    )
+
+
+@cli.command("classify-join-types")
+@click.option("--limit", type=int, default=None, help="Max communities to check this run.")
+@click.pass_context
+def classify_join_types_cmd(ctx, limit):
+    """Backfill join_type for communities that never got a live check.
+
+    One HTTP GET per host, no browser -- see
+    circle_leads/discovery/join_type.py::classify_join_type_pending. Only rows
+    with join_type_checked_at IS NULL are touched; the automatic harvest loop
+    already refreshes join_type for communities it already reads regularly.
+    """
+    from circle_leads.discovery.join_type import classify_join_type_pending
+
+    stats = classify_join_type_pending(ctx.obj["db"], limit=limit)
+    breakdown = ", ".join(f"{k}={v}" for k, v in stats.items() if k != "checked")
+    click.echo(f"Checked {stats['checked']}: {breakdown}")
+
+
+@cli.command("join-queue")
+@click.option("--limit", type=int, default=25, show_default=True)
+@click.pass_context
+def join_queue_cmd(ctx, limit):
+    """Read-only preview of communities queued for auto-join (circle_leads/join/).
+
+    Gate: icp_flag=True AND platform=circle AND join_type in (free_join, paid)
+    AND join_status=not_attempted, ranked by icp_score.
+    """
+    from circle_leads.join.joiner import select_join_candidates
+
+    candidates = select_join_candidates(ctx.obj["db"], limit=limit)
+    if not candidates:
+        click.echo("No communities queued for auto-join.")
+        return
+    for c in candidates:
+        click.echo(f"{c['icp_score']:>5.1f}  {c['join_type']:<10}  {c['slug']:<28}  {c['url']}")
+    click.echo(f"\n{len(candidates)} candidate(s).")
+
+
+@cli.command("auto-join")
+@click.option("--limit", type=int, default=None, help="Max communities to attempt this run.")
+@click.option("--host", default=None, help="Only attempt one candidate (matches slug or a URL substring).")
+@click.option("--space-id", type=int, default=None,
+              help="Resume an existing ego-browser task space, e.g. after resolving a handoff.")
+@click.option("--screenshot-dir", default=None, help="Save a screenshot on every stop/handoff here.")
+@click.option("--dry-run", is_flag=True, help="List what would be attempted; no browser involved.")
+@click.option("--account", type=click.Choice(["main", "test"]), default="main", show_default=True,
+              help="Which Circle login to use: main (CIRCLE_EMAIL/PASSWORD) or test (CIRCLE_EMAIL2/PASSWORD2). "
+                   "Each has its own daily cap -- they don't share it.")
+@click.pass_context
+def auto_join_cmd(ctx, limit, host, space_id, screenshot_dir, dry_run, account):
+    """Join ICP-qualified free/paid Circle communities via ego-browser.
+
+    Drives the operator's own ego-browser (Ego Lite) Chromium, logging in
+    itself with CIRCLE_EMAIL/CIRCLE_PASSWORD (the connector's account) on any
+    host that isn't already authenticated -- a *.circle.so login doesn't
+    carry over to a custom domain. Automates navigation, login, the Join
+    click, and classifying a known outcome; stops the batch and hands the
+    browser back to the operator on an unrecognized login form, a Cloudflare
+    challenge, an unrecognized page state, or a custom application form (not
+    auto-answered in this version -- see circle_leads/join/ego_join_driver.mjs).
+
+    \b
+      circle-leads join-queue                          # preview only
+      circle-leads auto-join --limit 5
+      circle-leads auto-join --host practicommunity --dry-run
+      circle-leads auto-join --space-id 7               # resume after a handoff
+      circle-leads auto-join --account test --host matadorbet-giris
+    """
+    from circle_leads.join.ego_bridge import EgoBrowserError
+    from circle_leads.join.joiner import run_auto_join
+
+    try:
+        result = run_auto_join(
+            ctx.obj["db"],
+            limit=limit,
+            host=host,
+            pacing=ctx.obj["requirements"].join_pacing,
+            space_id=space_id,
+            screenshot_dir=screenshot_dir,
+            dry_run=dry_run,
+            account=account,
+        )
+    except (EgoBrowserError, RuntimeError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    if dry_run:
+        click.echo(f"Would attempt {len(result.attempted)}: {', '.join(result.attempted) or '(none)'}")
+        return
+
+    click.echo(f"ego-browser task space: {result.space_id}")
+    click.echo(
+        f"Attempted {len(result.attempted)}, joined {len(result.joined)}: "
+        f"{', '.join(result.joined) or '(none)'}"
+    )
+    if result.stopped_for:
+        click.echo(
+            f"\nStopped at '{result.stopped_for}': {result.stop_reason}\n"
+            f"Resolve it in ego-browser, then resume with: "
+            f"circle-leads auto-join --space-id {result.space_id}",
+            err=True,
+        )
 
 
 @cli.command("search-web")
@@ -920,6 +1118,33 @@ def push_leads_cmd(ctx, limit, force):
     )
 
 
+@cli.command("push-communities")
+@click.option("--force", is_flag=True,
+              help="Re-send every monitored community, ignoring the synced-state cache.")
+@click.pass_context
+def push_communities_cmd(ctx, force):
+    """Register monitored communities with the Warmr portal intake endpoint.
+
+    The set: watched or operator-approved public Circle communities, plus
+    private ones connected with a stored member session. Runs automatically
+    after each harvest; use this for a one-off backfill or to retry failures.
+
+    Requires COMMUNITY_INTAKE_API_SECRET (COMMUNITY_INTAKE_URL is optional).
+    """
+    cfg = load_community_intake_config()
+    if not cfg.enabled:
+        raise click.ClickException(
+            "Set COMMUNITY_INTAKE_API_SECRET to push communities."
+        )
+    result = push_monitored_communities(ctx.obj["db"], config=cfg, force=force)
+    if result.errors:
+        raise click.ClickException("; ".join(result.errors))
+    click.echo(
+        f"Community intake: sent {result.sent}, skipped {result.skipped}, "
+        f"attempted {result.attempted}."
+    )
+
+
 # --- Manual triage ----------------------------------------------------------
 
 
@@ -1113,8 +1338,8 @@ def worker_cmd(ctx, poll_seconds, use_llm):
       scan       -- read one private community (cookie) for posts+comments
       scan_all   -- read every cookie-backed community, VIP first
       harvest    -- discover public communities (web search) + read them
-    And on its own it runs the scheduled harvest when the dashboard schedule
-    says it is due.
+    And on its own it runs the scheduled harvest, and ICP classification for
+    newly-discovered communities, when each is due.
     """
     import time as _t
 
@@ -1124,8 +1349,9 @@ def worker_cmd(ctx, poll_seconds, use_llm):
     from circle_leads.storage.job_queue import claim_next, complete
     from circle_leads.scanning import cookie_hosts_vip_first, scan_cookie_host
     from circle_leads.storage.settings_store import (
-        is_discovery_due, is_harvest_due, load_effective_requirements,
-        mark_discovery_run, mark_harvest_run,
+        is_discovery_due, is_harvest_due, is_icp_classification_due,
+        load_effective_requirements, mark_discovery_run, mark_harvest_run,
+        mark_icp_classification_run,
     )
 
     # Read the same config the dashboard writes (DB override on top of the
@@ -1204,6 +1430,15 @@ def worker_cmd(ctx, poll_seconds, use_llm):
                     click.echo(f"    harvest: {r}")
             except Exception as exc:  # noqa: BLE001
                 click.echo(f"  schedule error: {exc.__class__.__name__}", err=True)
+            try:
+                if is_icp_classification_due(db):
+                    mark_icp_classification_run(db)
+                    # Text-only, no browser/HTTP -- cheap enough to just sweep
+                    # everything unchecked each time it's due, no limit needed.
+                    stats = classify_icp_pending(db, req)
+                    click.echo(f"  scheduled ICP classification: {stats}")
+            except Exception as exc:  # noqa: BLE001
+                click.echo(f"  ICP schedule error: {exc.__class__.__name__}", err=True)
 
         _t.sleep(max(1, poll_seconds))
 

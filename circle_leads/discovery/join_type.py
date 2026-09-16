@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from urllib.parse import urlparse
 
 import requests
 
@@ -33,8 +34,35 @@ class JoinType:
     INVITE_ONLY = "invite_only"        # no public signup at all (private or closed)
     LOCKED_UNKNOWN = "locked_unknown"  # even the public metadata call is refused
     UNKNOWN = "unknown"                # not a reachable/recognizable Circle host
+    SUBSCRIPTION_EXPIRED = "subscription_expired"  # operator's own Circle plan
+    # lapsed -- nobody can get in, member or not, until they pay Circle again
 
-    ALL = (FREE_JOIN, PAID, INVITE_ONLY, LOCKED_UNKNOWN, UNKNOWN)
+    ALL = (FREE_JOIN, PAID, INVITE_ONLY, LOCKED_UNKNOWN, UNKNOWN, SUBSCRIPTION_EXPIRED)
+
+
+def _redirects_to_marketing_site(
+    host: str, *, session: requests.Session, timeout: int
+) -> bool:
+    """True if the bare host no longer maps to any community at all.
+
+    When Circle's router has nothing to serve for a hostname, it falls
+    through to the circle.so marketing site rather than 404ing -- and
+    ``communities/current`` still answers 401 for that same host, identical
+    to a real locked/private community (confirmed by hand on
+    ``surferseo.circle.so``: 401 on the API, but the plain page redirects to
+    ``circle.so``). This disambiguates "nothing here" from "something here,
+    but locked" so a dead slug doesn't get filed as ``locked_unknown``.
+    """
+    try:
+        resp = session.get(
+            f"https://{host}/",
+            headers={"User-Agent": BROWSER_UA},
+            timeout=timeout,
+            allow_redirects=True,
+        )
+    except requests.RequestException:
+        return False
+    return (urlparse(resp.url).hostname or "").lower() in ("circle.so", "www.circle.so")
 
 
 @dataclass
@@ -50,7 +78,15 @@ def _classify_payload(data: dict) -> JoinClassification:
     present -- ``being-freelance``, ``talentcollective`` and others sell paid
     tiers but still let anyone sign up for the free one, which is what the
     test account can use.
+
+    ``subscription_cancelled`` overrides everything else: the operator's own
+    Circle plan lapsed, so ``allow_signups_to_public_community`` can still
+    read ``true`` from before the lapse while the live site actually serves
+    every visitor a "Circle plan has expired" page (``trigify-social-circle``:
+    flagged free_join by this payload, confirmed dead by hand).
     """
+    if data.get("subscription_cancelled"):
+        return JoinClassification(JoinType.SUBSCRIPTION_EXPIRED, "subscription_cancelled=true")
     if data.get("is_private"):
         return JoinClassification(JoinType.INVITE_ONLY, "is_private=true")
     if data.get("allow_signups_to_public_community"):
@@ -93,6 +129,11 @@ def fetch_join_classification(
         return JoinClassification(JoinType.UNKNOWN, f"request failed: {exc.__class__.__name__}")
 
     if resp.status_code in (401, 403):
+        if _redirects_to_marketing_site(host, session=http, timeout=timeout):
+            return JoinClassification(
+                JoinType.UNKNOWN,
+                "host no longer maps to a community (redirects to circle.so marketing site)",
+            )
         return JoinClassification(
             JoinType.LOCKED_UNKNOWN, f"HTTP {resp.status_code} on communities/current"
         )
@@ -107,3 +148,46 @@ def fetch_join_classification(
         return JoinClassification(JoinType.UNKNOWN, "response missing expected fields")
 
     return _classify_payload(data)
+
+
+def classify_join_type_pending(db, *, limit: int | None = None) -> dict[str, int]:
+    """Backfill join_type for communities that never got a live check.
+
+    Mirrors circle_leads/pipeline.py::classify_icp_pending's shape (only rows
+    with join_type_checked_at IS NULL, ordered by id, optional limit) -- but
+    this classifier itself needs no browser, just one HTTP GET per host
+    (fetch_join_classification, above), so it's cheap enough to run over the
+    whole backlog in one pass rather than only the ICP-flagged subset.
+    """
+    from sqlalchemy import select
+
+    from circle_leads.storage.models import Community, utcnow
+
+    stats: dict[str, int] = {"checked": 0}
+    session = shared_session()
+
+    with db.session() as s:
+        query = (
+            select(Community.id)
+            .where(Community.join_type_checked_at.is_(None))
+            .order_by(Community.id)
+        )
+        if limit:
+            query = query.limit(limit)
+        pending_ids = list(s.scalars(query).all())
+
+    for community_pk in pending_ids:
+        with db.session() as s:
+            community = s.get(Community, community_pk)
+            if community is None:
+                continue
+            host = urlparse(community.url).hostname or (
+                community.url.replace("https://", "").replace("http://", "").strip("/")
+            )
+            classification = fetch_join_classification(host, session=session)
+            community.join_type = classification.join_type
+            community.join_type_checked_at = utcnow()
+            stats["checked"] += 1
+            stats[classification.join_type] = stats.get(classification.join_type, 0) + 1
+
+    return stats

@@ -16,6 +16,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from typing import Iterator
+from urllib.parse import urlparse
 
 import requests
 
@@ -52,7 +53,15 @@ class PublicReader:
     _last: float = 0.0
 
     def __post_init__(self) -> None:
-        self.community_host = self.community_host.replace("https://", "").strip("/")
+        # Callers sometimes pass a stored community url rather than a bare
+        # host -- a circle_directory-resolved join_url can be a deep link
+        # (/checkout/..., /join?invitation_token=...). A plain scheme-strip
+        # left that path glued onto every API call built from self.base,
+        # breaking all of them against a nonsense URL. urlparse().hostname
+        # discards path/query regardless of whether a scheme was present.
+        raw = self.community_host.strip()
+        parsed = urlparse(raw if "://" in raw else f"https://{raw}")
+        self.community_host = parsed.hostname or raw.replace("https://", "").replace("http://", "").strip("/")
         self.base = f"https://{self.community_host}"
 
     def _throttle(self) -> None:

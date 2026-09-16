@@ -75,7 +75,7 @@ class RankedCommunity:
         return "PROBABLY NOT"
 
 
-def _score_listing(name: str | None, description: str | None, price: str | None) -> tuple[int, list[str]]:
+def score_listing(name: str | None, description: str | None, price: str | None) -> tuple[int, list[str]]:
     """Score a Discover listing for likely software-hiring activity."""
     haystack = " ".join(filter(None, [name, description])).lower()
     score, reasons = 0, []
@@ -131,7 +131,7 @@ def rank_discover_listings(listings: list[dict]) -> list[RankedCommunity]:
         name = item.get("name")
         price = item.get("price")
         desc = item.get("description")
-        score, reasons = _score_listing(name, desc, price)
+        score, reasons = score_listing(name, desc, price)
         ranked.append(
             RankedCommunity(
                 slug=slug,
@@ -153,7 +153,7 @@ def rank_extracted(communities: list[DiscoveredCommunity]) -> list[RankedCommuni
     """Rank plain <slug>.circle.so URLs pulled from any public text/HTML."""
     ranked: list[RankedCommunity] = []
     for c in dedupe(communities):
-        score, reasons = _score_listing(c.name or c.slug, c.description, c.price_label)
+        score, reasons = score_listing(c.name or c.slug, c.description, c.price_label)
         ranked.append(
             RankedCommunity(
                 slug=c.slug,
@@ -190,7 +190,7 @@ def rank_from_html(html: str, *, source: str = "html") -> list[RankedCommunity]:
         # The visible link text carries the name and often a description; a
         # "Free" label in it is real signal too.
         name = _clean_name(text) or slug.replace("-", " ").title()
-        score, reasons = _score_listing(text, None, text)
+        score, reasons = score_listing(text, None, text)
         ranked.append(
             RankedCommunity(
                 slug=slug, name=name,

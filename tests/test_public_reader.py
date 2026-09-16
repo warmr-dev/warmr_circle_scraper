@@ -65,6 +65,23 @@ def reader_with(routes):
     )
 
 
+def test_base_url_strips_a_deep_link_path():
+    """community_host can be a stored community url that's a deep link (a
+    circle_directory-resolved join_url like a /checkout/... or /join?... page),
+    not the community's origin -- the path/query must not leak into base."""
+    r = PublicReader(
+        community_host="https://community.aifire.co/c/welcome-checklist/?utm_source=circle_discover",
+    )
+    assert r.community_host == "community.aifire.co"
+    assert r.base == "https://community.aifire.co"
+
+
+def test_base_url_accepts_a_bare_scheme_less_host():
+    r = PublicReader(community_host="x.circle.so/")
+    assert r.community_host == "x.circle.so"
+    assert r.base == "https://x.circle.so"
+
+
 def test_list_spaces_parses_public_list():
     r = reader_with({"/internal_api/spaces": StubResp(200, SPACES)})
     spaces = r.list_spaces()

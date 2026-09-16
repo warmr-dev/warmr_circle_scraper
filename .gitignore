@@ -22,6 +22,7 @@ data/
 exports/
 circle-search.log
 harvest.log
+logs/
 **/config/communities/member_feeds.yaml
 
 # Local Circle Connector — MUST stay on the local machine, never in Git.
@@ -38,3 +39,5 @@ connector.json
 # session if anyone ever logs in through it — never commit it.
 remote-profile/
 **/remote-profile/
+.vercel
+.env*

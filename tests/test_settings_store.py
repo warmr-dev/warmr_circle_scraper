@@ -7,14 +7,19 @@ import pytest
 from circle_leads.storage.database import Database
 from circle_leads.storage.settings_store import (
     DEFAULT_DISCOVERY,
+    DEFAULT_ICP_SCHEDULE,
     DEFAULT_SCHEDULE,
     get_discovery_schedule,
+    get_icp_schedule,
     get_schedule,
     is_discovery_due,
     is_harvest_due,
+    is_icp_classification_due,
     mark_discovery_run,
     mark_harvest_run,
+    mark_icp_classification_run,
     set_discovery_schedule,
+    set_icp_schedule,
     set_schedule,
     get_setting,
     set_setting,
@@ -140,6 +145,57 @@ def test_discovery_independent_of_harvest_schedule(db):
 def test_discovery_invalid_rejected(db):
     with pytest.raises(ValueError):
         set_discovery_schedule(db, "sometimes")
+
+
+# --- ICP classification schedule --------------------------------------------
+
+
+def test_icp_default_is_hourly(db):
+    assert get_icp_schedule(db) == DEFAULT_ICP_SCHEDULE == "hourly"
+
+
+def test_icp_every_run_is_always_due(db):
+    set_icp_schedule(db, "every_run")
+    mark_icp_classification_run(db)
+    assert is_icp_classification_due(db) is True
+
+
+def test_icp_off_is_never_due(db):
+    set_icp_schedule(db, "off")
+    assert is_icp_classification_due(db) is False
+
+
+def test_icp_due_when_never_run(db):
+    set_icp_schedule(db, "hourly")
+    assert is_icp_classification_due(db) is True
+
+
+def test_icp_not_due_right_after_a_run(db):
+    set_icp_schedule(db, "hourly")
+    mark_icp_classification_run(db)
+    soon = datetime.utcnow() + timedelta(minutes=10)
+    assert is_icp_classification_due(db, now=soon) is False
+
+
+def test_icp_due_again_after_an_hour(db):
+    set_icp_schedule(db, "hourly")
+    mark_icp_classification_run(db)
+    later = datetime.utcnow() + timedelta(hours=2)
+    assert is_icp_classification_due(db, now=later) is True
+
+
+def test_icp_independent_of_harvest_and_discovery_schedules(db):
+    set_schedule(db, "every_6h")
+    set_discovery_schedule(db, "weekly")
+    set_icp_schedule(db, "every_run")
+    assert get_schedule(db) == "every_6h"
+    assert get_discovery_schedule(db) == "weekly"
+    assert get_icp_schedule(db) == "every_run"
+
+
+def test_icp_invalid_rejected(db):
+    with pytest.raises(ValueError):
+        set_icp_schedule(db, "sometimes")
     with pytest.raises(ValueError):
         set_discovery_schedule(db, "custom:nope")
 
@@ -147,11 +203,15 @@ def test_discovery_invalid_rejected(db):
 def test_due_checks_tolerate_a_tz_aware_stored_timestamp(db):
     # A timestamp set by hand via SQL (now()::text) carries a "+00" offset.
     # The due-checks must not raise "can't subtract offset-naive and
-    # offset-aware datetimes" on it.
+    # offset-aware datetimes" on it. Computed relative to "now" (not a
+    # hardcoded date) -- a fixed past date eventually ages past the "daily"/
+    # "every_6h" window it was meant to sit inside, flipping this test to a
+    # false failure with the passage of real time rather than a code change.
+    recent = datetime.utcnow() - timedelta(minutes=5)
     set_discovery_schedule(db, "daily")
-    set_setting(db, "harvest_last_search", "2026-09-10 01:02:28.926005+00")
+    set_setting(db, "harvest_last_search", recent.strftime("%Y-%m-%d %H:%M:%S.%f") + "+00")
     set_schedule(db, "every_6h")
-    set_setting(db, "harvest_last_run", "2026-09-10 01:02:28.926005+00:00")
+    set_setting(db, "harvest_last_run", recent.strftime("%Y-%m-%d %H:%M:%S.%f") + "+00:00")
     assert is_discovery_due(db) is False   # < 24h ago, no crash
     assert is_harvest_due(db) is False     # < 6h ago, no crash
 

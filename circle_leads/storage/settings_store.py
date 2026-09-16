@@ -206,6 +206,65 @@ def mark_discovery_run(db: Database, *, now: datetime | None = None) -> None:
     set_setting(db, KEY_DISCOVERY_LAST_RUN, now.isoformat())
 
 
+# --- ICP classification sub-schedule ---------------------------------------
+#
+# classify_icp_pending (circle_leads/pipeline.py) is text-only -- no browser,
+# no HTTP -- so it's cheap enough to run over the whole newly-discovered
+# backlog on its own cadence, independently of the harvest/discovery
+# schedules above. Was previously CLI-only (`filter-relevant`), which meant
+# freshly-discovered communities sat unflagged until a human ran it by hand.
+
+KEY_ICP = "icp_classification_schedule"
+KEY_ICP_LAST_RUN = "icp_classification_last_run"
+DEFAULT_ICP_SCHEDULE = "hourly"
+
+_ICP_SCHEDULES = _NAMED_SCHEDULES | {"every_run"}
+
+
+def get_icp_schedule(db: Database) -> str:
+    return get_setting(db, KEY_ICP, DEFAULT_ICP_SCHEDULE) or DEFAULT_ICP_SCHEDULE
+
+
+def set_icp_schedule(db: Database, schedule: str) -> None:
+    if schedule.startswith("custom:"):
+        if _schedule_minutes(schedule) is None:
+            raise ValueError(
+                f"Invalid custom schedule {schedule!r}; use custom:<hours> or "
+                f"custom:<n>m (e.g. custom:5m)"
+            )
+    elif schedule not in _ICP_SCHEDULES:
+        raise ValueError(
+            f"Unknown ICP schedule {schedule!r}; choose from "
+            f"{sorted(_ICP_SCHEDULES)} or custom:<hours> / custom:<n>m"
+        )
+    set_setting(db, KEY_ICP, schedule)
+
+
+def is_icp_classification_due(db: Database, *, now: datetime | None = None) -> bool:
+    """True when ICP classification should run now.
+
+    'every_run' -> always (checked every worker loop pass, so effectively
+    "whenever the queue is empty"); 'off' -> never; otherwise the configured
+    interval must have elapsed since the last recorded run.
+    """
+    schedule = get_icp_schedule(db)
+    if schedule == "every_run":
+        return True
+    minutes = _schedule_minutes(schedule)
+    if minutes is None:
+        return False  # 'off'
+    now = now or datetime.now(timezone.utc).replace(tzinfo=None)
+    last = _parse_ts(get_setting(db, KEY_ICP_LAST_RUN))
+    if last is None:
+        return True  # never run
+    return now - last >= timedelta(minutes=minutes)
+
+
+def mark_icp_classification_run(db: Database, *, now: datetime | None = None) -> None:
+    now = now or datetime.now(timezone.utc).replace(tzinfo=None)
+    set_setting(db, KEY_ICP_LAST_RUN, now.isoformat())
+
+
 # --- Lead requirements override (stored in the DB, not the file) -----------
 #
 # The packaged requirements.yaml is read-only on a serverless deploy

@@ -2,14 +2,15 @@
 FROM python:3.12-slim
 WORKDIR /app
 
-# System deps for Playwright/Chromium are only needed if you run the browser
-# feed reader in the cloud (private communities). The public harvest doesn't
-# need it, so it's left out to keep the image small. Add it if you need it.
 COPY . .
 # `llm` pulls in openai + anthropic so the classifier's LLM layer works for
 # genuinely ambiguous posts. Without it make_backend() falls back to rules only,
 # even when OPENAI_API_KEY / ANTHROPIC_API_KEY are set.
-RUN pip install --no-cache-dir -e '.[web,llm]'
+# `browser` (Playwright) is needed for `discover-directory`: discover.circle.so
+# challenges plain HTTP requests (Cloudflare), so the bulk directory crawl runs a
+# real headless Chromium -- see circle_leads/discovery/circle_directory.py.
+RUN pip install --no-cache-dir -e '.[web,llm,browser]' \
+    && playwright install --with-deps chromium
 
 ENV CIRCLE_LEADS_DB=""
 EXPOSE 8000
