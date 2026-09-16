@@ -150,7 +150,9 @@ def fetch_join_classification(
     return _classify_payload(data)
 
 
-def classify_join_type_pending(db, *, limit: int | None = None) -> dict[str, int]:
+def classify_join_type_pending(
+    db, *, limit: int | None = None, recheck: bool = False
+) -> dict[str, int]:
     """Backfill join_type for communities that never got a live check.
 
     Mirrors circle_leads/pipeline.py::classify_icp_pending's shape (only rows
@@ -158,6 +160,9 @@ def classify_join_type_pending(db, *, limit: int | None = None) -> dict[str, int
     this classifier itself needs no browser, just one HTTP GET per host
     (fetch_join_classification, above), so it's cheap enough to run over the
     whole backlog in one pass rather than only the ICP-flagged subset.
+    ``recheck`` re-classifies every community instead of only never-checked
+    ones -- e.g. to backfill join_type_detail (P21) onto rows classified
+    before that column existed, or after a classification-rule change.
     """
     from sqlalchemy import select
 
@@ -167,11 +172,9 @@ def classify_join_type_pending(db, *, limit: int | None = None) -> dict[str, int
     session = shared_session()
 
     with db.session() as s:
-        query = (
-            select(Community.id)
-            .where(Community.join_type_checked_at.is_(None))
-            .order_by(Community.id)
-        )
+        query = select(Community.id).order_by(Community.id)
+        if not recheck:
+            query = query.where(Community.join_type_checked_at.is_(None))
         if limit:
             query = query.limit(limit)
         pending_ids = list(s.scalars(query).all())
@@ -186,6 +189,7 @@ def classify_join_type_pending(db, *, limit: int | None = None) -> dict[str, int
             )
             classification = fetch_join_classification(host, session=session)
             community.join_type = classification.join_type
+            community.join_type_detail = classification.detail[:2000]
             community.join_type_checked_at = utcnow()
             stats["checked"] += 1
             stats[classification.join_type] = stats.get(classification.join_type, 0) + 1

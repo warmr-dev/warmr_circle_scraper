@@ -257,3 +257,42 @@ def test_classify_join_type_pending_respects_limit(monkeypatch):
 
     stats = classify_join_type_pending(db, limit=1)
     assert stats["checked"] == 1
+
+
+def test_classify_join_type_pending_saves_the_reason_not_just_the_bucket(monkeypatch):
+    db = _db()
+    with db.session() as s:
+        get_or_create_community(s, slug="dead-one", url="https://dead-one.circle.so")
+
+    session = RoutedStubSession({"dead-one": StubResp(404, None)})
+    monkeypatch.setattr(join_type_module, "shared_session", lambda: session)
+
+    classify_join_type_pending(db)
+
+    with db.session() as s:
+        row = s.scalar(select(Community).where(Community.slug == "dead-one"))
+        assert row.join_type == JoinType.UNKNOWN
+        assert row.join_type_detail == "HTTP 404"
+
+
+def test_classify_join_type_pending_recheck_touches_already_checked_rows(monkeypatch):
+    db = _db()
+    from circle_leads.storage.models import utcnow
+    with db.session() as s:
+        already = get_or_create_community(s, slug="already-checked", url="https://already.circle.so")
+        already.join_type = JoinType.INVITE_ONLY
+        already.join_type_checked_at = utcnow()
+
+    session = RoutedStubSession({
+        "already": StubResp(200, {"is_private": False,
+                                   "allow_signups_to_public_community": True,
+                                   "has_non_draft_paywalls": False}),
+    })
+    monkeypatch.setattr(join_type_module, "shared_session", lambda: session)
+
+    stats = classify_join_type_pending(db, recheck=True)
+
+    assert stats["checked"] == 1
+    with db.session() as s:
+        row = s.scalar(select(Community).where(Community.slug == "already-checked"))
+        assert row.join_type == JoinType.FREE_JOIN  # overwritten by the recheck
