@@ -19,7 +19,14 @@ from circle_leads.storage.models import Community
 
 
 def joins_attempted_today(db: Database) -> int:
-    """Count of communities the bot has attempted (any outcome) since UTC midnight."""
+    """Count of communities with a *persisted* outcome since UTC midnight.
+
+    Only half of the daily-cap picture, and the conservative half: a handoff
+    never reaches the DB, so this cannot see a community the browser opened
+    without reaching a terminal outcome. ``joiner._attempts_today`` combines it
+    with the attempt log, which counts every visit -- the quantity Circle
+    actually reacts to.
+    """
     start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
     with db.session() as s:
         return (

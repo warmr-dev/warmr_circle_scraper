@@ -320,15 +320,17 @@ def _to_ranked(listing: DirectoryListing):
     derivation (``path.split('/')[-1]``): that assumes a Discover ``/products/
     <slug>`` path, but a resolved join URL here is often the community's own
     host or an external funnel, so the slug comes from
-    ``community_slug_for_host`` on whatever host was actually resolved.
+    ``unique_slug_for_host`` on whatever host was actually resolved -- the
+    unique variant, because a slug is a key here and the label variant collapses
+    sibling subdomains of one domain onto a single row.
     """
-    from circle_leads.discovery.discover_communities import community_slug_for_host
+    from circle_leads.discovery.discover_communities import unique_slug_for_host
     from circle_leads.discovery.finder import RankedCommunity, score_listing, is_free
     from urllib.parse import urlparse
 
     join_url = listing.join_url or f"{DISCOVER_BASE}/products/{listing.slug}"
     host = urlparse(join_url if "://" in join_url else f"https://{join_url}").hostname or listing.slug
-    slug = community_slug_for_host(host) if listing.join_url else (listing.slug or str(listing.external_id))
+    slug = unique_slug_for_host(host) if listing.join_url else (listing.slug or str(listing.external_id))
 
     score, reasons = score_listing(listing.name, listing.description, listing.price_label)
     return RankedCommunity(

@@ -34,6 +34,88 @@ EMPLOYMENT_OBJECT = (
 FIRST_PERSON = r"(?:i|i'm|i am|im|me|my|myself)"
 ORG_SUBJECT = r"(?:we|we're|we are|were|our|us|my company|my team|my startup|the team)"
 
+# Job titles for back-office support staff. A community post hiring one of
+# these is a staffing ad, not a buyer of software work: whoever fills the seat
+# does the work in-house. They are listed separately from ROLE_NOUNS because
+# the same words also name our *buyer* personas (requirements.yaml targets
+# "Office Manager" and "Operations Manager"), so only the hiring shapes below
+# -- the title as the object of a hire, or as a job-ad headline -- may act on
+# them. An office manager asking for a developer must stay a lead.
+ADMIN_SUPPORT_ROLES = (
+    r"(?:office\s+(?:manager|administrator|coordinator|assistant)|"
+    r"executive\s+(?:assistant|administrator)|personal\s+assistant|"
+    r"admin(?:istrative)?\s+(?:assistant|coordinator|clerk|support)|"
+    r"operations\s+(?:coordinator|assistant|administrator|clerk)|"
+    r"receptionist|front\s+desk\s+[\w-]+|secretary|"
+    r"data\s+entry\s+(?:clerk|operator|specialist)|"
+    # "<domain> administrator" -- "Philanthropy Administrator", "Grants
+    # Administrator". The domains are listed positively rather than as "any
+    # word that is not on a technical blocklist": a blocklist has to name every
+    # technology that can precede "administrator" (WordPress, Shopify, Jira,
+    # Zapier, ...) and silently mislabels the ones it has not heard of. Missing
+    # a back-office domain here only costs a suppression; wrongly claiming a
+    # technical title costs a real lead.
+    r"(?:office|facilities|building|practice|clinic|dental|medical|school|"
+    r"church|grants?|philanthropy|fundraising|donor|payroll|benefits|"
+    r"human\s+resources|hr|billing|invoicing|membership|enrolment|enrollment|"
+    r"admissions|records|scheduling|contracts?|procurement|travel|"
+    r"front\s+office|back\s+office|business)\s+administrator)"
+)
+
+# Positive evidence that the post wants software work done. This is what the
+# admin-hire rule stands down for, so it is deliberately generous: a wrong
+# stand-down only means a post is scored normally, while a missed one kills a
+# buyer outright.
+#
+# Roles here are the unambiguously technical ones. The engagement nouns a
+# software buyer also uses -- agency, studio, freelancer, designer -- are NOT
+# listed, because a staffing agency advertising an office seat names itself
+# with exactly those words; they are handled by SOFTWARE_VENDOR_SOUGHT below,
+# which requires them to be the *object* of a hire rather than the poster.
+TECHNICAL_ROLE_PATTERN = (
+    r"\b(?:developer|engineer|programmer|coder|devops|sre|architect|"
+    r"full[- ]?stack|front[- ]?end|back[- ]?end|software|web\s+dev\w*|"
+    r"mobile\s+dev\w*|cto|technical\s+co-?founder|technical\s+lead|"
+    r"tech\s+lead|data\s+scientist|data\s+engineer)\b"
+    # Bare "dev" is a technical role in these communities, except in "business
+    # dev" / "biz dev", which is sales.
+    r"|(?<!business\s)(?<!biz\s)\bdevs?\b"
+)
+
+# The things we get paid to build. Narrower than DELIVERABLE_PATTERN on
+# purpose: "system" and "store" also name the filing system and the retail
+# store an office manager looks after, so they are not evidence of a software
+# request on their own.
+SOFTWARE_ARTIFACT = (
+    r"(?:app|apps|application|website|web\s*app|mobile\s*app|api|platform|mvp|"
+    r"saas|software|dashboard|portal|backend|frontend|landing\s*page|"
+    r"e-?commerce\s+(?:site|store|shop)|integration|automation|prototype|"
+    r"plugin|extension|chatbot|bot|site)"
+)
+
+# A request to have that artifact made or worked on: "build our booking app",
+# "extend our plugin", "automate the onboarding flow".
+SOFTWARE_BUILD_REQUEST = (
+    r"\b(?:build|building|develop|developing|create|creating|code|coding|"
+    r"design|designing|redesign|rebuild|rebuilding|revamp|migrate|migrating|"
+    r"integrate|automate|maintain|extend|upgrade|fix|ship|launch)\s+"
+    rf"(?:(?:a|an|the|our|my|this|new|custom)\s+){{0,2}}(?:[\w-]+\s+){{0,2}}?{SOFTWARE_ARTIFACT}\b"
+)
+
+# The vendor nouns, but only where the poster is looking for one. The qualifier
+# lookahead is what separates "know a good web agency" from "our staffing
+# agency is hiring an office manager": in the latter the agency is the employer,
+# not the thing being bought.
+SOFTWARE_VENDOR_SOUGHT = (
+    r"\b(?:hire|hiring|need|needs|needed|looking\s+for|look\s+for|seeking|"
+    r"seek|find|finding|know|knows|recommend|engage|bring\s+on)\s+"
+    r"(?:(?:a|an|some|any|the|our|new|good|solid)\s+){0,2}"
+    r"(?:(?!staffing|recruit\w*|talent|temp|temporary|placement|employment)"
+    r"[\w-]+\s+){0,2}?"
+    r"(?:agency|studio|freelancer|contractor|consultancy|dev\s+shop|"
+    r"development\s+(?:shop|partner|team)|designer)\b"
+)
+
 # --- Hiring intent (positive) ----------------------------------------------
 
 HIRING_PATTERNS: list[tuple[str, str, int]] = [
@@ -93,9 +175,14 @@ HIRING_PATTERNS: list[tuple[str, str, int]] = [
         38,
     ),
     (
+        # "extend"/"upgrade" are here because work on an existing product is
+        # commissioned as often as a new build ("extend our plugin"). The
+        # bare-infinitive forms only: "we maintain our platform" is a vendor
+        # describing itself, not a buyer.
         "build_our_thing",
-        r"\b(?:build|develop|create|design)\s+(?:our|my|the)\s+"
-        r"(?:app|application|website|platform|product|mvp|api|backend|frontend|saas|portal|site|system)\b",
+        r"\b(?:build|develop|create|design|extend|upgrade)\s+(?:our|my|the)\s+"
+        r"(?:app|application|website|platform|product|mvp|api|backend|frontend|"
+        r"saas|portal|site|system|plugin|extension|chatbot)\b",
         30,
     ),
     ("recommend_a_role", rf"\b(?:recommend|referral|refer\s+me)\b[^.!?]{{0,50}}?{ROLE_NOUNS}\b", 25),
@@ -164,7 +251,13 @@ JOB_SEEKER_PATTERNS: list[tuple[str, str, int]] = [
         -45,
     ),
     ("open_to_work", r"\bopen\s+to\s+(?:work|opportunities|new\s+roles?|offers)\b", -45),
-    ("available_for_work", r"\bavailable\s+for\s+(?:work|hire|projects?|freelance|contract)\b", -40),
+    (
+        "available_for_work",
+        r"\bavailable\s+for\s+(?:work|hire|projects?|freelance|contract|"
+        # A seller offering consulting or client slots, same shape as the rest.
+        r"consulting|new\s+clients?|clients?)\b",
+        -40,
+    ),
     ("seeking_employment", r"\bseeking\s+(?:employment|a\s+new\s+role|new\s+opportunit)", -45),
     ("need_a_job", r"\bneed\s+(?:a\s+)?(?:job|work|employment)\b", -45),
     (
@@ -183,6 +276,22 @@ JOB_SEEKER_PATTERNS: list[tuple[str, str, int]] = [
     ("years_of_experience_self", rf"\b(?:i\s+have|with)\s+\d+\+?\s+years?\s+(?:of\s+)?experience\b", -20),
     ("my_portfolio", r"\bmy\s+(?:portfolio|resume|cv|github)\b", -25),
     ("happy_to_help_promo", r"\b(?:i|we)\s+(?:can|could)\s+(?:help|build\s+(?:this|it)\s+for\s+you)\b", -30),
+    (
+        # "I'm looking for consulting opportunities" -- the same noun a hiring
+        # post uses ("Contract Opportunity" below) with the roles reversed:
+        # the poster is the one who wants to be engaged, so they are a seller.
+        "seeking_opportunities_self",
+        rf"\b{FIRST_PERSON}\b[^.!?]{{0,40}}?\b{SEEK_VERB}\s+for\s+"
+        rf"(?:[\w-]+\s+){{0,3}}?opportunit(?:y|ies)\b",
+        -45,
+    ),
+    (
+        # A vendor announcing capacity. "Taking on new clients" has no reading
+        # in which the poster is the one buying.
+        "taking_on_clients",
+        r"\b(?:taking|accepting|onboarding)\s+(?:on\s+)?(?:new\s+)?clients\b",
+        -40,
+    ),
 ]
 
 # --- Disqualifiers ----------------------------------------------------------
@@ -203,7 +312,8 @@ HYPOTHETICAL_PATTERNS: list[tuple[str, str, int]] = [
 DELIVERABLE_PATTERN = (
     r"\b(?:app|application|website|web\s*app|mobile\s*app|integration|api|"
     r"automation|platform|mvp|saas|dashboard|portal|backend|frontend|"
-    r"landing\s*page|e-?commerce|store|system|software|prototype)\b"
+    r"landing\s*page|e-?commerce|store|system|software|prototype|"
+    r"plugin|extension|chatbot)\b"
 )
 
 BUDGET_PATTERN = (
@@ -292,6 +402,84 @@ _ROLE_SEEKING_EMPLOYMENT = re.compile(
     re.I,
 )
 
+# The admin title as the object of a hire: "we are hiring an Office Manager",
+# "seeking an Administrative Assistant".
+_ADMIN_HIRE_OBJECT = re.compile(
+    rf"\b(?:hir(?:e|ing)|recruit(?:ing)?|{SEEK_VERB}\s+for|seek(?:ing)?|"
+    rf"need(?:s|ed)?|want(?:ed|ing)?)\s+(?:(?:a|an|our|new|another|\d+)\s+)?"
+    rf"(?:[\w-]+\s+){{0,2}}?{ADMIN_SUPPORT_ROLES}\b",
+    re.I,
+)
+# The same hire written as a job-ad headline: "Office Manager - Full Time",
+# "Administrative Assistant needed". The window is short and stops at sentence
+# punctuation so it cannot reach across into an unrelated clause.
+_ADMIN_HIRE_HEADLINE = re.compile(
+    rf"{ADMIN_SUPPORT_ROLES}\b[^.!?\n]{{0,30}}?\b(?:wanted|needed|required|"
+    rf"vacancy|vacancies|opening|position|full[- ]time|part[- ]time)\b",
+    re.I,
+)
+# The vacancy named as a noun instead of a verb: "we have an opening for an
+# Administrative Assistant", "new role for an Office Manager". Staffing agencies
+# advertise in this voice, and the verb forms above never reach it.
+_ADMIN_HIRE_VACANCY = re.compile(
+    rf"\b(?:opening|openings|vacancy|vacancies|position|role|opportunity)\s+"
+    rf"for\s+(?:(?:a|an|our|the|new|another)\s+)?(?:[\w-]+\s+){{0,2}}?"
+    rf"{ADMIN_SUPPORT_ROLES}\b",
+    re.I,
+)
+_TECHNICAL_ROLE = re.compile(TECHNICAL_ROLE_PATTERN, re.I)
+_SOFTWARE_BUILD_REQUEST = re.compile(SOFTWARE_BUILD_REQUEST, re.I)
+_SOFTWARE_VENDOR_SOUGHT = re.compile(SOFTWARE_VENDOR_SOUGHT, re.I)
+
+ADMIN_SUPPORT_PENALTY = -45
+
+
+def requests_software_work(text: str) -> bool:
+    """Is there a request for software work anywhere in the post?
+
+    Three independent shapes count: a technical role is named, something we
+    build is asked for, or a vendor is being sought. Any one of them means the
+    back-office rule must keep its hands off the post.
+    """
+    return bool(
+        _TECHNICAL_ROLE.search(text)
+        or _SOFTWARE_BUILD_REQUEST.search(text)
+        or _SOFTWARE_VENDOR_SOUGHT.search(text)
+    )
+
+
+def _admin_hire_sentences(text: str) -> list[tuple[int, int]]:
+    """Sentence spans that advertise a back-office support seat.
+
+    Roughly 40% of the leads this pipeline has produced were job ads for office
+    managers, executive assistants and the like. Whoever fills that seat does
+    the work themselves, so the post is not a buyer of software development.
+
+    The span returned is the whole sentence, not just the title, because the
+    hiring credit such a post earns ("we are hiring", "join our team") is
+    earned by that same sentence, and it is credit for the wrong kind of hire.
+    Sentence-terminating punctuation is left outside the span so that masking
+    it cannot join two sentences into one.
+    """
+    spans: list[tuple[int, int]] = []
+    for rx in (_ADMIN_HIRE_OBJECT, _ADMIN_HIRE_HEADLINE, _ADMIN_HIRE_VACANCY):
+        for m in rx.finditer(text):
+            # rfind returns -1 when the match is in the first sentence, which
+            # is the answer we want: the sentence starts at 0.
+            start = max(text.rfind(c, 0, m.start()) for c in ".!?\n") + 1
+            ends = [i for i in (text.find(c, m.end()) for c in ".!?\n") if i >= 0]
+            spans.append((start, min(ends) if ends else len(text)))
+    return spans
+
+
+def _mask(text: str, spans: list[tuple[int, int]]) -> str:
+    """Blank out spans, preserving offsets and surrounding punctuation."""
+    chars = list(text)
+    for start, end in spans:
+        for i in range(start, end):
+            chars[i] = " "
+    return "".join(chars)
+
 
 def _first_person_seeking_employment(text: str) -> bool:
     """Detect the decisive job-seeker shape: a person wanting employment.
@@ -357,12 +545,43 @@ def analyze(text: str) -> RuleResult:
         result.score -= 35
         result.hiring_matches.remove("seeking_a_role_person")
 
+    # Same collision on the other noun: "consulting opportunities" reads as an
+    # offer ("opportunity_offered") until the poster turns out to be the one
+    # looking for it, at which point the offer reading is wrong.
+    if "opportunity_offered" in result.hiring_matches and (
+        "seeking_opportunities_self" in result.seeker_matches
+    ):
+        result.score -= 30
+        result.hiring_matches.remove("opportunity_offered")
+
+    # A back-office vacancy is weighed, not fatal. It used to be a hard
+    # disqualifier, which returned NOT_LEAD at 0.9 before scoring or LLM
+    # escalation could run -- so "we're hiring an office manager, and we need
+    # someone to build our booking app, budget $15k" died at rule score 83.
+    # A post that asks for software work anywhere is left alone entirely; a
+    # post that does not loses the hiring credit its admin-hire sentences
+    # earned, and then takes the penalty. Mixed and borderline posts stay on
+    # the normal path, where the score or the LLM decides.
+    admin_spans = (
+        [] if requests_software_work(text) else _admin_hire_sentences(text)
+    )
+    if admin_spans:
+        masked = _mask(text, admin_spans)
+        for name, rx, weight in _HIRING:
+            if name in result.hiring_matches and not rx.search(masked):
+                result.score -= weight
+                result.hiring_matches.remove(name)
+        result.score += ADMIN_SUPPORT_PENALTY
+
     result.signals = {
         "deliverable": bool(_DELIVERABLE.search(text)),
         "budget": bool(_BUDGET.search(text)),
         "timeline": bool(_TIMELINE.search(text)),
         "referral_request": bool(_REFERRAL.search(text)),
         "buyer_capacity": bool(_BUYER.search(text)),
+        # Kept as a signal rather than a disqualifier so a reviewer can still
+        # see why the score dropped without the post being killed outright.
+        "admin_support_hire": bool(admin_spans),
     }
 
     # Supporting signals only count when hiring language is actually present;

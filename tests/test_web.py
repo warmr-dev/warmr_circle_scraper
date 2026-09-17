@@ -185,6 +185,69 @@ def test_stats_summarize_the_database(auth_client):
     assert stats["decided_by"]
 
 
+def _seed_funnel_communities(db_path):
+    """Seed one ICP-fit row per platform, all un-attempted, plus one already read."""
+    from circle_leads.storage.database import Database, get_or_create_community
+    from circle_leads.storage.models import JoinStatus
+    from circle_leads.storage.database import utcnow
+
+    db = Database(f"sqlite:///{db_path}")
+    with db.session() as s:
+        for slug, platform in [
+            ("real-circle", "circle"),
+            ("card-one", "discover"),
+            ("card-two", "discover"),
+            ("landing", "other"),
+            ("no-platform", None),
+        ]:
+            c = get_or_create_community(
+                s, slug=slug, url=f"https://{slug}.example.com"
+            )
+            c.icp_flag = True
+            c.platform = platform
+            c.join_status = JoinStatus.NOT_ATTEMPTED.value
+        already_read = get_or_create_community(
+            s, slug="read-once", url="https://read-once.circle.so"
+        )
+        already_read.icp_flag = True
+        already_read.platform = "circle"
+        already_read.join_status = JoinStatus.NOT_ATTEMPTED.value
+        already_read.last_synced_at = utcnow()
+
+
+def test_scraper_queue_counts_only_communities_on_a_real_circle_host(
+    tmp_path, monkeypatch
+):
+    """The queue card must not count Discover cards or non-Circle landing pages.
+
+    They carry no community host, so harvest and the joiner both skip them --
+    counting them made the workable backlog look ~9x deeper than it was.
+    """
+    monkeypatch.setenv("DASHBOARD_PASSWORD", PASSWORD)
+    monkeypatch.setenv("DASHBOARD_SECRET_KEY", "test-signing-key")
+    db_path = tmp_path / "funnel.db"
+    Database(f"sqlite:///{db_path}")
+    _seed_funnel_communities(db_path)
+
+    from circle_leads.web.app import create_app
+
+    import shutil
+    test_cfg = tmp_path / "requirements.yaml"
+    shutil.copy(_DEV_CONFIG, test_cfg)
+    client = TestClient(
+        create_app(db_url=f"sqlite:///{db_path}", config_path=str(test_cfg))
+    )
+    client.post("/login", data={"password": PASSWORD})
+
+    funnel = client.get("/api/stats").json()["funnel"]
+    # real-circle + read-once are on a Circle host; read-once still counts as
+    # queued because "read once" and "attempted" are different things.
+    assert funnel["queued_for_scraper"] == 2
+    # 2 Discover cards + 1 non-Circle landing + 1 with no platform recorded.
+    # The NULL row must not vanish from both sides of the split.
+    assert funnel["queued_unresolved"] == 4
+
+
 def test_activity_records_what_was_checked_and_decided(auth_client):
     events = auth_client.get("/api/activity").json()["activity"]
     kinds = {e["kind"] for e in events}

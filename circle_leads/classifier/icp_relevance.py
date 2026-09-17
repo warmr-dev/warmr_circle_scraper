@@ -40,6 +40,30 @@ RULES_VERSION = "icp-rules-v1"
 ICP_CONFIDENT_YES = 45
 ICP_CONFIDENT_NO = -10
 
+# An LLM "fit" below this confidence does not get to set icp_flag. The backends
+# return fit=true at very low confidence on thin listings, and a flagged row is
+# what someone then spends a join attempt on -- a coin flip costs more than a
+# miss. Set below Requirements.minimum_confidence (0.80, the per-post lead bar)
+# on purpose: this is a coarse community-level pre-filter and the join step plus
+# the lead classifier both filter again downstream, so it can afford to be a
+# little more inclusive than a final lead verdict.
+ICP_MIN_LLM_CONFIDENCE = 0.6
+
+# Marker stored in icp_reasons when an LLM said "fit" but nothing else did.
+# icp_flag is the only gate in front of the auto-join bot (join/joiner.py's
+# select_join_candidates checks icp_flag + platform + join_type + status and
+# nothing else), and that bot opens a browser on the user's real Circle
+# account. A model's opinion on a two-line listing is not enough to spend a
+# join attempt on unsupervised, so an LLM-decided fit is recorded with this
+# marker and left unflagged unless a caller explicitly opts in -- see
+# ``llm_may_flag`` on classify_icp_fit.
+LLM_FIT_NEEDS_REVIEW = "llm_fit_needs_review"
+
+# Marker stored in icp_reasons when a row had nothing to judge. Without it a
+# never-judged row is indistinguishable in the DB from one the rules actively
+# rejected, which is exactly how ~80% of prod ended up looking "decided".
+NO_METADATA_REASON = "no_metadata"
+
 # Goal categories from the Circle discovery directory (discovery/circle_directory.py)
 # that skew toward software-dev-company buyers, and ones that clearly don't.
 # Directory-only signal: a plain web-search find has no `goal`, so this never
@@ -63,6 +87,14 @@ class IcpAssessment:
     reasons: list[str] = field(default_factory=list)
 
 
+def _haystack(name: str | None, description: str | None,
+              tags: list[str] | None = None) -> str:
+    """The lowercased text the rules match against. Shared with the empty-text
+    guard in classify_icp_fit so the two can never disagree about what "this row
+    has no metadata" means."""
+    return " ".join(filter(None, [name, description, " ".join(tags or [])])).lower().strip()
+
+
 def assess_icp_fit(
     name: str | None,
     description: str | None,
@@ -71,9 +103,13 @@ def assess_icp_fit(
     goal: str | None = None,
 ) -> IcpAssessment:
     """Score a community's directory/listing metadata for ICP fit. Pure, no I/O."""
-    haystack = " ".join(filter(None, [name, description, " ".join(tags or [])])).lower()
+    haystack = _haystack(name, description, tags)
+    # A blank goal is no goal: the stored value comes from a scraped directory
+    # card, so "   " happens, and `not goal` alone lets it through as if it
+    # were a real category -- past the empty-text guard and into the prompt.
+    goal = (goal or "").strip() or None
     assessment = IcpAssessment()
-    if not haystack.strip() and not goal:
+    if not haystack and not goal:
         return assessment
 
     import re
@@ -204,6 +240,8 @@ def classify_icp_fit(
     llm=None,
     model_name: str | None = None,
     escalation_threshold: int | None = None,
+    min_llm_confidence: float = ICP_MIN_LLM_CONFIDENCE,
+    llm_may_flag: bool = False,
 ) -> IcpResult:
     """Full rules -> LLM-escalation flow for one community's ICP fit.
 
@@ -211,7 +249,32 @@ def classify_icp_fit(
     called via pipeline.classify_icp_pending) overrides the module's default
     confident-yes cutoff, mirroring how lead_classifier.classify() lets
     llm_escalation_threshold narrow RULE_CONFIDENT_LEAD.
+
+    ``min_llm_confidence`` is the floor an LLM "fit" has to clear before it may
+    set the flag; callers tune it per run, the module default is the safe bar.
+
+    ``llm_may_flag`` is the opt-in that lets an LLM-decided fit set icp_flag at
+    all. It defaults to False because icp_flag is the *only* gate before the
+    auto-join bot drives the user's real Circle account: an unattended sweep
+    must be able to grow the *review* backlog but not the join queue. A human
+    run (``filter-relevant --trust-llm-flags``) can turn it on. Rules-decided
+    fits are unaffected -- they come from deterministic signals, not a model.
     """
+    # A row with no name, no description and no directory goal has nothing to
+    # judge. It must not reach the LLM: the prompt would degrade to "(none) /
+    # (none) / (none)" and the model still answers -- observed returning fit at
+    # 0.9 confidence on literally empty input. Rules-reject it and say why, so
+    # "never judged" stays distinguishable from "judged and rejected".
+    goal = (goal or "").strip() or None
+    if not _haystack(name, description, tags) and not goal:
+        return IcpResult(
+            score=0.0,
+            flag=False,
+            reasons=[NO_METADATA_REASON],
+            decided_by="rules",
+            classifier_version=RULES_VERSION,
+        )
+
     rules = assess_icp_fit(name, description, tags=tags, goal=goal)
     yes_cutoff = ICP_CONFIDENT_YES if escalation_threshold is None else min(
         ICP_CONFIDENT_YES, escalation_threshold
@@ -238,10 +301,20 @@ def classify_icp_fit(
             classifier_version=RULES_VERSION,
         )
 
+    # The verdict's own confidence gates the flag; a hedged "fit" is recorded
+    # (score, reasons, decided_by="llm") but does not enter the review queue.
+    confident = verdict.confidence >= min_llm_confidence
+    reasons = rules.reasons + verdict.signals + ([verdict.reason] if verdict.reason else [])
+    if verdict.fit and not confident:
+        reasons = reasons + ["low_llm_confidence"]
+    elif verdict.fit and not llm_may_flag:
+        # Confident enough to be worth a look, not enough to auto-join on.
+        reasons = reasons + [LLM_FIT_NEEDS_REVIEW]
+
     return IcpResult(
         score=round(verdict.confidence * 100),
-        flag=verdict.fit,
-        reasons=rules.reasons + verdict.signals + ([verdict.reason] if verdict.reason else []),
+        flag=verdict.fit and confident and llm_may_flag,
+        reasons=reasons,
         decided_by="llm",
         classifier_version=CLASSIFIER_VERSION,
     )

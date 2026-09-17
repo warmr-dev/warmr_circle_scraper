@@ -1,5 +1,33 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  TEMPLATE, not a loadable plist. The three WARMR_* tokens below are absolute
+  paths that only exist on the machine this is installed on, so they are filled
+  in at install time. Loading this file as-is gives a job that points nowhere.
+
+  Render it with scripts/install_autojoin_launchd.sh (which also copies the
+  launcher, lints the result and loads it). If you need the plist without the
+  installer -- recovering from a broken installer, or inspecting what would be
+  written -- either render into a throwaway tree:
+
+      WARMR_INSTALL_ROOT=/tmp/warmr-check scripts/install_autojoin_launchd.sh --check
+
+  or do it by hand, which is the whole of the rendering step:
+
+      sed -e "s|_WARMR_PROGRAM_|$HOME/Library/Application Support/warmr/auto_join_launchd.sh|g" \
+          -e "s|_WARMR_REPO_DIR_|/path/to/warmr|g" \
+          -e "s|_WARMR_LOG_DIR_|$HOME/Library/Logs/warmr|g" \
+          scripts/com.warmr.autojoin.plist > ~/Library/LaunchAgents/com.warmr.autojoin.plist
+
+  (the real tokens are double-underscored on both sides; they are written with
+  single underscores in this comment so the installer's "did every placeholder
+  get substituted?" check does not trip over its own documentation.)
+
+  Every path below deliberately points outside ~/Documents. The first seven
+  scheduled runs exited 127 because a launchd-spawned process has no Full Disk
+  Access and so could not even read a launcher that lived in the repo -- see
+  the header of auto_join_launchd.sh.
+-->
 <plist version="1.0">
 <dict>
     <key>Label</key>
@@ -7,8 +35,18 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/erkeblanzappar/Documents/Work/Projects/warmr/scripts/auto_join_launchd.sh</string>
+        <string>__WARMR_PROGRAM__</string>
     </array>
+
+    <!-- The repo is not derivable from the installed copy's own location, so
+         the installer records where it was installed from. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>WARMR_AUTOJOIN_REPO_DIR</key>
+        <string>__WARMR_REPO_DIR__</string>
+        <key>WARMR_AUTOJOIN_LOG_DIR</key>
+        <string>__WARMR_LOG_DIR__</string>
+    </dict>
 
     <!-- Every 4 hours. Deliberately not more frequent: today's session found
          that ~94 community visits from one account in one day triggered
@@ -17,13 +55,15 @@
     <key>StartInterval</key>
     <integer>14400</integer>
 
-    <!-- Don't burst a run the moment this is loaded/on every login. -->
+    <!-- Don't burst a run the moment this is loaded/on every login. Verifying
+         an install therefore uses the installer's self-test job, not a
+         kickstart of this one, which would start real joins. -->
     <key>RunAtLoad</key>
     <false/>
 
     <key>StandardOutPath</key>
-    <string>/Users/erkeblanzappar/Documents/Work/Projects/warmr/logs/auto_join_launchd.out</string>
+    <string>__WARMR_LOG_DIR__/auto_join_launchd.out</string>
     <key>StandardErrorPath</key>
-    <string>/Users/erkeblanzappar/Documents/Work/Projects/warmr/logs/auto_join_launchd.err</string>
+    <string>__WARMR_LOG_DIR__/auto_join_launchd.err</string>
 </dict>
 </plist>

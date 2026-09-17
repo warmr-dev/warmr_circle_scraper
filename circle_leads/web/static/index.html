@@ -258,7 +258,7 @@
 
     <div class="panel">
       <h2 style="margin:0 0 2px">Воронка сообществ</h2>
-      <span class="muted" style="font-size:13px">Найдено поиском → проанализировано (ICP) → в очереди на скрапер → поставлено на скрапер.</span>
+      <span class="muted" style="font-size:13px">Найдено поиском → проанализировано (ICP) → в очереди на скрапер (ICP-fit на реальном Circle-хосте) → поставлено на скрапер (прочитано хотя бы раз).</span>
       <div class="grid" id="funnel-cards" style="margin-top:10px"></div>
     </div>
 
@@ -877,8 +877,10 @@ async function loadStats() {
   $('funnel-cards').innerHTML = [
     ['Найдено', f.found_total || 0, '🔎', `+${f.found_today || 0} сегодня`, 'var(--info)'],
     ['Проанализировано', f.analyzed_total || 0, '🧭', `+${f.analyzed_today || 0} сегодня`, 'var(--accent)'],
-    ['В очереди на скрапер', f.queued_for_scraper || 0, '⏳', 'сейчас в очереди', 'var(--medium)'],
-    ['Поставлено на скрапер', f.on_scraper_total || 0, '⚙️', `+${f.on_scraper_today || 0} сегодня`, 'var(--high)'],
+    ['В очереди на скрапер', f.queued_for_scraper || 0, '⏳',
+      f.queued_unresolved ? `на Circle-хосте · ещё ${f.queued_unresolved} без хоста` : 'сейчас в очереди',
+      'var(--medium)'],
+    ['Поставлено на скрапер', f.on_scraper_total || 0, '⚙️', `${f.on_scraper_today || 0} прочитано сегодня`, 'var(--high)'],
   ].map(([k, n, ic, sub, color]) =>
     `<div class="stat"><span class="ic" style="background:color-mix(in srgb, ${color} 16%, transparent);color:${color}">${ic}</span>
        <div class="k">${k}</div><div class="n">${n}</div>

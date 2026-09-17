@@ -389,3 +389,242 @@ def test_has_hiring_vocabulary():
     from circle_leads.classifier import keyword_rules as kr
     assert kr.has_hiring_vocabulary("we are hiring")
     assert not kr.has_hiring_vocabulary("nice weather today")
+
+
+# --- Back-office hiring is not a buyer of software work ---------------------
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Office Manager - Full Time - San Francisco. We are looking for an "
+        "experienced Office Manager to run our front desk, manage vendors and "
+        "support the team. Salary $70,000. Apply by Friday.",
+        "Executive Assistant needed for our CEO. This is a full-time position, "
+        "$85k, starting ASAP. Please send your resume.",
+        "We're seeking an Administrative Assistant to join our team. "
+        "Remote, contract, $25/hr.",
+        "Operations Coordinator wanted - we need someone to keep our office "
+        "running smoothly. Apply now.",
+        "We are hiring a Philanthropy Administrator to manage our donor "
+        "database and coordinate events. Full-time, $60,000.",
+        "Hiring a receptionist for our Austin office.",
+    ],
+)
+def test_back_office_hiring_is_not_a_lead(text, reqs):
+    """These job ads dominated the live lead output. Whoever fills the seat
+    does the work in-house, so the poster is not buying software development."""
+    assert classify(text, reqs).classification == "NOT_LEAD"
+
+
+def test_back_office_hiring_is_weighed_not_hard_killed():
+    """The back-office rule scores; it does not short-circuit classify().
+
+    As a hard disqualifier it returned NOT_LEAD at 0.9 before the score or the
+    LLM ever ran, which is what killed the mixed post below.
+    """
+    from circle_leads.classifier import keyword_rules as kr
+
+    r = kr.analyze("We are hiring an Office Manager. Budget $70k, start ASAP.")
+    assert not r.has_hard_disqualifier
+    assert "non_technical_admin_hire" not in r.disqualifiers
+    assert r.signals["admin_support_hire"] is True
+    # Still decisively negative, so a pure admin ad needs no LLM call.
+    assert r.score <= -20
+
+
+def test_admin_ad_loses_the_hiring_credit_its_own_sentence_earned():
+    """"We are hiring" in an office-manager ad is credit for the wrong hire."""
+    from circle_leads.classifier import keyword_rules as kr
+
+    r = kr.analyze("We are hiring an Office Manager. Budget $70k, start ASAP.")
+    assert r.hiring_matches == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # The blocker: an explicit build request and a budget, killed outright
+        # because the same post also mentioned an admin seat.
+        "We're hiring an office manager, and separately we need someone to "
+        "build our booking app. Budget $15k.",
+        "We're hiring an Office Manager. Separately, anyone know a good web "
+        "agency to rebuild our site?",
+        # A technical administrator working on a software product.
+        "Hiring a WordPress Administrator to maintain and extend our plugin.",
+    ],
+)
+def test_a_software_request_survives_a_co_mentioned_admin_hire(text, reqs):
+    result = classify(text, reqs)
+    assert result.classification == "LEAD", (
+        f"{text!r} -> {result.classification} "
+        f"(score={result.rule_score}, reason={result.reason})"
+    )
+    assert "non_technical_admin_hire" not in result.disqualifiers
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # A staffing agency is the employer here, not a vendor being bought.
+        "Our staffing agency is hiring an Office Manager for a client in "
+        "Austin. Full-time, $60k.",
+        "Recruitment agency here - we have an opening for an Administrative "
+        "Assistant, $25/hr.",
+        # "design studio" names the workplace, not the thing being hired.
+        "Hiring an office manager for our design studio. Apply within.",
+        # "biz dev" is sales, not a developer.
+        "We are hiring an Office Manager and a biz dev rep. Full-time, $60k.",
+    ],
+)
+def test_staffing_and_workplace_nouns_do_not_rescue_an_admin_ad(text, reqs):
+    """The stand-down needs a software request, not merely a vendor-ish word."""
+    assert classify(text, reqs).classification == "NOT_LEAD"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Hiring a WordPress Administrator to maintain and extend our plugin.",
+        "Hiring a Jira Administrator to maintain our integration with Salesforce.",
+        "We are hiring a Zapier Administrator.",
+        "Looking for a Shopify Administrator.",
+    ],
+)
+def test_administrator_titles_outside_the_blocklist_are_not_back_office(text):
+    """"<technology> Administrator" must not be read as an office hire.
+
+    The old rule matched any "<word> administrator" that was not on a hardcoded
+    list of technical qualifiers, so every technology missing from that list
+    (WordPress, Jira, Zapier, Shopify, ...) was silently suppressed.
+    """
+    from circle_leads.classifier import keyword_rules as kr
+
+    r = kr.analyze(text)
+    assert r.signals["admin_support_hire"] is False
+    assert "non_technical_admin_hire" not in r.disqualifiers
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("We need someone to build our booking app.", True),
+        ("Anyone know a good web agency?", True),
+        ("Hiring a backend developer.", True),
+        ("Our staffing agency places office managers.", False),
+        ("Office Manager needed to maintain our filing system.", False),
+    ],
+)
+def test_software_request_detection(text, expected):
+    from circle_leads.classifier import keyword_rules as kr
+
+    assert kr.requests_software_work(text) is expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # The buyer persona IS an office manager in the live requirements --
+        # mentioning the title must never disqualify the post.
+        "Our office manager is leaving so we need a developer to automate the "
+        "reporting she built.",
+        "I'm the office manager here and we are looking for an agency to "
+        "rebuild our website.",
+        # A post that hires both still hires an engineer.
+        "We are hiring a Senior Software Engineer and an Office Manager this quarter.",
+        # Technical administrators sit next to engineering work.
+        "We are hiring a Systems Administrator and a backend developer.",
+        "Hiring a Salesforce Administrator and a developer to integrate our CRM.",
+    ],
+)
+def test_admin_disqualifier_does_not_swallow_real_leads(text, reqs):
+    assert classify(text, reqs).classification == "LEAD"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "We are hiring a Systems Administrator.",
+        "Looking for a Database Administrator for our data team.",
+        "Seeking a Salesforce Administrator.",
+    ],
+)
+def test_technical_administrators_are_not_back_office(text):
+    """"Administrator" alone is ambiguous; the technical ones must not be
+    disqualified, whatever the rest of the score does with them."""
+    from circle_leads.classifier import keyword_rules as kr
+
+    assert "non_technical_admin_hire" not in kr.analyze(text).disqualifiers
+
+
+# --- The poster is the seller, not the buyer --------------------------------
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Hi everyone, I am looking for consulting opportunities in the SaaS space. DM me.",
+        "I am looking for consulting opportunities. I have 10 years of experience "
+        "helping startups with go-to-market.",
+        "I'm looking for new freelance opportunities, remote preferred.",
+        "Available for consulting. Happy to chat.",
+        "My studio is taking on new clients for Q4.",
+    ],
+)
+def test_seller_self_promotion_is_not_a_lead(text, reqs):
+    """"Consulting opportunities" reads as an offer until the poster turns out
+    to be the one looking for it -- then they are selling, not buying."""
+    assert classify(text, reqs).classification == "NOT_LEAD"
+
+
+def test_opportunity_offered_credit_is_withdrawn_when_self_sought():
+    from circle_leads.classifier import keyword_rules as kr
+
+    r = kr.analyze("I am looking for consulting opportunities.")
+    assert "opportunity_offered" not in r.hiring_matches
+    assert "seeking_opportunities_self" in r.seeker_matches
+    assert r.score < 0
+
+
+def test_an_offered_contract_opportunity_is_still_a_lead(reqs):
+    """The hiring reading of the same noun must survive."""
+    result = classify(
+        "Contract Opportunity: we need someone to build our booking platform. "
+        "Budget $40k.",
+        reqs,
+    )
+    assert result.classification == "LEAD"
+
+
+# --- Over-correction guard: genuine buyers -----------------------------------
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "We are looking for a dev partner to build our app.",
+        "We need an engineer to help us ship our MVP. Budget $30k, ASAP.",
+        "Looking for a development agency to rebuild our website.",
+        "Anyone know a good Flutter dev? We're hiring for a 3-month contract.",
+        "Our startup needs a freelancer to finish the landing page.",
+    ],
+)
+def test_genuine_buyer_posts_survive_the_new_exclusions(text, reqs):
+    assert classify(text, reqs).classification == "LEAD"
+
+
+def test_new_exclusion_patterns_are_not_adversarial(reqs):
+    """The admin and opportunity patterns are regexes over untrusted text."""
+    import time
+
+    for text in (
+        "hiring a " + "word " * 3000 + "administrator",
+        "office manager " + "x " * 3000 + "needed",
+        "i am looking for " + "y " * 3000 + "opportunities",
+        # Actually trips the admin rule, so it also pays for the second pass
+        # over the masked text.
+        "we are hiring an office manager " + "x " * 3000,
+    ):
+        start = time.perf_counter()
+        classify(text, reqs)
+        assert time.perf_counter() - start < 2.0
