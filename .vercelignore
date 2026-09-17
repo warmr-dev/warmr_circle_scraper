@@ -1,0 +1,33 @@
+# Never upload secrets to the build context. Vercel's own defaults cover some
+# of this, but the dashboard's env (DB URL, dashboard password, API tokens)
+# is too sensitive to leave to a default we do not control.
+.env
+.env.*
+!.env.example
+*.secret
+secrets.yaml
+
+# Local state that has no business in a serverless bundle.
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+data/
+*.db
+*.sqlite3
+logs/
+.circle-leads/
+**/browser-profile/
+**/remote-profile/
+
+# Not part of the dashboard, and the bundle has a size limit.
+tests/
+scratchpad/
+new.json
+new2.json
+circle tests/
+rapiddns exports/
+migrations/
+extension/
+docs/
+.DS_Store
