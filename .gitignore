@@ -41,3 +41,24 @@ remote-profile/
 **/remote-profile/
 .vercel
 .env*
+
+# macOS folder metadata
+.DS_Store
+**/.DS_Store
+
+# Scratch and one-off working files. These are local by design: agent
+# scratchpads, ad-hoc API dumps kept while debugging a discovery run, and the
+# manual test notes for the join driver. None of it is reproducible output, so
+# it does not belong in history -- but it is also NOT backed up anywhere, so
+# treat anything here as disposable.
+scratchpad/
+new.json
+new2.json
+circle tests/
+
+# Bulk host exports used to seed discovery (RapidDNS, Censys, BuiltWith, …).
+# Tens of thousands of lines of third-party DNS data: too large and too
+# licence-encumbered for the repo. The communities they produced live in the
+# database; the raw export is a local input, not a source file.
+rapiddns exports/
+*.rapiddns.txt

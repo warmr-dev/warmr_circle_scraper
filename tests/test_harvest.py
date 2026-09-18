@@ -4,7 +4,7 @@ import pytest
 from datetime import datetime, timedelta, timezone
 
 from circle_leads.config.settings import load_requirements
-from circle_leads.harvest import harvest
+from circle_leads.harvest import _community_hosts, harvest
 from circle_leads.storage.database import Database, get_or_create_community
 
 
@@ -378,3 +378,75 @@ def test_harvest_survives_a_bad_space(db, reqs, monkeypatch):
     # The good space was still read despite the other one erroring.
     assert result.public_spaces == 1
     assert any("Job Board" in e for e in result.errors)
+
+
+# --- Which communities the scraper picks, and in what order --------------------
+
+
+def _seed(db, rows):
+    """rows: (slug, icp_flag, icp_score, last_synced_at, watching)."""
+    from circle_leads.storage.database import get_or_create_community
+
+    with db.session() as s:
+        for slug, icp, score, synced, watching in rows:
+            c = get_or_create_community(s, slug=slug, url=f"https://{slug}.circle.so")
+            c.platform = "circle"
+            c.icp_flag = icp
+            c.icp_score = score
+            c.last_synced_at = synced
+            c.watching = watching
+            # Deliberately inverted against the intended order: the old code
+            # sorted on this column, so a test that passes on it by accident
+            # would be worthless.
+            c.relevance_score = 0 if icp else 99
+
+
+def test_scraper_reads_icp_fit_communities_before_the_rest(tmp_path):
+    """The ICP queue must actually feed the scraper.
+
+    Ordering used to be relevance_score (the older web-search heuristic), which
+    never looked at icp_flag -- so the dashboard's "queued for the scraper"
+    backlog fed nothing.
+    """
+    db = Database(f"sqlite:///{tmp_path}/order.db")
+    _seed(db, [
+        ("not-icp-high-relevance", False, 0, None, False),
+        ("icp-fit", True, 30, None, False),
+    ])
+
+    slugs = [slug for _, slug, _, _ in _community_hosts(db, limit=10)]
+    assert slugs.index("icp-fit") < slugs.index("not-icp-high-relevance")
+
+
+def test_never_read_communities_come_before_already_read_ones(tmp_path):
+    """The head must rotate, not set.
+
+    In prod 195 rows permanently occupied a 150-row head and nothing outside it
+    had ever been synced, because the sort key was fixed. Sorting by
+    last_synced_at (NULLs first) means reading a community moves it to the back.
+    """
+    db = Database(f"sqlite:///{tmp_path}/rotate.db")
+    old = datetime(2026, 9, 1)
+    older = datetime(2026, 8, 1)
+    _seed(db, [
+        ("read-recently", True, 90, old, False),
+        ("read-long-ago", True, 40, older, False),
+        ("never-read", True, 10, None, False),
+    ])
+
+    slugs = [slug for _, slug, _, _ in _community_hosts(db, limit=10)]
+    # Never-read first, then least-recently-read -- score only breaks ties, so
+    # the highest-scoring row no longer wins every single run.
+    assert slugs == ["never-read", "read-long-ago", "read-recently"]
+
+
+def test_watched_communities_still_take_the_fast_lane(tmp_path):
+    """The subscription fast lane predates this change and must survive it."""
+    db = Database(f"sqlite:///{tmp_path}/watch.db")
+    _seed(db, [
+        ("icp-never-read", True, 90, None, False),
+        ("watched-already-read", False, 0, datetime(2026, 9, 1), True),
+    ])
+
+    slugs = [slug for _, slug, _, _ in _community_hosts(db, limit=10)]
+    assert slugs[0] == "watched-already-read"

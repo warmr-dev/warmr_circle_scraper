@@ -18,9 +18,11 @@
 - **Дашборд:** Vercel, проект `warmr-circle-scraper`, `warmr-circle-scraper.vercel.app`
   (команда `warmr`). Запускает `app:app` (FastAPI).
 - **Воркер:** Railway, сервис `warmr_circle_scraper` в проекте `slack-intel-monitor`
-  (`d510b560-…`, чужой проект — трогать только эту одну плитку). Целевая команда
-  `circle-leads --db "$CIRCLE_LEADS_DB" worker`. *На 2026-09-10 ещё запускает
-  дашборд — переключение ждёт исполнения, см. WORKLOG.*
+  (`d510b560-…`, чужой проект — трогать только эту одну плитку). Команда
+  `circle-leads --db "$CIRCLE_LEADS_DB" worker`. *Проверено 2026-09-17:
+  переключение выполнено — публичный URL сервиса отдаёт 502 (HTTP-сервера нет),
+  при этом `harvest_last_run`/`icp_classification_last_run` в Supabase обновляются.
+  Дашборд крутится только на Vercel.*
 - **БД:** Supabase проект `qxpewmsujqtbwhpddlti` (общий Postgres, он же очередь
   `scan_jobs`).
 - **Render** (`circle-leads-0zd9.onrender.com`): мёртвый дубль дашборда, не

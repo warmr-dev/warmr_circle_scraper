@@ -1,19 +1,29 @@
-"""End-to-end pipeline: discover -> validate -> ingest -> classify -> score.
+"""End-to-end pipeline: discover -> enrich -> validate -> ingest -> classify -> score.
 
 Ingestion is gated on operator approval at three points: the permission file's
 status, the per-space allowlist, and the DM exclusion in the scraper. A
 community missing any of these yields zero collected items rather than an error.
+
+Enrichment (``enrich_pending``) sits between discovery and ICP classification
+because a community can only be judged on the text it has: discovery records
+whatever the source happened to publish, which for most of the backlog is a URL
+and nothing else, and every stage downstream reads a blank row as a rejected
+one. It walks its own cursor rather than riding on harvest's ordering -- see the
+function for why that distinction is the whole point.
 """
 
 from __future__ import annotations
 
 import logging
+import re
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Iterable
+from typing import Callable, Iterable
+from urllib.parse import urlparse
 
 import requests
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from circle_leads.authentication.browser_session import (
     CIRCLE_BASE,
@@ -33,7 +43,9 @@ from circle_leads.discovery.validate_community import assess_relevance, check_pu
 from circle_leads.export.vini_ingest import push_leads_by_ids
 from circle_leads.scoring.lead_scoring import score_lead
 from circle_leads.scraper import chat_scraper, comments_scraper, community_scraper, posts_scraper
+from circle_leads.scraper.http_client import shared_session
 from circle_leads.scraper.pagination import AccessDeniedError, ApiError, CircleClient, QuotaTracker
+from circle_leads.scraper.public_reader import PublicReader
 from circle_leads.storage.database import (
     Database,
     find_near_duplicate,
@@ -51,8 +63,27 @@ from circle_leads.storage.models import (
     ScrapeRun,
     utcnow,
 )
+from circle_leads.storage.settings_store import get_setting, set_setting
 
 logger = logging.getLogger(__name__)
+
+# How many already-decided communities one scheduled pass may re-score. The
+# sweep re-stamps icp_checked_at and selects oldest-stamp-first, so each run
+# walks a different slice of the backlog instead of re-reading the same head
+# forever; this bound is what stops an hourly worker from turning a 12k-row
+# table into 12k LLM calls per hour.
+ICP_RESCORE_BATCH = 200
+
+# Total communities one *scheduled* (unattended) ICP pass may classify, across
+# both selections together -- never-checked rows and re-scores. The re-score
+# branch was bounded from the start, the never-checked branch was not, so a
+# directory crawl or a big harvest could hand a single worker tick an arbitrary
+# number of rows and, with a key set, an arbitrary number of LLM calls. Prod
+# happened to have one unchecked row, which made that safe by data rather than
+# by code. The cap is applied in classify_icp_pending whenever the caller asks
+# for the scheduled behaviour (rescore_llm_eligible) without naming its own
+# limit, so the worker cannot forget it.
+ICP_SCHEDULED_BATCH = 200
 
 
 @dataclass
@@ -470,6 +501,49 @@ def classify_pending(
     return stats
 
 
+def _llm_eligible_icp_ids(s, *, limit: int) -> list[int]:
+    """Already-decided communities worth spending an LLM call on.
+
+    ``classify_icp_pending``'s default selection (icp_checked_at IS NULL) is a
+    trap on a mature database: every row has been stamped once, so a scheduled
+    sweep selects nothing forever and switching the LLM on changes nothing for
+    the 12k rows already there. This is the re-score selection instead -- rows
+    the *rules* decided, that were not flagged, and that have text to judge.
+
+    It deliberately does not try to recompute the escalation band in SQL: the
+    stored icp_score is clamped to [0, 100], so a row whose raw rules score was
+    a decisive -30 is indistinguishable here from a genuinely ambiguous 0.
+    ``classify_icp_fit`` re-derives the unclamped score and returns a rules
+    verdict without calling the LLM for anything outside the band, so this only
+    has to be a cheap pre-filter, not an exact one.
+
+    Ordering by icp_checked_at is the cursor: each pass re-stamps the rows it
+    touched, which sends them to the back of the queue and hands the next pass
+    the next slice.
+    """
+    query = (
+        select(Community.id)
+        .where(
+            Community.icp_checked_at.is_not(None),
+            Community.icp_decided_by == "rules",
+            # Never demote a row already in the join queue on an LLM's say-so,
+            # and don't spend the batch's budget on rows the rules already
+            # answered confidently -- classify_icp_fit would skip the LLM anyway.
+            Community.icp_flag.is_(False),
+            # A row with neither name nor description has nothing to judge; the
+            # classifier's own empty-text guard would reject it again, so it
+            # would consume a slot and produce no new information.
+            or_(
+                Community.name.is_not(None) & (Community.name != ""),
+                Community.description.is_not(None) & (Community.description != ""),
+            ),
+        )
+        .order_by(Community.icp_checked_at, Community.id)
+        .limit(limit)
+    )
+    return list(s.scalars(query).all())
+
+
 def classify_icp_pending(
     db: Database,
     requirements: Requirements,
@@ -477,12 +551,29 @@ def classify_icp_pending(
     use_llm: bool = False,
     limit: int | None = None,
     recheck: bool = False,
+    rescore_llm_eligible: bool = False,
+    rescore_limit: int = ICP_RESCORE_BATCH,
+    trust_llm_flags: bool = False,
 ) -> dict[str, int]:
     """Score discovered communities for ICP fit (classifier/icp_relevance.py).
 
     Gates the auto-join queue: only icp_flag=True communities are ever queued to
     join (see join/queue.py). By default only communities never checked are
     processed; ``recheck`` re-scores everything, e.g. after tuning the rules.
+
+    ``rescore_llm_eligible`` additionally re-scores a bounded slice of rows that
+    a *rules*-only run already decided (see ``_llm_eligible_icp_ids``). It is
+    the scheduled path's way out of the no-op trap described there, and it is
+    ignored unless an LLM backend actually materialized: without one, a
+    re-score just re-runs identical rules over identical text and rewrites the
+    identical verdict. Asking for it also opts into ``ICP_SCHEDULED_BATCH`` as
+    the default total budget for the run (see the constant): it is the marker
+    of the unattended path, and unattended work has to be bounded even when the
+    caller passes no limit.
+
+    ``trust_llm_flags`` lets an LLM-decided fit set icp_flag, which is what
+    puts a community in front of the auto-join bot. Off by default and never on
+    for the worker -- see classifier/icp_relevance.py's ``llm_may_flag``.
     """
     llm: LlmBackend | None = None
     model_name = None
@@ -495,6 +586,12 @@ def classify_icp_pending(
 
     stats = {"checked": 0, "flagged": 0, "not_flagged": 0}
 
+    # The scheduled path pays for its own ceiling: `limit` bounds the
+    # never-checked selection in SQL and then truncates the combined list, so
+    # one value caps both branches together.
+    if rescore_llm_eligible and limit is None:
+        limit = ICP_SCHEDULED_BATCH
+
     with db.session() as s:
         query = select(Community.id)
         if not recheck:
@@ -503,6 +600,18 @@ def classify_icp_pending(
         if limit:
             query = query.limit(limit)
         pending_ids = list(s.scalars(query).all())
+
+        # Never-checked rows keep their priority: a freshly discovered
+        # community should be judged before an old one is judged again.
+        if rescore_llm_eligible and llm is not None and not recheck:
+            already = set(pending_ids)
+            pending_ids += [
+                cid
+                for cid in _llm_eligible_icp_ids(s, limit=max(0, rescore_limit))
+                if cid not in already
+            ]
+            if limit:
+                pending_ids = pending_ids[:limit]
 
     for community_pk in pending_ids:
         with db.session() as s:
@@ -518,6 +627,7 @@ def classify_icp_pending(
                 llm=llm,
                 model_name=model_name,
                 escalation_threshold=requirements.icp_escalation_threshold,
+                llm_may_flag=trust_llm_flags,
             )
             community.icp_score = result.score
             community.icp_flag = result.flag
@@ -530,4 +640,291 @@ def classify_icp_pending(
 
     return stats
 
+
+# --- Enrichment -------------------------------------------------------------
+
+# Bulk requests to *.circle.so stay at 2-4 concurrent workers. Measured the hard
+# way during the 2026-09 discovery expansion (see WORKLOG.md): at 12 threads,
+# 72% of responses came back silently empty -- not a 429, not an error, just an
+# empty body. The cap lives here rather than in the caller because that failure
+# mode is invisible from the outside: a throttled run and a run over dead hosts
+# produce exactly the same "no metadata" rows, and storing those is how a
+# community gets permanently filed as unjudgeable.
+ENRICH_MAX_WORKERS = 4
+ENRICH_DEFAULT_WORKERS = 3
+
+# Communities per scheduled enrichment pass. Two public requests each, at 3
+# workers -- small enough to stay polite, large enough that the backlog drains
+# in days rather than months.
+ENRICH_BATCH = 200
+
+# Where the backlog cursor lives (storage/settings_store.py): the highest
+# community id this stage has already visited.
+ENRICH_CURSOR_KEY = "enrichment_cursor_id"
+
+# Circle serves a templated description for any community whose owner never
+# wrote one. A previous enrichment run stored 232 such descriptions out of 329 --
+# "Explore <space> space in <community>", "<community> community home page".
+# That text is worse than no text: to the ICP classifier a boilerplate row looks
+# like a row with real metadata, so it scores the template's words, records a
+# confident rules verdict, and the community is never judged on anything it
+# actually said about itself. The same applies to a bot-check interstitial's
+# title, which describes the gate rather than the community behind it.
+#
+# Every pattern here has to match the *whole* templated string, not merely
+# contain its words. Unanchored re.search was rejecting legitimate copy that
+# happens to use the same English -- "Explore our space in Berlin for creative
+# entrepreneurs.", "Just a moment of your time each week.", "Attention required
+# for founders who ship." -- and a false positive here is permanent: enrichment
+# discards the description, the row keeps looking empty, and the next
+# enrichment pass fetches the same good text and discards it again.
+_BOILERPLATE_PATTERNS = (
+    # "Explore Members space in Acme Founders" / "Explore the General space in
+    # Acme Founders": a space name, then the community name, and nothing else.
+    # The template always names the space, so the lookahead requires a real
+    # word there -- that is what separates it from prose like "Explore our
+    # space in Berlin ..." or "Explore the space in between design and code."
+    # The end anchor drops anything that carries on into a further clause.
+    re.compile(r"^explore\s+(?:the\s+|an?\s+)?"
+               r"(?!the\b|an?\b|our\b|my\b|your\b|this\b|space\b)"
+               r"[^.]{1,60}?\bspace\s+in\s+[^.]{1,80}\.?$", re.I),
+    # "<Community> community home page" -- the templated <title>, so the phrase
+    # ends the string; "our community homepage has moved" does not.
+    re.compile(r"\bcommunity home\s?page\s*[.!]?$", re.I),
+    # Circle's footer credit on its own, not a description that mentions it.
+    re.compile(r"^\W*powered by circle\W*$", re.I),
+    # Cloudflare's interstitial title is exactly "Just a moment..." -- keep
+    # "Just a moment of your time each week."
+    re.compile(r"^just a moment[\s.\u2026!]*$", re.I),
+    re.compile(r"^verifying you are (a )?human\b", re.I),
+    # "Attention Required! | Cloudflare". The bang is the tell; "Attention
+    # required for founders who ship." is a real description.
+    re.compile(r"^attention required\s*!", re.I),
+    # Only the challenge page's full instruction, not the two words.
+    re.compile(r"\benable javascript and cookies to continue\b", re.I),
+    # Circle's own auth-page meta description, templated per community:
+    # "Login to <X> community via email or SSO today." It names the community
+    # but says nothing about it, and it is worse than an empty field: storing
+    # it marks the row as "has a description", so enrichment never revisits it
+    # while the ICP classifier scores it as real text. Caught live on
+    # venturerise during the first prod enrichment run.
+    re.compile(r"^log ?in to\b.{0,120}?\bvia (email|sso)\b", re.I),
+    re.compile(r"^(log ?in|sign ?in|sign ?up) to\b.{0,80}?\bcommunity\b", re.I),
+    re.compile(r"^create an account or log ?in\b", re.I),
+)
+
+# Exact titles that carry no information about the community at all.
+_JUNK_NAMES = frozenset({
+    "circle", "circle.so", "community", "home", "loading", "log in", "login",
+    "redirecting", "sign in", "sign up", "untitled",
+})
+
+
+def _is_boilerplate(text: str | None) -> bool:
+    """True when this text says nothing specific about the community."""
+    value = (text or "").strip()
+    if not value:
+        return True
+    if value.lower().strip(" .|-") in _JUNK_NAMES:
+        return True
+    return any(pattern.search(value) for pattern in _BOILERPLATE_PATTERNS)
+
+
+@dataclass
+class CommunityMetadata:
+    """What one enrichment fetch managed to establish about a community."""
+
+    name: str | None = None
+    description: str | None = None
+    #: Fields that did come back but were rejected as boilerplate -- kept
+    #: separate from "nothing came back" so a throttled run is still legible
+    #: in the stats afterwards.
+    rejected: list[str] = field(default_factory=list)
+    note: str | None = None
+
+
+def fetch_community_metadata(
+    host: str,
+    url: str,
+    *,
+    session: requests.Session | None = None,
+    want_name: bool = True,
+    want_description: bool = True,
+) -> CommunityMetadata:
+    """Read one community's public name and description. Never raises.
+
+    Two readers that already exist, cheapest first:
+    ``PublicReader.community_name()`` asks ``/internal_api/communities/current``
+    -- the same unauthenticated JSON API the join-type probe uses, and the one
+    that still answers when the marketing page serves a bot check -- and
+    ``check_public_access()`` reads the landing page's <title> and meta
+    description, which is the only one of the two that yields a description.
+    """
+    http = session or shared_session()
+    meta = CommunityMetadata()
+
+    if want_name:
+        name = PublicReader(host, session=http).community_name()
+        if name:
+            if _is_boilerplate(name):
+                meta.rejected.append("name")
+            else:
+                meta.name = name
+
+    # Only pay for the landing page when it can still tell us something.
+    if want_description or (want_name and meta.name is None):
+        check = check_public_access(url, session=http)
+        if want_description and check.description:
+            if _is_boilerplate(check.description):
+                meta.rejected.append("description")
+            else:
+                meta.description = check.description
+        if want_name and meta.name is None and check.name:
+            if _is_boilerplate(check.name):
+                if "name" not in meta.rejected:
+                    meta.rejected.append("name")
+            else:
+                meta.name = check.name
+        if meta.name is None and meta.description is None and not meta.rejected:
+            meta.note = check.note or f"HTTP {check.http_status}"
+
+    return meta
+
+
+def _enrich_cursor(db: Database) -> int:
+    raw = get_setting(db, ENRICH_CURSOR_KEY, "0")
+    try:
+        return max(0, int(raw or 0))
+    except (TypeError, ValueError):  # a hand-edited setting must not brick the stage
+        return 0
+
+
+def enrich_pending(
+    db: Database,
+    *,
+    limit: int | None = None,
+    max_workers: int = ENRICH_DEFAULT_WORKERS,
+    fetch: Callable[..., CommunityMetadata] = fetch_community_metadata,
+) -> dict[str, int]:
+    """Fill in missing name/description, walking the backlog oldest-first.
+
+    A stage of its own, with a cursor of its own, deliberately not folded into
+    the harvest: harvest's read stage is capped at 150 communities ordered by
+    (watching DESC, relevance_score DESC), and ~195 rows permanently occupy that
+    head -- so a row imported from a file weeks ago is never reached, no matter
+    how many times the harvest runs. This walks by ascending id instead (oldest
+    row first) and remembers where it stopped, so the backlog drains at a fixed
+    cost per run and every row is eventually visited exactly once per lap.
+
+    This is what gates the rest of the funnel: communities with text convert to
+    ICP fit at 16.2%, communities without convert at 0%, and 9,941 of 12,476
+    rows have neither a name nor a description. Those are not bad candidates --
+    they are unjudged ones.
+    """
+    batch = ENRICH_BATCH if limit is None else max(0, limit)
+    # Clamp rather than trust: see ENRICH_MAX_WORKERS.
+    workers = max(1, min(int(max_workers), ENRICH_MAX_WORKERS))
+    cursor = _enrich_cursor(db)
+    stats = {
+        "visited": 0, "named": 0, "described": 0, "boilerplate_rejected": 0,
+        "nothing_found": 0, "skipped": 0, "wrapped": 0, "cursor": cursor,
+    }
+    if batch == 0:
+        return stats
+
+    with db.session() as s:
+        rows = list(
+            s.execute(
+                select(
+                    Community.id, Community.url, Community.name, Community.description
+                )
+                .where(
+                    Community.id > cursor,
+                    or_(
+                        Community.name.is_(None),
+                        Community.name == "",
+                        Community.description.is_(None),
+                        Community.description == "",
+                    ),
+                )
+                .order_by(Community.id)
+                .limit(batch)
+            ).all()
+        )
+
+    if not rows:
+        # End of the backlog. Restart from the top next run so rows that were
+        # unreachable this lap (host down, bot check, a slug that only resolved
+        # later) get another chance without anyone scheduling anything.
+        if cursor:
+            set_setting(db, ENRICH_CURSOR_KEY, "0")
+            stats["wrapped"] = 1
+            stats["cursor"] = 0
+        return stats
+
+    targets = []
+    for community_pk, url, name, description in rows:
+        host = urlparse(url if "://" in (url or "") else f"https://{url or ''}").hostname
+        # A discover.circle.so row is a directory *listing*, not a community
+        # host: fetching it returns the marketplace page (behind Cloudflare),
+        # never this community's own metadata. Skipped, but still walked past.
+        if not host or host.lower().endswith("discover.circle.so"):
+            stats["skipped"] += 1
+            continue
+        targets.append(
+            (
+                community_pk,
+                host,
+                url,
+                not (name or "").strip(),
+                not (description or "").strip(),
+            )
+        )
+
+    results: dict[int, CommunityMetadata] = {}
+    if targets:
+        http = shared_session()
+
+        def _one(target):
+            community_pk, host, url, want_name, want_description = target
+            try:
+                return community_pk, fetch(
+                    host,
+                    url,
+                    session=http,
+                    want_name=want_name,
+                    want_description=want_description,
+                )
+            except Exception as exc:  # noqa: BLE001 - one dead host must not end the pass
+                logger.debug(
+                    "Enrichment failed for %s: %s", host, exc.__class__.__name__
+                )
+                return community_pk, CommunityMetadata(
+                    note=f"{exc.__class__.__name__}: {exc}"[:200]
+                )
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            results = dict(pool.map(_one, targets))
+
+    # One transaction for the write-back: every request is already done, so
+    # there is nothing left to interleave with and no reason to pay per-row.
+    with db.session() as s:
+        for community_pk, meta in results.items():
+            community = s.get(Community, community_pk)
+            if community is None:
+                continue
+            stats["visited"] += 1
+            if meta.name and not (community.name or "").strip():
+                community.name = meta.name[:512]
+                stats["named"] += 1
+            if meta.description and not (community.description or "").strip():
+                community.description = meta.description[:4000]
+                stats["described"] += 1
+            stats["boilerplate_rejected"] += len(meta.rejected)
+            if not meta.name and not meta.description:
+                stats["nothing_found"] += 1
+
+    last_id = rows[-1][0]
+    set_setting(db, ENRICH_CURSOR_KEY, str(last_id))
+    stats["cursor"] = last_id
     return stats

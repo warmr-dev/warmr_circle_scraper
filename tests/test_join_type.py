@@ -192,6 +192,56 @@ def test_empty_host_is_unknown():
     assert c.join_type == JoinType.UNKNOWN
 
 
+# --- fetch_join_classification: www retry when the apex is UNKNOWN ----------
+
+
+def test_www_retry_recovers_when_apex_404s_but_www_answers():
+    """bravelybeingyou.com / grocommunity.se, confirmed by hand: the apex 404s
+    on this exact path with no redirect, but www.<host> answers normally."""
+    session = RoutedStubSession({
+        "https://bare.example.com/internal_api": StubResp(404, None),
+        "https://www.bare.example.com/internal_api": StubResp(200, {
+            "is_private": False,
+            "allow_signups_to_public_community": True,
+            "has_non_draft_paywalls": False,
+        }),
+    })
+    c = fetch_join_classification("bare.example.com", session=session)
+    assert c.join_type == JoinType.FREE_JOIN
+    assert "www retry" in c.detail
+    assert "HTTP 404" in c.detail
+
+
+def test_www_retry_is_not_attempted_for_locked_unknown():
+    """A 401/403 already proves something real is there -- retrying www must
+    not fire (creativeleader.net stays locked on both apex and www)."""
+    session = RoutedStubSession({"locked.example.com": StubResp(401, None)})
+    c = fetch_join_classification("locked.example.com", session=session)
+    assert c.join_type == JoinType.LOCKED_UNKNOWN
+    assert c.detail == "HTTP 401 on communities/current"
+    # One call for the API check, one for the marketing-site redirect check --
+    # neither is a www retry (the point of this test).
+    assert session.calls == [
+        "https://locked.example.com/internal_api/communities/current",
+        "https://locked.example.com/",
+    ]
+
+
+def test_www_retry_gives_up_when_www_is_also_unknown():
+    session = RoutedStubSession({"internal_api": StubResp(404, None)})
+    c = fetch_join_classification("still-dead.example.com", session=session)
+    assert c.join_type == JoinType.UNKNOWN
+    assert c.detail == "HTTP 404"  # unchanged -- no retry noise when it didn't help
+    assert len(session.calls) == 2  # apex, then the www retry
+
+
+def test_www_retry_is_not_attempted_when_host_is_already_www():
+    session = RoutedStubSession({"internal_api": StubResp(404, None)})
+    c = fetch_join_classification("www.already-www.example.com", session=session)
+    assert c.join_type == JoinType.UNKNOWN
+    assert len(session.calls) == 1
+
+
 # --- _price_label_fallback: Discover's own price tag as a backup signal -----
 
 
@@ -221,8 +271,10 @@ class RoutedStubSession:
 
     def __init__(self, by_host_substring: dict[str, "StubResp"]):
         self._routes = by_host_substring
+        self.calls: list[str] = []
 
     def get(self, url, **kw):
+        self.calls.append(url)
         for key, resp in self._routes.items():
             if key in url:
                 return resp

@@ -25,9 +25,10 @@ from circle_leads.storage.models import Community, JoinStatus
 @pytest.fixture(autouse=True)
 def _isolate_attempt_log(tmp_path, monkeypatch):
     # Without this every test run appends to the real data/join_attempts.log
-    # -- which _attempts_today_for_account() reads to decide a live account's
-    # remaining daily cap. A stray test-seeded "joined" row for a fake
-    # account there silently eats into a real budget.
+    # -- which _attempts_today() reads to decide a live account's remaining
+    # daily cap, and _handoff_counts() reads to order the real queue. A stray
+    # test-seeded row there silently eats into a real budget or reshuffles a
+    # real run's candidates.
     monkeypatch.setattr(joiner, "ATTEMPT_LOG_PATH", tmp_path / "join_attempts.log")
 
 
@@ -46,6 +47,21 @@ def _seed(db, slug, *, icp_flag=True, platform="circle", join_type="free_join",
         c.join_type = join_type
         c.join_status = join_status
         c.icp_score = icp_score
+
+
+def _write_attempt_log(path, entries):
+    """Seed the attempt log the way a previous run would have left it."""
+    path.write_text("".join(
+        json.dumps({
+            "at": joiner.utcnow().isoformat(),
+            "account": account,
+            "slug": slug,
+            "url": f"https://{slug}.circle.so",
+            "status": status,
+            "detail": "",
+        }) + "\n"
+        for slug, status, account in entries
+    ))
 
 
 # --- select_join_candidates ---------------------------------------------------
@@ -283,28 +299,99 @@ def test_test_account_daily_cap_is_independent_of_main(monkeypatch, tmp_path):
     assert result.joined == ["candidate"]
 
 
-def test_handoff_status_stops_the_batch_without_persisting(monkeypatch):
+def test_handoff_status_is_skipped_and_the_batch_continues(monkeypatch):
+    # Head-of-line blocking: a handoff used to end the whole run, so the 44
+    # handoffs of the 2026-09-16 prod batch (WORKLOG) each cost a run and 39
+    # candidates were never reached at all.
     db = _db()
     _seed(db, "a", icp_score=20)
     _seed(db, "b", icp_score=10)
 
+    outcomes = {
+        "https://a.circle.so": EgoJoinResult(status="needs_login", detail="log in please"),
+        "https://b.circle.so": EgoJoinResult(status="joined", detail="ok"),
+    }
     monkeypatch.setattr(joiner, "open_join_space", lambda name: 7)
-    monkeypatch.setattr(
-        joiner, "attempt_join",
-        lambda space_id, url, **kw: EgoJoinResult(status="needs_login", detail="log in please"),
-    )
+    monkeypatch.setattr(joiner, "attempt_join", lambda space_id, url, **kw: outcomes[url])
     monkeypatch.setattr(joiner, "sleep_between_attempts", lambda pacing: None)
 
     result = joiner.run_auto_join(db)
 
-    assert result.attempted == ["a"]
-    assert result.joined == []
-    assert result.stopped_for == "a"
-    assert "needs_login" in result.stop_reason
+    assert result.attempted == ["a", "b"]
+    assert result.joined == ["b"]
+    assert result.stopped_for is None  # the batch was not ended by the handoff
+    assert "needs_login" in result.handoffs["a"]
 
     with db.session() as s:
         row = s.scalar(select(Community).where(Community.slug == "a"))
         assert row.join_status == JoinStatus.NOT_ATTEMPTED.value  # left untouched, not "failed"
+
+
+def test_a_handed_off_host_goes_last_next_run_but_stays_in_the_queue(monkeypatch):
+    # Selection is deterministic, so without this the same unresolvable host is
+    # picked first on every subsequent run and stalls the queue forever. It is
+    # de-prioritised, never dropped -- it comes back once the fresh backlog is
+    # exhausted.
+    db = _db()
+    _seed(db, "stuck", icp_score=99)
+    _seed(db, "fresh", icp_score=10)
+
+    assert [c["slug"] for c in joiner.select_join_candidates(db)] == ["stuck", "fresh"]
+
+    monkeypatch.setattr(joiner, "open_join_space", lambda name: 1)
+    monkeypatch.setattr(
+        joiner, "attempt_join",
+        lambda space_id, url, **kw: EgoJoinResult(status="unclear", detail="unrecognized page"),
+    )
+    monkeypatch.setattr(joiner, "sleep_between_attempts", lambda pacing: None)
+    joiner.run_auto_join(db, host="stuck")
+
+    assert [c["slug"] for c in joiner.select_join_candidates(db)] == ["fresh", "stuck"]
+
+
+def test_de_prioritised_hosts_are_ordered_least_stuck_first(monkeypatch, tmp_path):
+    # Two hosts that both need a human still get a fair rotation between them:
+    # the one that has burned fewer runs goes first.
+    db = _db()
+    _seed(db, "stuck-once", icp_score=10)
+    _seed(db, "stuck-twice", icp_score=99)
+
+    log_path = tmp_path / "join_attempts.log"
+    _write_attempt_log(log_path, [
+        ("stuck-once", "unclear", "main"),
+        ("stuck-twice", "unclear", "main"),
+        ("stuck-twice", "needs_login", "main"),
+    ])
+    monkeypatch.setattr(joiner, "ATTEMPT_LOG_PATH", log_path)
+
+    # icp_score alone would put stuck-twice first.
+    assert [c["slug"] for c in joiner.select_join_candidates(db)] == ["stuck-once", "stuck-twice"]
+
+
+def test_de_prioritised_host_still_fills_a_limited_queue_preview(monkeypatch, tmp_path):
+    # The limit is applied after the reordering: cutting the rows off in SQL
+    # first would hand back the same stuck head of the queue every time.
+    db = _db()
+    _seed(db, "stuck", icp_score=99)
+    _seed(db, "fresh", icp_score=10)
+
+    log_path = tmp_path / "join_attempts.log"
+    _write_attempt_log(log_path, [("stuck", "challenge_stop", "main")])
+    monkeypatch.setattr(joiner, "ATTEMPT_LOG_PATH", log_path)
+
+    assert [c["slug"] for c in joiner.select_join_candidates(db, limit=1)] == ["fresh"]
+
+
+def test_a_terminal_outcome_does_not_de_prioritise_a_host(monkeypatch, tmp_path):
+    db = _db()
+    _seed(db, "joined-before", icp_score=99)
+    _seed(db, "other", icp_score=10)
+
+    log_path = tmp_path / "join_attempts.log"
+    _write_attempt_log(log_path, [("joined-before", "paid_skip", "main")])
+    monkeypatch.setattr(joiner, "ATTEMPT_LOG_PATH", log_path)
+
+    assert [c["slug"] for c in joiner.select_join_candidates(db)] == ["joined-before", "other"]
 
 
 def test_handoff_outcome_is_logged_even_though_not_persisted_to_the_db(monkeypatch, tmp_path):
@@ -351,6 +438,94 @@ def test_daily_cap_blocks_the_batch_before_any_bridge_call(monkeypatch):
 
     with pytest.raises(RuntimeError, match="cap"):
         joiner.run_auto_join(db, pacing=JoinPacingConfig(max_joins_per_day=1))
+
+
+def test_visits_count_toward_the_cap_even_when_no_join_is_recorded(monkeypatch):
+    # What the cap manages is how much activity Circle sees: ~94 visits in one
+    # day produced a fresh /two_fa challenge on three previously-working hosts
+    # (WORKLOG 2026-09-16). Counting DB rows instead let that same run open 70
+    # community pages on a cap of 25.
+    db = _db()
+    for i, slug in enumerate(["a", "b", "c", "d"]):
+        _seed(db, slug, icp_score=100 - i)
+
+    monkeypatch.setattr(joiner, "open_join_space", lambda name: 1)
+    monkeypatch.setattr(
+        joiner, "attempt_join",
+        lambda space_id, url, **kw: EgoJoinResult(status="unclear", detail="unrecognized page"),
+    )
+    monkeypatch.setattr(joiner, "sleep_between_attempts", lambda pacing: None)
+
+    result = joiner.run_auto_join(db, pacing=JoinPacingConfig(max_joins_per_day=2))
+
+    assert result.attempted == ["a", "b"]  # visited two, stopped -- nothing persisted
+    assert result.joined == []
+    assert "cap" in result.stop_reason
+
+    assert joins_attempted_today(db) == 0  # the DB, on its own, saw nothing at all
+
+
+def test_cap_stops_the_batch_at_the_limit(monkeypatch):
+    db = _db()
+    for i, slug in enumerate(["a", "b", "c"]):
+        _seed(db, slug, icp_score=100 - i)
+
+    monkeypatch.setattr(joiner, "open_join_space", lambda name: 1)
+    monkeypatch.setattr(
+        joiner, "attempt_join",
+        lambda space_id, url, **kw: EgoJoinResult(status="joined", detail="ok"),
+    )
+    monkeypatch.setattr(joiner, "sleep_between_attempts", lambda pacing: None)
+
+    result = joiner.run_auto_join(db, pacing=JoinPacingConfig(max_joins_per_day=2))
+
+    assert result.attempted == ["a", "b"]
+    assert result.joined == ["a", "b"]
+    assert "cap" in result.stop_reason
+
+
+def test_todays_visits_block_a_fresh_run_even_with_an_empty_db(monkeypatch, tmp_path):
+    # A run that ends entirely in handoffs writes nothing to the DB, so without
+    # reading the log a new process would start over at 0/25 and keep visiting.
+    db = _db()
+    _seed(db, "a", icp_score=10)
+    log_path = tmp_path / "join_attempts.log"
+    _write_attempt_log(log_path, [("earlier-today", "needs_login", "main")])
+    monkeypatch.setattr(joiner, "ATTEMPT_LOG_PATH", log_path)
+
+    def boom(*a, **kw):
+        raise AssertionError("must not touch the bridge once the daily cap is reached")
+
+    monkeypatch.setattr(joiner, "open_join_space", boom)
+    monkeypatch.setattr(joiner, "attempt_join", boom)
+
+    assert joins_attempted_today(db) == 0  # the DB alone would have allowed this run
+    with pytest.raises(RuntimeError, match="cap"):
+        joiner.run_auto_join(db, pacing=JoinPacingConfig(max_joins_per_day=1))
+
+
+def test_main_and_test_accounts_do_not_spend_each_others_visit_budget(monkeypatch, tmp_path):
+    # Circle rate-limits per account, so the two budgets stay separate: a visit
+    # logged by "test" must not count against "main" or the other way round.
+    db = _db()
+    _seed(db, "a", icp_score=10)
+    log_path = tmp_path / "join_attempts.log"
+    _write_attempt_log(log_path, [("spam-community", "unclear", "test")])
+    monkeypatch.setattr(joiner, "ATTEMPT_LOG_PATH", log_path)
+    monkeypatch.setattr(joiner, "open_join_space", lambda name: 1)
+    monkeypatch.setattr(
+        joiner, "attempt_join",
+        lambda space_id, url, **kw: EgoJoinResult(status="joined", detail="ok"),
+    )
+    monkeypatch.setattr(joiner, "sleep_between_attempts", lambda pacing: None)
+
+    # "test" has spent its single visit for today...
+    with pytest.raises(RuntimeError, match="cap"):
+        joiner.run_auto_join(db, account="test", pacing=JoinPacingConfig(max_joins_per_day=1))
+
+    # ...while "main" has not.
+    result = joiner.run_auto_join(db, pacing=JoinPacingConfig(max_joins_per_day=1))
+    assert result.joined == ["a"]
 
 
 def test_bridge_error_stops_the_batch_and_is_not_recorded_as_failed(monkeypatch):
@@ -461,3 +636,150 @@ def test_timeout_raises_ego_browser_error(monkeypatch):
     monkeypatch.setattr(ego_bridge.subprocess, "run", raise_timeout)
     with pytest.raises(EgoBrowserError, match="timed out"):
         ego_bridge.open_join_space("x")
+
+
+# --- --host is an operator override -------------------------------------------
+
+
+def test_host_filter_survives_the_limit_and_the_handoff_sort(monkeypatch, tmp_path):
+    # Regression: the --host filter used to be applied to the list that
+    # select_join_candidates had ALREADY truncated to --limit, and the handoff
+    # sort puts a previously-stuck host at the very end of the queue -- so
+    # `--host stuck --limit 2` silently selected nothing for exactly the host
+    # an operator names by hand in order to retry it.
+    db = _db()
+    for slug in ["p", "q", "r", "s2"]:
+        _seed(db, slug, icp_score=10)
+    _seed(db, "stuck", icp_score=99)
+
+    log_path = tmp_path / "join_attempts.log"
+    _write_attempt_log(log_path, [("stuck", "unclear", "main")])
+    monkeypatch.setattr(joiner, "ATTEMPT_LOG_PATH", log_path)
+
+    # The de-prioritisation itself is intact: unnamed, "stuck" is last.
+    assert [c["slug"] for c in joiner.select_join_candidates(db)][-1] == "stuck"
+
+    monkeypatch.setattr(joiner, "open_join_space", lambda name: 1)
+    monkeypatch.setattr(
+        joiner, "attempt_join",
+        lambda space_id, url, **kw: EgoJoinResult(status="unclear", detail="unrecognized page"),
+    )
+    monkeypatch.setattr(joiner, "sleep_between_attempts", lambda pacing: None)
+
+    result = joiner.run_auto_join(db, host="stuck", limit=2)
+
+    assert result.attempted == ["stuck"]
+    assert "unclear" in result.handoffs["stuck"]
+
+
+def test_select_join_candidates_applies_host_before_the_limit(monkeypatch, tmp_path):
+    db = _db()
+    for slug in ["p", "q", "r", "s2"]:
+        _seed(db, slug, icp_score=10)
+    _seed(db, "stuck", icp_score=99)
+
+    log_path = tmp_path / "join_attempts.log"
+    _write_attempt_log(log_path, [("stuck", "challenge_stop", "main")])
+    monkeypatch.setattr(joiner, "ATTEMPT_LOG_PATH", log_path)
+
+    assert [c["slug"] for c in joiner.select_join_candidates(db, limit=2, host="stuck")] == ["stuck"]
+
+
+def test_host_filter_still_matches_a_url_substring_past_the_limit(monkeypatch):
+    # The URL-substring half of the filter has to clear the limit too: the
+    # stored slug and the host an operator types rarely agree for a community
+    # on its own custom domain.
+    db = _db()
+    for i, slug in enumerate(["a", "b"]):
+        _seed(db, slug, icp_score=90 - i)
+    _seed(db, "target", url="https://members.example.com/join", icp_score=1)
+
+    monkeypatch.setattr(joiner, "open_join_space", lambda name: 1)
+    monkeypatch.setattr(joiner, "attempt_join", lambda *a, **kw: EgoJoinResult(status="joined", detail="ok"))
+    monkeypatch.setattr(joiner, "sleep_between_attempts", lambda pacing: None)
+
+    result = joiner.run_auto_join(db, host="members.example.com", limit=1)
+    assert result.attempted == ["target"]
+
+
+# --- the attempt log is read once per batch ------------------------------------
+
+
+def test_the_attempt_log_is_parsed_once_per_batch(monkeypatch, tmp_path):
+    # The log only ever grows and has no rotation, so every extra full parse
+    # per run is a cost that rises for the life of the file. The candidate
+    # ordering and the daily cap both need it; they share one snapshot.
+    db = _db()
+    _seed(db, "a", icp_score=10)
+
+    log_path = tmp_path / "join_attempts.log"
+    _write_attempt_log(log_path, [("earlier", "unclear", "main")])
+    monkeypatch.setattr(joiner, "ATTEMPT_LOG_PATH", log_path)
+
+    real_iter = joiner._iter_attempt_log
+    reads = []
+
+    def counting_iter():
+        reads.append(1)
+        return real_iter()
+
+    monkeypatch.setattr(joiner, "_iter_attempt_log", counting_iter)
+    monkeypatch.setattr(joiner, "open_join_space", lambda name: 1)
+    monkeypatch.setattr(joiner, "attempt_join", lambda *a, **kw: EgoJoinResult(status="joined", detail="ok"))
+    monkeypatch.setattr(joiner, "sleep_between_attempts", lambda pacing: None)
+
+    result = joiner.run_auto_join(db)
+
+    assert result.joined == ["a"]
+    assert len(reads) == 1
+
+
+# --- the SQL row bound ---------------------------------------------------------
+
+
+def _captured_sql(db):
+    """Every statement the engine executes, for asserting on what SQL asks for."""
+    from sqlalchemy import event
+
+    statements = []
+    event.listen(
+        db.engine, "before_cursor_execute",
+        lambda conn, cursor, statement, params, context, executemany: statements.append(statement),
+    )
+    return statements
+
+
+def test_a_limited_selection_does_not_materialise_the_whole_queue(monkeypatch, tmp_path):
+    # Without a bound in SQL the whole matching queue is fetched and then
+    # sliced in Python -- fine at today's queue size, a growing per-call cost
+    # as the backlog grows.
+    db = _db()
+    for i in range(6):
+        _seed(db, f"c{i}", icp_score=100 - i)
+    monkeypatch.setattr(joiner, "ATTEMPT_LOG_PATH", tmp_path / "join_attempts.log")
+
+    statements = _captured_sql(db)
+    assert len(joiner.select_join_candidates(db, limit=2)) == 2
+
+    community_selects = [s for s in statements if "FROM communities" in s]
+    assert community_selects and all("LIMIT" in s for s in community_selects)
+
+
+def test_the_row_bound_still_reaches_past_every_de_prioritised_host(monkeypatch, tmp_path):
+    # The bound has to leave room for the handoff sort: with the whole top of
+    # the queue de-prioritised, a plain `LIMIT limit` would hand back the
+    # stuck head of the queue again, which is what the sort exists to avoid.
+    db = _db()
+    for i, slug in enumerate(["stuck-a", "stuck-b", "stuck-c"]):
+        _seed(db, slug, icp_score=100 - i)
+    _seed(db, "fresh", icp_score=1)
+
+    log_path = tmp_path / "join_attempts.log"
+    _write_attempt_log(log_path, [
+        ("stuck-a", "unclear", "main"),
+        ("stuck-b", "needs_login", "main"),
+        ("stuck-c", "challenge_stop", "main"),
+    ])
+    monkeypatch.setattr(joiner, "ATTEMPT_LOG_PATH", log_path)
+
+    assert [c["slug"] for c in joiner.select_join_candidates(db, limit=1)] == ["fresh"]

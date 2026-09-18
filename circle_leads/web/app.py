@@ -15,7 +15,7 @@ from typing import Any
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 
 from circle_leads.config.settings import (
     load_requirements, requirements_to_dict,
@@ -279,7 +279,7 @@ def create_app(
         import re as _re
         from urllib.parse import urlparse
         from circle_leads.discovery.discover_communities import (
-            community_slug_for_host, detect_platform,
+            detect_platform, unique_slug_for_host,
         )
         from circle_leads.scraper.public_reader import PublicReader
         from circle_leads.storage.database import get_or_create_community
@@ -298,7 +298,11 @@ def create_app(
                     "community.circle.so", "circle.so", "www.circle.so"):
             raise HTTPException(400, f"{host} is not a community — paste the community's own URL.")
 
-        slug = community_slug_for_host(host)
+        # unique_slug_for_host, not community_slug_for_host: the latter is a
+        # label ("which organisation?") and is deliberately not unique, so two
+        # sibling subdomains would merge onto one row via the `slug OR url`
+        # match in get_or_create_community and the second URL would be lost.
+        slug = unique_slug_for_host(host)
         url = f"https://{host}"
         platform = detect_platform(url)
 
@@ -1088,6 +1092,14 @@ def create_app(
 
     # --- Stats and activity ----------------------------------------------
 
+    @app.get("/api/overview")
+    def api_overview(_: None = Depends(require_auth)) -> dict[str, Any]:
+        """The client-facing funnel -- see web/overview.py for definitions."""
+        from circle_leads.web.overview import build_overview
+
+        with db.session() as s:
+            return build_overview(s, datetime.now(timezone.utc).replace(tzinfo=None))
+
     @app.get("/api/stats")
     def api_stats(_: None = Depends(require_auth)) -> dict[str, Any]:
         now = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -1153,13 +1165,19 @@ def create_app(
             ) or 0
 
             # The community-scraping funnel: found (persisted) -> analyzed (ICP
-            # scored) -> queued for the scraper (ICP-fit, not attempted yet) ->
-            # actually put on the scraper (harvest.py has synced it at least
-            # once -- ScrapeRun/pipeline.py is the older, consent-gated path
-            # and isn't written by the live public-read worker, so it can't be
-            # used here). Each stage's "found"/"analyzed" split by today vs
-            # all-time; the queue is a point-in-time depth, not a rate, so it
-            # gets no today figure.
+            # scored) -> queued for the scraper (ICP-fit, on a real Circle host,
+            # not attempted yet) -> actually put on the scraper (harvest.py has
+            # synced it at least once -- ScrapeRun/pipeline.py is the older,
+            # consent-gated path and isn't written by the live public-read
+            # worker, so it can't be used here). Each stage's "found"/"analyzed"
+            # split by today vs all-time; the queue is a point-in-time depth,
+            # not a rate, so it gets no today figure.
+            #
+            # Caveat worth knowing when reading these numbers: `on_scraper_today`
+            # counts communities *read* today, not communities that entered the
+            # scraper today. harvest re-reads its head of the list every run, so
+            # the same rows recur day after day and this is a throughput figure,
+            # not growth. The UI labels it accordingly.
             found_today = s.scalar(
                 select(func.count()).select_from(Community)
                 .where(Community.discovered_at >= today_start)
@@ -1174,9 +1192,30 @@ def create_app(
                     Community.icp_checked_at >= today_start,
                 )
             ) or 0
+            # Only a real Circle host can actually be read or joined. Every
+            # other consumer of this backlog already says so -- harvest's
+            # _community_hosts, joiner.select_join_candidates, and
+            # free_join_backlog a few lines above -- and this counter was the
+            # single place that forgot to. Unfiltered it also counted
+            # discover.circle.so marketing cards (which carry a /products/
+            # checkout URL, not a community host) and outright non-Circle
+            # landing pages, overstating the workable backlog roughly 9x.
             queued_for_scraper = s.scalar(
                 select(func.count()).select_from(Community).where(
                     Community.icp_flag.is_(True),
+                    Community.platform == "circle",
+                    Community.join_status == JoinStatus.NOT_ATTEMPTED.value,
+                )
+            ) or 0
+            # The rows the filter above removes: ICP-fit but stuck *before* the
+            # queue rather than standing in it. Reported alongside so the drop
+            # stays visible instead of silently disappearing from the funnel --
+            # most are unresolved Discover cards, which
+            # `discover-directory --recheck-unresolved` converts into real hosts.
+            queued_unresolved = s.scalar(
+                select(func.count()).select_from(Community).where(
+                    Community.icp_flag.is_(True),
+                    or_(Community.platform != "circle", Community.platform.is_(None)),
                     Community.join_status == JoinStatus.NOT_ATTEMPTED.value,
                 )
             ) or 0
@@ -1240,6 +1279,7 @@ def create_app(
                 "analyzed_today": analyzed_today,
                 "analyzed_total": analyzed_total,
                 "queued_for_scraper": queued_for_scraper,
+                "queued_unresolved": queued_unresolved,
                 "on_scraper_today": on_scraper_today,
                 "on_scraper_total": on_scraper_total,
             },
@@ -1319,6 +1359,7 @@ def create_app(
         (circle_leads/join/, built separately) and has been removed outright.
         """
         from circle_leads.storage.models import CircleConnection, ConnectionState
+        from circle_leads.web.overview import connection_bucket
 
         broken = {
             ConnectionState.SESSION_EXPIRED.value,
@@ -1349,6 +1390,11 @@ def create_app(
                     }
                     for c in s.scalars(select(CircleConnection)).all()
                     if c.state in broken and c.host not in non_circle_hosts
+                    # A Cloudflare challenge on the cloud worker is not a dead
+                    # cookie -- the same cookies read fine from a home IP, so a
+                    # fresh paste would change nothing. Listed on the overview
+                    # instead, as a cloud-side block.
+                    and connection_bucket(c.state, c.state_detail) != "cloudflare_blocked"
                 ),
                 key=lambda r: r["host"],
             )

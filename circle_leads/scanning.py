@@ -52,13 +52,17 @@ def scan_cookie_host(db: Database, requirements: Requirements, host: str, *,
         MemberApiReader, SessionInvalid, ChallengeHit, fetch_space_posts,
     )
     from circle_leads.triage.pipeline import triage_records
-    from circle_leads.discovery.discover_communities import community_slug_for_host
+    from circle_leads.discovery.discover_communities import unique_slug_for_host
 
     started = time.time()
     # Stable slug for this host. NOT host.split(".")[0] -- that collapsed every
     # www.* host to "www" and every community.* host to "community", so
     # unrelated communities piled onto one row (see WORKLOG P10).
-    slug = community_slug_for_host(host)
+    # And NOT community_slug_for_host either: it answers "which organisation is
+    # this?", so forum.acme.com and shop.acme.com both reduce to "acme". Since
+    # get_or_create_community matches on `slug OR url`, a shared slug merges two
+    # unrelated communities onto one row and discards the second URL -- silently.
+    slug = unique_slug_for_host(host)
     cookies = {c["name"]: c["value"] for c in (load_cookies(db, host) or [])}
     state = ConnectionState.CONNECTED
     detail = ""

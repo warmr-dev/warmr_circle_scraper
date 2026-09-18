@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 
-from sqlalchemy import select
+from sqlalchemy import nullsfirst, or_, select
 
 from circle_leads.config.settings import Requirements
 from circle_leads.discovery.join_type import fetch_join_classification
@@ -76,15 +76,43 @@ def _community_hosts(
 ) -> list[tuple[str, str, object, bool]]:
     """Return (host, slug, last_synced_at, watching) for readable communities.
 
-    Watched ("subscribed") communities come first, then the rest by score, so
-    the fast lane services subscriptions before sweeping others. With
-    ``watched_only`` the sweep is dropped entirely -- only the watchlist.
-    The last-synced time is the incremental watermark: a previously-read
-    community is only re-read for posts newer than that.
+    Watched ("subscribed") communities come first, then ICP-fit ones, so the
+    fast lane services subscriptions before sweeping others and the sweep
+    spends its budget on communities we actually want. With ``watched_only``
+    the sweep is dropped entirely -- only the watchlist. The last-synced time
+    is the incremental watermark: a previously-read community is only re-read
+    for posts newer than that.
+
+    Ordering is the whole point of this function, and it used to get two things
+    wrong:
+
+    * It sorted by ``relevance_score`` -- the older web-search ranking from
+      discovery/finder.py -- and never looked at ``icp_flag``. So the dashboard
+      could show a deep "queued for the scraper" backlog while the scraper read
+      a completely unrelated set of communities. The ICP queue fed nothing.
+    * It sorted by score alone, which is a *fixed* key: the same top rows won
+      every run forever. Measured in prod: 195 rows permanently occupied a
+      150-row head, 0 communities outside it had ever been synced, and none of
+      the 10,189 file-imported rows had ever been read once.
+
+    Sorting by ``last_synced_at`` ascending with NULLs first fixes the second:
+    never-read communities go to the front, and reading one sends it to the
+    back, so the head rotates instead of setting. Score is only a tiebreak now.
     """
     with db.session() as s:
-        stmt = select(Community).order_by(
-            Community.watching.desc(), Community.relevance_score.desc()
+        # Narrow in SQL to what _reads_on_circle can possibly accept (NULL
+        # platform still needs the per-row URL-shape fallback, so it stays in).
+        # Without this the whole table is materialised just to discard ~15% of
+        # it in Python, which gets worse every time discovery runs.
+        stmt = (
+            select(Community)
+            .where(or_(Community.platform == "circle", Community.platform.is_(None)))
+            .order_by(
+                Community.watching.desc(),
+                Community.icp_flag.desc(),
+                nullsfirst(Community.last_synced_at.asc()),
+                Community.icp_score.desc(),
+            )
         )
         rows = list(s.scalars(stmt).all())
         out = []

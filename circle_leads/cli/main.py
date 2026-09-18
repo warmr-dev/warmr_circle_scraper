@@ -21,6 +21,7 @@ from circle_leads.scraper.member_feed import (
     MemberFeedClient, SessionExpired, fetch_space_posts,
 )
 from circle_leads.discovery.discover_communities import (
+    communities_from_urls,
     dedupe,
     extract_from_text,
     load_from_file,
@@ -35,7 +36,13 @@ from circle_leads.export.vini_ingest import (
     push_leads_by_ids,
     push_unsynced_leads,
 )
-from circle_leads.pipeline import classify_icp_pending, classify_pending, discover, ingest_community
+from circle_leads.pipeline import (
+    classify_icp_pending,
+    classify_pending,
+    discover,
+    enrich_pending,
+    ingest_community,
+)
 from circle_leads.storage.database import Database, purge_community, purge_expired
 from circle_leads.storage.models import Community, Lead, Post
 from circle_leads.triage.pipeline import triage_text
@@ -79,19 +86,27 @@ def cli(ctx, db_url, config_path, verbose):
               help="Saved public page to extract Circle links from.")
 @click.option("--url", "urls", multiple=True, help="A community URL. Repeatable.")
 @click.option("--no-validate", is_flag=True, help="Skip public landing-page checks.")
+@click.option("--allow-custom-domains", is_flag=True,
+              help="Accept communities on their own domain; the platform check "
+                   "decides if they are really Circle.")
 @click.pass_context
-def discover_cmd(ctx, from_file, from_html, urls, no_validate):
+def discover_cmd(ctx, from_file, from_html, urls, no_validate, allow_custom_domains):
     """Record candidate communities from user-provided or public sources."""
     found = []
     if from_file:
-        found += load_from_file(from_file)
+        found += load_from_file(from_file, allow_custom_domains=allow_custom_domains)
     if from_html:
         found += extract_from_text(
             Path(from_html).read_text(encoding="utf-8", errors="ignore"),
             source=f"html:{Path(from_html).name}",
+            allow_custom_domains=allow_custom_domains,
         )
     if urls:
-        found += extract_from_text("\n".join(urls), source="cli")
+        # Not extract_from_text: these are hosts the operator typed, not prose
+        # to mine, so a bare custom domain is taken at face value.
+        found += communities_from_urls(
+            urls, source="cli", allow_custom_domains=allow_custom_domains
+        )
 
     if not found:
         raise click.UsageError(
@@ -115,8 +130,11 @@ def discover_cmd(ctx, from_file, from_html, urls, no_validate):
 @click.option("--free-only", is_flag=True, help="Only show communities marked free.")
 @click.option("--min-score", type=int, default=0, show_default=True)
 @click.option("--limit", type=int, default=30, show_default=True)
+@click.option("--allow-custom-domains", is_flag=True,
+              help="Accept communities on their own domain; the platform check "
+                   "decides if they are really Circle.")
 @click.pass_context
-def find_cmd(ctx, from_html, urls, free_only, min_score, limit):
+def find_cmd(ctx, from_html, urls, free_only, min_score, limit, allow_custom_domains):
     """Rank candidate communities to join, by likely hiring activity.
 
     Reads public listing pages only. It never joins anything -- the output is a
@@ -130,7 +148,11 @@ def find_cmd(ctx, from_html, urls, free_only, min_score, limit):
             source=Path(from_html).name,
         )
     if urls:
-        ranked += rank_extracted(extract_from_text("\n".join(urls), source="cli"))
+        ranked += rank_extracted(
+            communities_from_urls(
+                urls, source="cli", allow_custom_domains=allow_custom_domains
+            )
+        )
 
     if not ranked:
         raise click.UsageError(
@@ -203,7 +225,12 @@ def discover_directory_cmd(ctx, incremental, no_resolve_join_urls, min_score,
             f"Rechecked {stats['total']}: {stats['resolved']} resolved, "
             f"{stats['still_unresolved']} still unresolved, {stats['errors']} error(s)."
         )
-        return
+        # Returned, not just printed: the worker's "discover_directory" job runs
+        # this same callback through ctx.invoke and stores what it returns.
+        return {
+            "detail": f"rechecked {stats['total']}, {stats['resolved']} resolved",
+            **stats,
+        }
 
     click.echo("Crawling discover.circle.so (needs a browser; this can take a while)...", err=True)
     result = crawl_directory(resolve_join_urls=not no_resolve_join_urls)
@@ -229,21 +256,77 @@ def discover_directory_cmd(ctx, incremental, no_resolve_join_urls, min_score,
         f"processed -- {persisted.new_count} new, {len(persisted.updated)} updated, "
         f"{persisted.unchanged} unchanged."
     )
+    return {
+        "detail": f"{len(listings)} listing(s), {persisted.new_count} new",
+        "listings": len(listings),
+        "new": persisted.new_count,
+        "updated": len(persisted.updated),
+        "unchanged": persisted.unchanged,
+        "errors": len(result.errors),
+    }
+
+
+@cli.command("enrich")
+@click.option("--limit", type=int, default=None,
+              help="Max communities to visit this run (default: one batch).")
+@click.option("--workers", type=int, default=None,
+              help="Concurrent fetches; capped at 4 whatever you pass here.")
+@click.pass_context
+def enrich_cmd(ctx, limit, workers):
+    """Fetch the missing name/description for communities that have neither.
+
+    Most of the database is a URL and nothing else, and every stage downstream
+    reads a blank row as a rejected one -- a community with text is ~16% likely
+    to be ICP-fit, one without is 0%. This walks the backlog oldest-first on its
+    own cursor (circle_leads/pipeline.py::enrich_pending), so it reaches rows
+    the harvest's top-150 read window never gets to. Re-run it until it reports
+    the end of the backlog; that means every row has been walked once.
+    """
+    from circle_leads.pipeline import ENRICH_DEFAULT_WORKERS
+
+    stats = enrich_pending(
+        ctx.obj["db"],
+        limit=limit,
+        max_workers=ENRICH_DEFAULT_WORKERS if workers is None else workers,
+    )
+    click.echo(
+        f"Visited {stats['visited']}: {stats['named']} named, "
+        f"{stats['described']} described, {stats['boilerplate_rejected']} "
+        f"boilerplate rejected, {stats['nothing_found']} still empty "
+        f"(cursor now {stats['cursor']})."
+    )
+    if stats["wrapped"]:
+        click.echo("End of the backlog -- the next run starts over from the oldest row.")
+    return {
+        "detail": f"visited {stats['visited']}, named {stats['named']}, "
+                  f"described {stats['described']}",
+        **stats,
+    }
 
 
 @cli.command("filter-relevant")
 @click.option("--use-llm", is_flag=True, help="Escalate ambiguous communities to an LLM.")
 @click.option("--limit", type=int, default=None, help="Max communities to score.")
 @click.option("--recheck", is_flag=True, help="Re-score every community, not just unchecked ones.")
+@click.option("--trust-llm-flags", is_flag=True,
+              help="Let an LLM-decided fit set icp_flag, i.e. enter the auto-join "
+                   "queue. Off by default -- those rows are recorded for review "
+                   "instead (icp_reasons contains 'llm_fit_needs_review').")
 @click.pass_context
-def filter_relevant_cmd(ctx, use_llm, limit, recheck):
+def filter_relevant_cmd(ctx, use_llm, limit, recheck, trust_llm_flags):
     """Score discovered communities for fit against the software-dev ICP.
 
     Gates auto-join (circle_leads/join/): only icp_flag=True communities are
     ever queued to join. See circle_leads/classifier/icp_relevance.py.
+
+    An LLM-decided fit does not flag unless --trust-llm-flags is given: icp_flag
+    is the only thing between a classifier verdict and a browser opening on the
+    user's real Circle account, so promoting a model's opinion is a human's
+    call, typed on purpose.
     """
     stats = classify_icp_pending(
-        ctx.obj["db"], ctx.obj["requirements"], use_llm=use_llm, limit=limit, recheck=recheck
+        ctx.obj["db"], ctx.obj["requirements"], use_llm=use_llm, limit=limit,
+        recheck=recheck, trust_llm_flags=trust_llm_flags,
     )
     click.echo(
         f"Checked {stats['checked']}: {stats['flagged']} flagged as ICP-fit, "
@@ -350,6 +433,17 @@ def auto_join_cmd(ctx, limit, host, space_id, screenshot_dir, dry_run, account):
         f"Attempted {len(result.attempted)}, joined {len(result.joined)}: "
         f"{', '.join(result.joined) or '(none)'}"
     )
+    # A handoff no longer ends the batch (join/joiner.py skips and continues),
+    # so without this the run's most actionable outcome -- the hosts waiting on
+    # a human -- would be invisible in the output.
+    if result.handoffs:
+        click.echo(
+            f"\n{len(result.handoffs)} need a human: "
+            + ", ".join(f"{slug} ({why})" for slug, why in result.handoffs.items())
+            + f"\nResolve them in ego-browser, then resume with: "
+            f"circle-leads auto-join --space-id {result.space_id}",
+            err=True,
+        )
     if result.stopped_for:
         click.echo(
             f"\nStopped at '{result.stopped_for}': {result.stop_reason}\n"
@@ -1339,12 +1433,20 @@ def worker_cmd(ctx, poll_seconds, use_llm):
     (instant); this warm, pooled process does the actual scanning fast -- no
     serverless timeout, no work inside a web request.
 
-    It handles three job kinds from the queue:
-      scan       -- read one private community (cookie) for posts+comments
-      scan_all   -- read every cookie-backed community, VIP first
-      harvest    -- discover public communities (web search) + read them
-    And on its own it runs the scheduled harvest, and ICP classification for
-    newly-discovered communities, when each is due.
+    It handles these job kinds from the queue:
+      scan               -- read one private community (cookie) for posts+comments
+      scan_all           -- read every cookie-backed community, VIP first
+      harvest            -- discover public communities (web search) + read them
+      discover_directory -- crawl discover.circle.so for new listings
+      enrich             -- fetch missing name/description for known communities
+    And on its own it runs the scheduled harvest, and enrichment + ICP
+    classification for communities that need them, when each is due.
+
+    The last two kinds are here because they had no queue entry point at all:
+    directory discovery and enrichment only ever ran when someone typed the
+    command locally, which is how 99.6% of the database got there. Both run the
+    same callbacks the CLI does (ctx.invoke), so each stage has one
+    implementation rather than a worker copy of it.
     """
     import time as _t
 
@@ -1414,6 +1516,12 @@ def worker_cmd(ctx, poll_seconds, use_llm):
                               "detail": f"scanned {len(results)} communities"}
                 elif job.kind == "harvest":
                     result = _run_harvest()
+                elif job.kind == "discover_directory":
+                    # Incremental: a full crawl re-walks ~2k listings, and the
+                    # queue is meant to be run often, not once by hand.
+                    result = ctx.invoke(discover_directory_cmd, incremental=True) or {}
+                elif job.kind == "enrich":
+                    result = ctx.invoke(enrich_cmd) or {}
                 else:
                     result = {"detail": f"unknown job kind {job.kind!r}"}
                 complete(db, job.id, result=result)
@@ -1438,9 +1546,33 @@ def worker_cmd(ctx, poll_seconds, use_llm):
             try:
                 if is_icp_classification_due(db):
                     mark_icp_classification_run(db)
-                    # Text-only, no browser/HTTP -- cheap enough to just sweep
-                    # everything unchecked each time it's due, no limit needed.
-                    stats = classify_icp_pending(db, req)
+                    # Enrichment first, and on the same due-check: a community
+                    # can only be judged on the text it has, so classifying a
+                    # blank row before anyone has tried to fetch its name just
+                    # files it as "not ICP" with no evidence either way. Both
+                    # stages are bounded per run (one enrichment batch, one
+                    # re-score batch), so the pair stays a fixed cost.
+                    enriched = enrich_pending(db)
+                    click.echo(f"  scheduled enrichment: {enriched}")
+                    # use_llm: this scheduled sweep is the only ICP path that
+                    # runs unattended, and leaving it off is why icp_decided_by
+                    # was 'rules' for every row in prod. classify_icp_pending
+                    # degrades to rules-only when no key is set, so this is
+                    # safe on a machine without one.
+                    # rescore_llm_eligible: on a database where every row has
+                    # already been stamped once, the default "unchecked only"
+                    # selection matches nothing forever -- see
+                    # pipeline._llm_eligible_icp_ids. It also caps this tick at
+                    # pipeline.ICP_SCHEDULED_BATCH rows across both selections,
+                    # so a fresh directory crawl cannot turn one tick into
+                    # thousands of LLM calls.
+                    # No trust_llm_flags: an LLM-decided fit is recorded for
+                    # review but stays out of the auto-join queue. Nothing here
+                    # is supervised, and the join bot drives the user's real
+                    # account -- growing that queue is a human's decision.
+                    stats = classify_icp_pending(
+                        db, req, use_llm=use_llm, rescore_llm_eligible=True
+                    )
                     click.echo(f"  scheduled ICP classification: {stats}")
             except Exception as exc:  # noqa: BLE001
                 click.echo(f"  ICP schedule error: {exc.__class__.__name__}", err=True)
