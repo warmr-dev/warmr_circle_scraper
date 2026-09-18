@@ -99,3 +99,19 @@ def test_recheck_window_skips_recently_synced(monkeypatch):
             select(ActivityLog).where(ActivityLog.summary.like("%skipping%"))
         ).all()
     assert skipped, "expected a skip log entry"
+
+
+def test_a_huge_retry_after_is_capped():
+    # community.cornea.care answers 503 "Retry-After: 3600"; honoured as is,
+    # it froze a whole run for 35 minutes (2026-09-19).
+    from urllib3.response import HTTPResponse
+
+    from circle_leads.scraper.http_client import RETRY_AFTER_CAP, _build_session
+
+    retry = _build_session().get_adapter("https://x.circle.so").max_retries
+    slow = HTTPResponse(body=b"", status=503, headers={"Retry-After": "3600"})
+    assert retry.get_retry_after(slow) == RETRY_AFTER_CAP
+    short = HTTPResponse(body=b"", status=429, headers={"Retry-After": "2"})
+    assert retry.get_retry_after(short) == 2
+    # urllib3 rebuilds the Retry on every attempt; the cap must survive that
+    assert type(retry.increment(method="GET", url="/", response=slow)) is type(retry)

@@ -28,6 +28,21 @@ BROWSER_UA = (
     "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
 )
 
+# The longest a Retry-After header may hold a request. community.cornea.care
+# answers 503 with "Retry-After: 3600", and urllib3 sleeps whatever the header
+# says, once per retry: one such host froze a whole run for 35 minutes
+# (2026-09-19). Past the cap the retry goes ahead and the caller gets the
+# final answer, as with any other failure.
+RETRY_AFTER_CAP = 30.0
+
+if Retry is not None:
+    class _CappedRetry(Retry):
+        """Honour Retry-After, but never sleep longer than RETRY_AFTER_CAP."""
+
+        def get_retry_after(self, response):
+            value = super().get_retry_after(response)
+            return None if value is None else min(value, RETRY_AFTER_CAP)
+
 _lock = threading.Lock()
 _session: requests.Session | None = None
 
@@ -37,7 +52,7 @@ def _build_session(pool_size: int = 20) -> requests.Session:
     s.headers.update({"User-Agent": BROWSER_UA})
     retry = None
     if Retry is not None:
-        retry = Retry(
+        retry = _CappedRetry(
             total=3,
             connect=3,
             read=2,
