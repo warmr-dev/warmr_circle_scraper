@@ -114,3 +114,59 @@ def test_connection_bucket():
     assert connection_bucket("error", "boom") == "error"
     assert connection_bucket("session_expired", None) == "session_expired"
     assert connection_bucket("not_connected", None) == "not_connected"
+
+
+def test_named_split_and_queues(tmp_path):
+    from datetime import timedelta
+
+    from circle_leads.web.overview import DEAD_HOST_MARKER, build_overview
+
+    db = Database(f"sqlite:///{tmp_path / 'q.db'}")
+    now = utcnow().replace(tzinfo=None)  # naive UTC, like the database
+    with db.session() as s:
+        _row(s, "live", source=DNS_SOURCE, name="L", join_type="free_join", icp=True)
+        joined = _row(s, "joined", source="circle_directory", name="J",
+                      join_type="free_join", icp=True, join_status=JoinStatus.JOINED.value)
+        joined.join_attempted_at = now - timedelta(days=3)
+        joined.last_synced_at = now - timedelta(hours=1)
+        unchecked = _row(s, "unchecked", source=DNS_SOURCE, name="U", join_type="unknown")
+        unchecked.join_type_checked_at = now - timedelta(hours=2)
+        _row(s, "lapsed", source=DNS_SOURCE, name="X", join_type="subscription_expired")
+        _row(s, "untyped", source="builtwith_lists", name="N")
+        _row(s, "unnamed", source=DNS_SOURCE)
+        dead = _row(s, "dead", source=DNS_SOURCE)
+        dead.icp_reasons = ["no_metadata", DEAD_HOST_MARKER]
+        _row(s, "paid", source="circle_directory", name="P", platform="discover",
+             join_type="paid", icp=True)
+        _row(s, "unread", source=DNS_SOURCE, name="R", join_type="locked_unknown", icp=True)
+
+    with db.session() as s:
+        ov = build_overview(s, now)
+
+    t = ov["funnel"]["total"]
+    assert t["named"] == 7 and t["live"] == 4
+    # Every named row lands in exactly one bucket.
+    assert (t["unchecked"], t["named_lapsed"], t["named_untyped"]) == (1, 1, 1)
+    assert t["live"] + t["unchecked"] + t["named_lapsed"] + t["named_untyped"] == t["named"]
+
+    q = {x["key"]: x for x in ov["queues"]}
+    assert q["name"]["waiting"] == 1          # the dead host is not waiting for a name
+    assert not q["name"]["stale"]
+    assert q["join_type_recheck"]["waiting"] == 1
+    assert q["join_type_recheck"]["field"] == "join_type_checked_at"
+    assert not q["join_type_recheck"]["stale"]
+    assert q["read"]["waiting"] == 2 and not q["read"]["stale"]
+    # One free community waits and the last join attempt was 3 days ago.
+    assert q["join"]["waiting"] == 1 and q["join"]["stale"]
+    # A paid community waits and no decision was ever recorded.
+    assert q["paid_decision"]["waiting"] == 1
+    assert q["paid_decision"]["last_moved"] is None and q["paid_decision"]["stale"]
+
+
+def test_empty_queue_is_never_stale(tmp_path):
+    from circle_leads.web.overview import build_overview
+
+    db = Database(f"sqlite:///{tmp_path / 'e.db'}")
+    with db.session() as s:
+        queues = build_overview(s, utcnow().replace(tzinfo=None))["queues"]
+    assert all(x["waiting"] == 0 and not x["stale"] for x in queues)

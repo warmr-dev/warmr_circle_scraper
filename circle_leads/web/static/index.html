@@ -172,7 +172,7 @@
   .ov-refresh { display: flex; align-items: center; gap: 10px; }
   .ov-lede { margin: -6px 0 14px; color: var(--muted); font-size: 13px; max-width: 760px; }
   .ov-sub { margin: 20px 0 8px; font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
-  .ov-funnel { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 8px; }
+  .ov-funnel { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 8px; }
   @media (max-width: 1100px) { .ov-funnel { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
   @media (max-width: 560px) { .ov-funnel { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
   .ov-step { border: 1px solid var(--line); border-radius: 10px; padding: 12px; background: var(--soft); min-width: 0; }
@@ -207,6 +207,8 @@
   table.ov-table { min-width: 560px; }
   table.ov-table td.num, table.ov-table th.num { text-align: right; font-variant-numeric: tabular-nums; }
   table.ov-table tr.total td { font-weight: 700; background: var(--soft); }
+  table.ov-table tr.stale td { background: color-mix(in srgb, var(--danger) 8%, transparent); }
+  table.ov-table tr.stale td.moved { color: var(--danger); font-weight: 600; }
   .tip, .tip-inline {
     display: inline-grid; place-items: center; width: 16px; height: 16px; border-radius: 99px;
     font-size: 10.5px; font-weight: 700; color: var(--muted); border: 1px solid var(--line);
@@ -319,6 +321,9 @@
       <h2>1. Community funnel</h2>
       <p class="ov-lede">Every community we have found, and how many make it through each step, from first discovery to a lead.</p>
       <div class="ov-funnel" id="ov-funnel"><div class="empty">Loading…</div></div>
+      <p class="meta" id="ov-named-split" style="margin:10px 0 0"></p>
+      <h3 class="ov-sub">Waiting at each step</h3>
+      <div id="ov-queues"></div>
       <h3 class="ov-sub">By source</h3>
       <div id="ov-sources"></div>
       <p class="meta" id="ov-funnel-note"></p>
@@ -988,21 +993,27 @@ const fmtN = (n) => Number(n || 0).toLocaleString('en-US');
 const pctOf = (a, b) => (b ? Math.round((a / b) * 1000) / 10 : 0);
 const tip = (text) => `<span class="tip" tabindex="0" data-tip="${esc(text)}">?</span>`;
 
+// [key, label, help, base]: `base` is the step a percentage is taken of. It is
+// not always the step before: a few ICP-fit communities are not in "Live"
+// (their join type was never pinned down), so ICP is a share of "Named".
 const FUNNEL_STEPS = [
   ['found', 'Found', 'Every community we have collected, from Circle\'s public directory, a list of Circle web addresses (DNS export), and a few smaller sources.'],
-  ['alive', 'Responded', 'The community really exists: it is listed in Circle\'s own directory, or its page returned a name, or it told us how to join. A generic "login required" reply does not count, because Circle sends that even for addresses that do not exist.'],
-  ['named', 'Named', 'We know the community\'s name. Without a name there is nothing to judge, so these are the only ones we can check against the profile.'],
-  ['icp', 'ICP fit', 'The community\'s audience matches the ideal customer profile (ICP): founders and business owners who hire developers. Not counted: communities not hosted on Circle, and communities whose owner stopped paying for Circle.'],
-  ['read', 'Read', 'ICP-fit communities whose posts we have read at least once.'],
+  ['alive', 'Responded', 'The community really exists: it is listed in Circle\'s own directory, or its page returned a name, or it told us how to join. A generic "login required" reply does not count, because Circle sends that even for addresses that do not exist.', 'found'],
+  ['named', 'Named', 'We know the community\'s name. Without a name there is nothing to judge, so these are the only ones we can check against the profile.', 'alive'],
+  ['live', 'Live', 'Named, and the community\'s own site confirmed how to get in: free to join, paid, invite only, or a login screen. Not counted: named communities whose owner stopped paying for Circle (the site no longer works), and those we have not re-checked since finding the name.', 'named'],
+  ['icp', 'ICP fit', 'The community\'s audience matches the ideal customer profile (ICP): founders and business owners who hire developers. Not counted: communities not hosted on Circle, and communities whose owner stopped paying for Circle.', 'named'],
+  ['read', 'Read', 'ICP-fit communities whose posts we have read at least once.', 'icp'],
   ['posts', 'Posts', 'Posts and comments saved from all communities we have read.'],
   ['leads', 'Leads', 'Posts where someone wants to hire or pay for software or development work.'],
 ];
 
 function renderFunnel(f) {
   const t = f.total, u = f.updated;
-  $('ov-funnel').innerHTML = FUNNEL_STEPS.map(([key, label, help], i) => {
-    const prev = i > 0 ? t[FUNNEL_STEPS[i - 1][0]] : null;
-    const share = (i > 0 && i < 5 && prev) ? `${pctOf(t[key], prev)}% of previous step` : '&nbsp;';
+  const labelOf = Object.fromEntries(FUNNEL_STEPS.map(([k, l]) => [k, l]));
+  $('ov-funnel').innerHTML = FUNNEL_STEPS.map(([key, label, help, base]) => {
+    const share = base && t[base]
+      ? `<span title="${fmtN(t[key])} of ${fmtN(t[base])}">${pctOf(t[key], t[base])}% of ${labelOf[base]}</span>`
+      : '&nbsp;';
     const today = key === 'found' && t.found_today ? `+${fmtN(t.found_today)} today` : share;
     return `<div class="ov-step${key === 'icp' || key === 'leads' ? ' hl' : ''}">
       <div class="k">${label} ${tip(help)}</div>
@@ -1024,9 +1035,37 @@ function renderFunnel(f) {
     <thead><tr><th>Source</th>${cols}</tr></thead>
     <tbody>${f.sources.map(x => row(`${esc(x.label)} ${tip(srcHelp[x.key] || '')}`, x)).join('')}
     ${row('Total', t, 'total')}</tbody></table></div>`;
+  $('ov-named-split').innerHTML = `Of ${fmtN(t.named)} named: ${fmtN(t.live)} live ·
+    <b style="color:var(--ink)">Not checked: ${fmtN(t.unchecked)}</b> ${tip('We know the name, but have not re-checked how to join since the name was found, so we cannot tell yet whether the community still works.')}
+    · ${fmtN(t.named_lapsed)} dead (owner stopped paying for Circle)${t.named_untyped ? ` · ${fmtN(t.named_untyped)} never checked` : ''}.`;
   $('ov-funnel-note').innerHTML = t.read_other
     ? `Posts and leads also include ${fmtN(t.read_other)} communities read outside the ICP list (added by hand, or read before the profile check existed).`
     : '';
+}
+
+const QUEUES = {
+  name: ['Waiting for a name', 'Communities we have no name for yet. Addresses already found to be dead are not counted.',
+    'Last change to a named community we have not read or joined yet: there is no separate "name found" time.'],
+  join_type_recheck: ['Waiting for a join-type re-check', 'Named communities whose join type is still unknown.',
+    'Last join-type check of a named community.'],
+  read: ['Waiting to be read', 'ICP-fit communities on Circle whose posts we have never read.',
+    'Last time an ICP-fit community on Circle was read.'],
+  join: ['Waiting to be joined', 'ICP-fit communities that are free to join and that our bot has not tried yet.',
+    'Last join attempt on an ICP-fit, free-to-join community.'],
+  paid_decision: ['Waiting for a decision on payment', 'ICP-fit communities that charge for membership. We do not pay to join without a decision.',
+    'Last recorded decision on a paid ICP-fit community.'],
+};
+function renderQueues(list) {
+  const rows = list.map(q => {
+    const [label, what, when] = QUEUES[q.key] || [q.key, '', ''];
+    const moved = q.last_moved ? whenSpan(q.last_moved, '') : 'never';
+    return `<tr class="${q.stale ? 'stale' : ''}"><td>${label} ${tip(what)}</td>
+      <td class="num">${fmtN(q.waiting)}</td>
+      <td class="moved">${moved} ${tip(when)}${q.stale ? ' · no movement for over a day' : ''}</td></tr>`;
+  }).join('');
+  $('ov-queues').innerHTML = `<div class="table-wrap"><table class="ov-table" style="min-width:0">
+    <thead><tr><th>Queue</th><th class="num">Waiting</th><th>Last moved</th></tr></thead>
+    <tbody>${rows}</tbody></table></div>`;
 }
 
 function renderIcp(g) {
@@ -1163,6 +1202,7 @@ async function loadOverview() {
   $('ov-error').hidden = true;
   $('ov-generated').innerHTML = `Numbers as of ${esc(localTime(d.generated_at))}`;
   renderFunnel(d.funnel);
+  renderQueues(d.queues || []);
   renderIcp(d.icp_groups);
   renderConnections(d.connections);
   renderLeads(d.leads, d.today_start);
