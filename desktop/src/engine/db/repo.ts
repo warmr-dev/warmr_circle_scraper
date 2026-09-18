@@ -288,15 +288,21 @@ function icpDue(sql: Sql, version: string, withLlm: boolean) {
 
 export async function icpCandidates(
   sql: Sql,
-  opts: { limit: number; version: string; withLlm: boolean; ids?: number[] }
+  opts: { limit: number; version: string; withLlm: boolean; ids?: number[]; textlessOnly?: boolean }
 ): Promise<IcpCandidate[]> {
   const due = opts.ids?.length ? sql`c.id in ${sql(opts.ids)}` : icpDue(sql, opts.version, opts.withLlm)
+  // While the LLM is out of budget, only rows it would never see anyway.
+  const textless = opts.textlessOnly
+    ? sql`and coalesce(c.name, '') = '' and coalesce(c.description, '') = ''
+        and coalesce(cardinality(s.space_names), 0) = 0
+        and (c.directory_goals is null or json_typeof(c.directory_goals) <> 'array' or json_array_length(c.directory_goals) = 0)`
+    : sql``
   const rows = await sql`
     select c.id, c.url, c.slug, c.name, c.description, c.price_label, c.directory_goals, c.join_type,
       s.space_names, s.members_total, s.exists_status
     from public.communities c
     left join warmr_app.community_state s on s.community_id = c.id
-    where ${due}
+    where ${due} ${textless}
     order by (s.exists_status = 'alive') desc nulls last,
       (c.name is not null or c.description is not null or s.space_names is not null) desc,
       c.icp_flag desc nulls last, c.id

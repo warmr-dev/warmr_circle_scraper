@@ -109,11 +109,12 @@ export function registerIpc(deps: { engine: Engine; store: Store; mainWindow: ()
     if (picked.canceled || !picked.filePaths[0]) return { ok: false, message: 'Отменено' }
     const found = secretsFromEnv(readFileSync(picked.filePaths[0], 'utf8'))
     const names = Object.keys(found)
-    if (!names.length) return { ok: false, message: 'В файле нет CIRCLE_LEADS_DB, OPENAI_API_KEY, ANTHROPIC_API_KEY, CIRCLE_EMAIL, CIRCLE_PASSWORD' }
+    if (!names.length) return { ok: false, message: 'В файле нет CIRCLE_LEADS_DB, OPENROUTER_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, CIRCLE_EMAIL, CIRCLE_PASSWORD' }
     await store.setSecrets(found)
     if (found.dbUrl) await engine.connect()
     const labels: Record<string, string> = {
       dbUrl: 'база',
+      openrouterKey: 'ключ OpenRouter',
       openaiKey: 'ключ OpenAI',
       anthropicKey: 'ключ Anthropic',
       circleEmail: 'email Circle',

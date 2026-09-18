@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { setFetcher } from '@engine/circle/http'
 import { circleGovernor, RateLimitedError } from '@engine/circle/governor'
 import { probeHost, fetchPublicSpaces } from '@engine/circle/probe'
@@ -8,11 +8,13 @@ import { buildJoinScript, parseJoinOutput, JOIN_DRIVER_SOURCE } from '@engine/jo
 import { cookieHost } from '@engine/stages/join'
 import { pickJoinHost } from '@engine/stages/discover'
 import { normalizePost, normalizeComment, postPermalink } from '@engine/stages/scrape'
+import { storedSourceId } from '@engine/circle/text'
 import { decideIcp, icpUserMessage } from '@engine/icp/classify'
 import { mergeSettings, DEFAULT_SHARED } from '@engine/defaults'
 import { mapPool, naiveUtc } from '@engine/util'
 import { parseNaiveUtc, normalizeDbUrl } from '@engine/db/client'
-import { estimateUsd, priceFor } from '@engine/llm/client'
+import { completeJson, estimateUsd, LlmUnavailableError, priceFor } from '@engine/llm/client'
+import { z } from 'zod'
 
 type Handler = (url: string, init: RequestInit) => Response | Promise<Response>
 
@@ -153,7 +155,7 @@ describe('member reader', () => {
 describe('post normalization', () => {
   const space = { id: '3', name: 'Jobs', slug: 'jobs', type: 'basic', postsCount: null, isPrivate: null }
 
-  it('uses the full tiptap body, redacts contacts, keeps Circle identity', () => {
+  it('uses the full tiptap body, redacts contacts, keys the row like Python', () => {
     const post = normalizePost(
       {
         id: 42,
@@ -168,7 +170,9 @@ describe('post normalization', () => {
       'https://x.circle.so',
       'member_session'
     )!
-    expect(post.sourceContentId).toBe('42')
+    expect(post.circleId).toBe('42')
+    expect(post.kind).toBe('post')
+    expect(post.sourceContentId).toBe(storedSourceId(post.content))
     expect(post.contentType).toBe('post')
     expect(post.content).toBe('Hiring a React dev\n\nEmail me: [email removed]')
     expect(post.url).toBe('https://x.circle.so/c/jobs/hiring-a-react-dev')
@@ -177,11 +181,13 @@ describe('post normalization', () => {
     expect(post.publishedAt?.toISOString()).toBe('2026-09-01T10:00:00.000Z')
   })
 
-  it('comments get a c-prefixed id and the post as thread', () => {
+  it('comments are stored like Python (content key, type post) and remember their post', () => {
     const c = normalizeComment({ id: 7, body_plain_text: 'DM me', created_at: '2026-09-02T00:00:00Z' }, '42', 'https://x.circle.so', 'member_session', null)!
-    expect(c.sourceContentId).toBe('c7')
+    expect(c.circleId).toBe('7')
+    expect(c.kind).toBe('comment')
+    expect(c.sourceContentId).toBe(storedSourceId('DM me'))
     expect(c.threadId).toBe('42')
-    expect(c.contentType).toBe('comment')
+    expect(c.contentType).toBe('post')
   })
 
   it('prefers an explicit url over the built permalink', () => {
@@ -276,6 +282,82 @@ describe('ICP decision', () => {
     expect(msg).toContain('Sections: A · B')
     expect(msg).toContain('Directory categories: g')
   })
+
+  it('an unreachable LLM marks the verdict retryable instead of final', async () => {
+    vi.stubGlobal('fetch', async () => json(402, { error: { message: 'Insufficient credits' } }))
+    try {
+      const d = await decideIcp(
+        { name: 'Makers', description: 'SaaS founders', spaceNames: [], goals: [], host: 'm', priceLabel: null, joinType: null, membersTotal: null },
+        settings,
+        { provider: 'openrouter', model: 'anthropic/claude-sonnet-5', apiKey: 'sk-or-test' },
+        { budgetOk: true }
+      )
+      expect(d.decidedBy).toBe('rules')
+      expect(d.llmRetryable).toBe(true)
+      expect(d.llmError).toContain('402')
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+})
+
+describe('OpenRouter client', () => {
+  const cfg = { provider: 'openrouter' as const, model: 'anthropic/claude-sonnet-5', apiKey: 'sk-or-test' }
+  const schema = z.object({ ok: z.boolean() })
+  const args = {
+    system: 'sys',
+    user: 'usr',
+    schema,
+    jsonSchema: { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'], additionalProperties: false },
+    schemaName: 'ping'
+  }
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('sends a strict schema only to endpoints that enforce it and counts the billed cost', async () => {
+    let seen: { url: string; init: RequestInit } | null = null
+    vi.stubGlobal('fetch', async (url: string, init: RequestInit) => {
+      seen = { url, init }
+      return json(200, {
+        model: 'anthropic/claude-sonnet-5',
+        choices: [{ message: { content: '{"ok": true}' }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 850, completion_tokens: 130, cost: 0.0031 }
+      })
+    })
+    const res = await completeJson(cfg, args)
+    expect(res.data).toEqual({ ok: true })
+    expect(res.usage).toEqual({ inputTokens: 850, outputTokens: 130, usd: 0.0031, priced: true })
+    expect(seen!.url).toBe('https://openrouter.ai/api/v1/chat/completions')
+    expect((seen!.init.headers as Record<string, string>).Authorization).toBe('Bearer sk-or-test')
+    const body = JSON.parse(String(seen!.init.body))
+    expect(body.model).toBe('anthropic/claude-sonnet-5')
+    expect(body.response_format).toEqual({ type: 'json_schema', json_schema: { name: 'ping', strict: true, schema: args.jsonSchema } })
+    expect(body.provider).toEqual({ require_parameters: true })
+    expect(body.messages.map((m: { role: string }) => m.role)).toEqual(['system', 'user'])
+  })
+
+  it('falls back to list prices when no cost is reported, and reads fenced JSON', async () => {
+    vi.stubGlobal('fetch', async () =>
+      json(200, { choices: [{ message: { content: '```json\n{"ok": false}\n```' } }], usage: { prompt_tokens: 1_000_000, completion_tokens: 0 } })
+    )
+    const res = await completeJson({ ...cfg, model: 'anthropic/claude-haiku-4.5' }, args)
+    expect(res.data).toEqual({ ok: false })
+    expect(res.usage.usd).toBeCloseTo(1)
+    expect(res.usage.priced).toBe(true)
+  })
+
+  it('no credits or a bad key means "unavailable", not a verdict about the item', async () => {
+    vi.stubGlobal('fetch', async () => json(402, { error: { message: 'Insufficient credits' } }))
+    await expect(completeJson(cfg, args)).rejects.toBeInstanceOf(LlmUnavailableError)
+    vi.stubGlobal('fetch', async () => json(401, { error: { message: 'No auth credentials found' } }))
+    await expect(completeJson(cfg, args)).rejects.toThrow(/неверный ключ/)
+  })
+
+  it('a moderation refusal is about this input, so it is not retried as an outage', async () => {
+    vi.stubGlobal('fetch', async () => json(403, { error: { message: 'flagged', metadata: { reasons: ['harassment'] } } }))
+    const err = await completeJson(cfg, args).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(Error)
+    expect(err).not.toBeInstanceOf(LlmUnavailableError)
+  })
 })
 
 describe('Circle governor (per-IP rate limit)', () => {
@@ -337,6 +419,9 @@ describe('misc', () => {
   it('prices known models and marks unknown ones', () => {
     expect(priceFor('claude-opus-5').known).toBe(true)
     expect(priceFor('some-new-model').known).toBe(false)
+    expect(priceFor('anthropic/claude-haiku-4.5')).toEqual({ rates: [1, 5], known: true })
+    expect(priceFor('openai/gpt-4.1-mini')).toEqual({ rates: [0.4, 1.6], known: true })
+    expect(priceFor('anthropic/claude-sonnet-5').rates).toEqual([2, 10])
     expect(estimateUsd('gpt-4o-mini', 1_000_000, 0).usd).toBeCloseTo(0.15)
   })
 

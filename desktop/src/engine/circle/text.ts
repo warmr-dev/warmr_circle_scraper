@@ -99,6 +99,26 @@ export function contentHash(text: string): string {
   return createHash('sha256').update(normalized, 'utf8').digest('hex')
 }
 
+/**
+ * The text the Python app stores for one item (triage/pipeline.py
+ * triage_records): the title goes in front only when the composed text does
+ * not already start with it, which PII redaction can cause.
+ */
+export function storedContent(title: string | null, content: string): string {
+  if (!title || content.trimStart().startsWith(title)) return content
+  return `${title}\n${content}`
+}
+
+/**
+ * Python keys every stored item by its content (triage/pipeline.py:
+ * "triage:" + content_hash[:24], content_type 'post' for posts and comments
+ * alike). Using the same key makes the app and the old worker update one row
+ * instead of storing each post twice.
+ */
+export function storedSourceId(content: string): string {
+  return `triage:${contentHash(content).slice(0, 24)}`
+}
+
 export function simhash(text: string, bits = 64): string {
   const tokens = (text || '').toLowerCase().match(/[a-z0-9]+/g) ?? []
   if (tokens.length === 0) return '0'.repeat(bits / 4)

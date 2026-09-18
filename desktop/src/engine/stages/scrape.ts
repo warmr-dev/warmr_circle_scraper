@@ -8,7 +8,7 @@ import {
   type CircleSpace
 } from '../circle/reader'
 import { RateLimitedError } from '../circle/governor'
-import { composeContent, contentHash, extractText, parseTimestamp, redactPii, simhash } from '../circle/text'
+import { composeContent, contentHash, extractText, parseTimestamp, redactPii, simhash, storedContent, storedSourceId } from '../circle/text'
 import {
   closeTasks,
   commentsFetched,
@@ -27,12 +27,24 @@ import {
   upsertSpace,
   type AuthorInput,
   type PostInput,
+  type PostMetaInput,
   type ScrapeTarget
 } from '../db/content'
 import { logActivity } from '../db/repo'
 import { daysAgo } from '../util'
 
 type Json = Record<string, unknown>
+
+/**
+ * One post or comment ready to store. The row key (sourceContentId) is
+ * Python's content key; Circle's own id travels alongside for API calls and
+ * for warmr_app.post_meta.
+ */
+export interface NormalizedItem extends PostInput {
+  circleId: string
+  kind: 'post' | 'comment'
+  author: AuthorInput | null
+}
 
 interface CommunityTotals {
   spaces: number
@@ -65,14 +77,16 @@ export function postPermalink(record: Json, space: CircleSpace, base: string): s
   return null
 }
 
-export function normalizePost(record: Json, space: CircleSpace, base: string, permission: string): (PostInput & { author: AuthorInput | null; commentsCount: number; createdAt: Date | null }) | null {
+export function normalizePost(record: Json, space: CircleSpace, base: string, permission: string): (NormalizedItem & { commentsCount: number; createdAt: Date | null }) | null {
   const id = record.id ?? record.post_id
   if (id == null) return null
   const { title, body } = extractText(record)
-  const content = redactPii(composeContent(title, body))
+  const content = storedContent(title || null, redactPii(composeContent(title, body)))
   const createdAt = parseTimestamp(record.created_at ?? record.published_at)
   return {
-    sourceContentId: String(id),
+    circleId: String(id),
+    kind: 'post',
+    sourceContentId: storedSourceId(content),
     contentType: 'post',
     threadId: String(id),
     spacePk: null,
@@ -90,14 +104,16 @@ export function normalizePost(record: Json, space: CircleSpace, base: string, pe
   }
 }
 
-export function normalizeComment(record: Json, threadId: string, base: string, permission: string, fallbackUrl: string | null): (PostInput & { author: AuthorInput | null }) | null {
+export function normalizeComment(record: Json, threadId: string, base: string, permission: string, fallbackUrl: string | null): NormalizedItem | null {
   if (record.id == null) return null
   const { body } = extractText(record)
   const content = redactPii(body)
   if (!content.trim()) return null
   return {
-    sourceContentId: `c${record.id}`,
-    contentType: 'comment',
+    circleId: String(record.id),
+    kind: 'comment',
+    sourceContentId: storedSourceId(content),
+    contentType: 'post',
     threadId,
     spacePk: null,
     authorPk: null,
@@ -112,12 +128,16 @@ export function normalizeComment(record: Json, threadId: string, base: string, p
   }
 }
 
-/** Store a batch of normalized items with authors resolved first. */
+/**
+ * Store a batch of normalized items with authors resolved first. Returns the
+ * row id for each Circle id (two identical comments share one row, as in
+ * Python).
+ */
 async function store(
   ctx: StageContext,
   communityId: number,
   spacePk: number | null,
-  items: Array<PostInput & { author: AuthorInput | null }>
+  items: NormalizedItem[]
 ): Promise<{ inserted: number; ids: Map<string, number> }> {
   const authors = await upsertAuthors(
     ctx.sql,
@@ -130,13 +150,13 @@ async function store(
     authorPk: i.author ? (authors.get(i.author.sourceAuthorId) ?? null) : null
   }))
   const saved = await upsertPosts(ctx.sql, communityId, rows)
+  const rowByKey = new Map(saved.map((s) => [s.sourceContentId, s.id]))
   const ids = new Map<string, number>()
-  let inserted = 0
-  for (const s of saved) {
-    ids.set(`${s.contentType}:${s.sourceContentId}`, s.id)
-    if (s.inserted) inserted++
+  for (const item of items) {
+    const rowId = rowByKey.get(item.sourceContentId)
+    if (rowId != null) ids.set(item.circleId, rowId)
   }
-  return { inserted, ids }
+  return { inserted: saved.filter((s) => s.inserted).length, ids }
 }
 
 async function readComments(
@@ -144,24 +164,33 @@ async function readComments(
   reader: CircleReader,
   communityId: number,
   spacePk: number,
-  post: { sourceContentId: string; url: string | null },
+  post: { circleId: string; url: string | null },
   permission: string
 ): Promise<number> {
-  const comments = await reader.comments(post.sourceContentId)
-  const items: Array<PostInput & { author: AuthorInput | null }> = []
+  const comments = await reader.comments(post.circleId)
+  const items: NormalizedItem[] = []
   for (const comment of comments) {
-    const normalized = normalizeComment(comment, post.sourceContentId, reader.base, permission, post.url)
+    const normalized = normalizeComment(comment, post.circleId, reader.base, permission, post.url)
     if (normalized) items.push(normalized)
     const replies = typeof comment.replies_count === 'number' ? comment.replies_count : 0
     if (replies > 0 && comment.id != null) {
       for (const reply of await reader.replies(String(comment.id))) {
-        const r = normalizeComment(reply, post.sourceContentId, reader.base, permission, normalized?.url ?? post.url)
+        const r = normalizeComment(reply, post.circleId, reader.base, permission, normalized?.url ?? post.url)
         if (r) items.push(r)
       }
     }
   }
   if (!items.length) return 0
-  const { inserted } = await store(ctx, communityId, spacePk, items)
+  const { inserted, ids } = await store(ctx, communityId, spacePk, items)
+  await savePostMeta(
+    ctx.sql,
+    items.flatMap((c) => {
+      const postId = ids.get(c.circleId)
+      return postId == null
+        ? []
+        : [{ postId, communityId, sourcePostId: c.circleId, kind: 'comment' as const, parentSourceId: post.circleId, commentsCount: null, fetched: null }]
+    })
+  )
   return inserted
 }
 
@@ -221,21 +250,21 @@ async function readSpace(
       for (const p of kept) if (p.createdAt && (!newest || p.createdAt > newest)) newest = p.createdAt
 
       if (ctx.settings.scrape.withComments && kept.length) {
-        const details = await reader.postDetails(space.id, kept.map((p) => p.sourceContentId))
-        const postIds = kept.map((p) => ids.get(`post:${p.sourceContentId}`)).filter((id): id is number => id != null)
+        const details = await reader.postDetails(space.id, kept.map((p) => p.circleId))
+        const postIds = kept.map((p) => ids.get(p.circleId)).filter((id): id is number => id != null)
         const fetched = await commentsFetched(ctx.sql, postIds)
-        const meta: Array<{ postId: number; communityId: number; sourcePostId: string; commentsCount: number | null; fetched: number | null }> = []
+        const meta: PostMetaInput[] = []
         for (const p of kept) {
-          const postId = ids.get(`post:${p.sourceContentId}`)
+          const postId = ids.get(p.circleId)
           if (postId == null) continue
-          const count = details?.get(p.sourceContentId)?.commentsCount ?? (p.commentsCount || null)
+          const count = details?.get(p.circleId)?.commentsCount ?? (p.commentsCount || null)
           const already = fetched.get(postId) ?? 0
           let fetchedNow: number | null = null
           if (count != null && count > already) {
             totals.comments += await readComments(ctx, reader, communityId, spacePk, p, permission)
             fetchedNow = count
           }
-          meta.push({ postId, communityId, sourcePostId: p.sourceContentId, commentsCount: count, fetched: fetchedNow })
+          meta.push({ postId, communityId, sourcePostId: p.circleId, kind: 'post', parentSourceId: null, commentsCount: count, fetched: fetchedNow })
         }
         await savePostMeta(ctx.sql, meta)
       }
@@ -318,7 +347,12 @@ export async function runScrape(ctx: StageContext, opts: { communityId?: number 
   const targets = await scrapeTargets(sql, { includePublic: settings.scrape.includePublic, communityId: opts.communityId })
   if (!targets.length) return { summary: 'нечего читать: нет сохранённых сессий и публичных ICP-сообществ', counts }
   const budget = { remaining: settings.scrape.maxRequestsPerRun }
-  ctx.log('info', `Читаю посты: ${targets.length} сообществ, лимит запросов на прогон ${budget.remaining}`)
+  // A per-community share keeps one huge community (Silicon Slopes: 265
+  // spaces) from using every run; its history resumes on the next pass. A
+  // community picked by hand gets the whole run.
+  const perCommunity =
+    !opts.communityId && settings.scrape.maxRequestsPerCommunity > 0 ? settings.scrape.maxRequestsPerCommunity : budget.remaining
+  ctx.log('info', `Читаю посты: ${targets.length} сообществ в очереди, запросов на прогон ${budget.remaining}, на одно сообщество до ${perCommunity}`)
 
   for (let i = 0; i < targets.length; i++) {
     const target = targets[i]!
@@ -336,7 +370,8 @@ export async function runScrape(ctx: StageContext, opts: { communityId?: number 
     }
     const communityId = target.communityId ?? (await communityForHost(sql, target.host, target.name))
     if (target.kind === 'session') await linkConnection(sql, target.host, communityId)
-    const reader = new CircleReader(target.host, { cookies, budget, signal: ctx.signal })
+    const share = { remaining: Math.min(budget.remaining, perCommunity) }
+    const reader = new CircleReader(target.host, { cookies, budget: share, signal: ctx.signal })
     const totals: CommunityTotals = { spaces: 0, readable: 0, newPosts: 0, seenPosts: 0, comments: 0, complete: true }
     const addPartial = (): void => {
       counts.newPosts += totals.newPosts
@@ -359,14 +394,21 @@ export async function runScrape(ctx: StageContext, opts: { communityId?: number 
       if (err instanceof BudgetExhaustedError || err instanceof RateLimitedError) {
         addPartial()
         counts.partial = (counts.partial ?? 0) + 1
-        const why = err instanceof RateLimitedError ? err.message : 'лимит запросов прогона исчерпан'
+        const runLeft = budget.remaining - reader.requests
+        const why =
+          err instanceof RateLimitedError
+            ? err.message
+            : runLeft > 0
+              ? `доля запросов на сообщество (${perCommunity}) исчерпана`
+              : 'лимит запросов прогона исчерпан'
         await markScraped(sql, communityId, { state: 'partial', detail: why, newPosts: totals.newPosts, synced: false })
         if (err instanceof RateLimitedError) {
           counts.rateLimited = 1
           ctx.log('warn', `${target.host}: ${why}. Чтение остановлено, продолжу после паузы`)
-        } else {
-          ctx.log('info', `Лимит запросов на прогон исчерпан на ${target.host} (новых постов ${totals.newPosts}); продолжу в следующий раз`)
+          break
         }
+        ctx.log('info', `${target.name || target.host}: ${why}, новых постов ${totals.newPosts}, комментариев ${totals.comments}; дочитаю в следующий прогон`)
+        if (runLeft > 0) continue
         break
       }
       if (err instanceof SessionInvalidError) {
@@ -391,6 +433,7 @@ export async function runScrape(ctx: StageContext, opts: { communityId?: number 
       await markScraped(sql, communityId, { state: 'error', detail: message, newPosts: 0, synced: false })
       ctx.log('error', `${target.host}: ${message.slice(0, 300)}`)
     } finally {
+      budget.remaining -= reader.requests
       counts.requests += reader.requests
     }
   }

@@ -18,24 +18,58 @@ export interface JoinCandidate {
 const JOIN_TYPES_FREE = ['free_join']
 const JOIN_TYPES_ALL = ['free_join', 'paid']
 
+export interface JoinQueueOptions {
+  includePaid: boolean
+  /** Only communities whose ICP verdict came from the LLM or a human. */
+  approvedOnly: boolean
+}
+
 /**
- * The join queue: ICP-fit, proven Circle, joinable, never attempted. Hosts
- * that needed a human before sort last (fewest handoffs first), so one stuck
- * host cannot block the queue run after run (joiner.py _handoff_counts).
- * `paid` stays in when enabled: the bot never pays, it records paid_skip on the
- * checkout page, and "From $X" listings sometimes still have a free tier.
+ * A stored member session means we are in already, whatever join_status says:
+ * sessions captured by hand never touched it (Silicon Slopes, ENG on 2026-09-18).
+ * Expects `c` = public.communities and `s` = warmr_app.community_state.
  */
-export async function joinCandidates(sql: Sql, opts: { limit: number; includePaid: boolean; communityId?: number }): Promise<JoinCandidate[]> {
+export function hasSessionSql(sql: Sql) {
+  return sql`exists (
+    select 1 from public.circle_connections cc where cc.community_id = c.id
+    union all
+    select 1 from public.replay_sessions rs
+    where rs.host in (s.probe_host, lower(split_part(split_part(split_part(c.url, '://', 2), '/', 1), '?', 1)))
+  )`
+}
+
+/** The one definition of the join queue (stage, scheduler and UI all use it). */
+export function joinQueueSql(sql: Sql, opts: JoinQueueOptions) {
   const types = opts.includePaid ? JOIN_TYPES_ALL : JOIN_TYPES_FREE
+  return sql`c.icp_flag and c.join_type in ${sql(types)} and c.platform = 'circle'
+    and coalesce(c.join_status, 'not_attempted') = 'not_attempted'
+    and coalesce(s.exists_status, 'alive') <> 'not_circle'
+    and ${opts.approvedOnly ? sql`coalesce(c.icp_decided_by, '') in ('llm', 'human')` : sql`true`}
+    and not ${hasSessionSql(sql)}`
+}
+
+/**
+ * The join queue: ICP-fit, proven Circle, joinable, never attempted, not a
+ * member yet. Hosts that needed a human before sort last (fewest handoffs
+ * first), so one stuck host cannot block the queue run after run (joiner.py
+ * _handoff_counts). `paid` stays in when enabled: the bot never pays, it
+ * records paid_skip on the checkout page, and "From $X" listings sometimes
+ * still have a free tier. A single community picked by hand skips the ICP
+ * and approval checks, but never joins twice.
+ */
+export async function joinCandidates(sql: Sql, opts: JoinQueueOptions & { limit: number; communityId?: number }): Promise<JoinCandidate[]> {
   const rows = await sql`
     select c.id, c.slug, c.url, c.name, c.join_type, c.icp_score,
       (select count(*) from warmr_app.join_attempts a where a.community_id = c.id and not a.terminal) as handoffs
     from public.communities c
     left join warmr_app.community_state s on s.community_id = c.id
-    where ${opts.communityId ? sql`c.id = ${opts.communityId}` : sql`c.icp_flag and c.join_type in ${sql(types)}`}
-      and c.platform = 'circle'
-      and coalesce(c.join_status, 'not_attempted') = 'not_attempted'
-      and coalesce(s.exists_status, 'alive') <> 'not_circle'
+    where ${
+      opts.communityId
+        ? sql`c.id = ${opts.communityId} and c.platform = 'circle'
+            and coalesce(c.join_status, 'not_attempted') = 'not_attempted'
+            and coalesce(s.exists_status, 'alive') <> 'not_circle' and not ${hasSessionSql(sql)}`
+        : joinQueueSql(sql, opts)
+    }
     order by handoffs asc, c.icp_score desc nulls last, c.id
     limit ${opts.limit}`
   return rows.map((r) => ({
@@ -49,14 +83,11 @@ export async function joinCandidates(sql: Sql, opts: { limit: number; includePai
   }))
 }
 
-export async function joinQueueSize(sql: Sql, includePaid: boolean): Promise<number> {
-  const types = includePaid ? JOIN_TYPES_ALL : JOIN_TYPES_FREE
+export async function joinQueueSize(sql: Sql, opts: JoinQueueOptions): Promise<number> {
   const rows = await sql<{ n: string }[]>`
     select count(*) as n from public.communities c
     left join warmr_app.community_state s on s.community_id = c.id
-    where c.icp_flag and c.join_type in ${sql(types)} and c.platform = 'circle'
-      and coalesce(c.join_status, 'not_attempted') = 'not_attempted'
-      and coalesce(s.exists_status, 'alive') <> 'not_circle'`
+    where ${joinQueueSql(sql, opts)}`
   return Number(rows[0]?.n ?? 0)
 }
 
@@ -447,22 +478,41 @@ export async function commentsFetched(sql: Sql, postIds: number[]): Promise<Map<
   return out
 }
 
-export async function savePostMeta(
-  sql: Sql,
-  rows: Array<{ postId: number; communityId: number; sourcePostId: string; commentsCount: number | null; fetched: number | null }>
-): Promise<void> {
-  if (!rows.length) return
-  const values = rows.map((r) => ({
+export interface PostMetaInput {
+  postId: number
+  communityId: number
+  /** Circle's id of the post or comment. */
+  sourcePostId: string
+  kind: 'post' | 'comment'
+  /** For a comment: Circle's id of the post it belongs to. */
+  parentSourceId: string | null
+  commentsCount: number | null
+  fetched: number | null
+}
+
+export async function savePostMeta(sql: Sql, rows: PostMetaInput[]): Promise<void> {
+  // Two identical comments share one posts row: keep one meta row per post_id.
+  const unique = new Map(rows.map((r) => [r.postId, r]))
+  if (!unique.size) return
+  const values = [...unique.values()].map((r) => ({
     post_id: r.postId,
     community_id: r.communityId,
     source_post_id: r.sourcePostId,
+    kind: r.kind,
+    parent_source_id: r.parentSourceId,
     comments_count: r.commentsCount,
     comments_fetched_count: r.fetched,
     comments_fetched_at: r.fetched == null ? null : new Date()
   }))
   await sql`
-    insert into warmr_app.post_meta ${sql(values, 'post_id', 'community_id', 'source_post_id', 'comments_count', 'comments_fetched_count', 'comments_fetched_at')}
+    insert into warmr_app.post_meta ${sql(
+      values,
+      'post_id', 'community_id', 'source_post_id', 'kind', 'parent_source_id', 'comments_count', 'comments_fetched_count', 'comments_fetched_at'
+    )}
     on conflict (post_id) do update set
+      source_post_id = excluded.source_post_id,
+      kind = excluded.kind,
+      parent_source_id = excluded.parent_source_id,
       comments_count = excluded.comments_count,
       comments_fetched_count = coalesce(excluded.comments_fetched_count, warmr_app.post_meta.comments_fetched_count),
       comments_fetched_at = coalesce(excluded.comments_fetched_at, warmr_app.post_meta.comments_fetched_at)`

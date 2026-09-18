@@ -160,6 +160,16 @@ create table if not exists warmr_app.llm_calls (
 );
 create index if not exists llm_calls_created_idx on warmr_app.llm_calls (created_at);
 `
+  },
+  {
+    // Posts and comments are stored under Python's content key with
+    // content_type 'post' (no duplicate rows next to the old worker), so what
+    // an item is and where it hangs lives here, next to Circle's own id.
+    version: '2026-09-18_002_post_meta_kind',
+    sql: `
+alter table warmr_app.post_meta add column if not exists kind text;
+alter table warmr_app.post_meta add column if not exists parent_source_id text;
+`
   }
 ]
 

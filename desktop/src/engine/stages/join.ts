@@ -62,8 +62,21 @@ export async function runJoin(ctx: StageContext, opts: { communityId?: number } 
     return { summary: `дневной лимит уже исчерпан (${used}/${cap})`, counts: { visitsToday: used } }
   }
   const limit = opts.communityId ? 1 : Math.min(settings.join.batchSize, cap - used)
-  const candidates = await joinCandidates(sql, { limit, includePaid: settings.join.includePaid, communityId: opts.communityId })
-  if (!candidates.length) return { summary: 'очередь на вступление пуста', counts }
+  const candidates = await joinCandidates(sql, {
+    limit,
+    includePaid: settings.join.includePaid,
+    approvedOnly: settings.join.approvedOnly,
+    communityId: opts.communityId
+  })
+  if (!candidates.length) {
+    if (opts.communityId) return { summary: 'уже состоим в этом сообществе или вступление уже пробовали', counts }
+    return {
+      summary: settings.join.approvedOnly
+        ? 'очередь пуста: нет сообществ, одобренных LLM или вами'
+        : 'очередь на вступление пуста',
+      counts
+    }
+  }
 
   const email = ctx.secrets.circleEmail || null
   const password = ctx.secrets.circlePassword || null

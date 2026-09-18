@@ -14,6 +14,7 @@ import type { LocalSettings, SecretName, SecretsStatus } from '../shared/types'
 
 export interface Secrets {
   dbUrl?: string
+  openrouterKey?: string
   openaiKey?: string
   anthropicKey?: string
   circleEmail?: string
@@ -27,7 +28,7 @@ interface ConfigFile {
   secretsEncoding: 'safeStorage' | 'plain' | null
 }
 
-const SECRET_NAMES: SecretName[] = ['dbUrl', 'openaiKey', 'anthropicKey', 'circleEmail', 'circlePassword']
+const SECRET_NAMES: SecretName[] = ['dbUrl', 'openrouterKey', 'openaiKey', 'anthropicKey', 'circleEmail', 'circlePassword']
 
 export class Store {
   private readonly path: string
@@ -135,6 +136,7 @@ export class Store {
     const s = await this.getSecrets()
     return {
       dbUrl: Boolean(s.dbUrl),
+      openrouterKey: Boolean(s.openrouterKey),
       openaiKey: Boolean(s.openaiKey),
       anthropicKey: Boolean(s.anthropicKey),
       circleEmail: Boolean(s.circleEmail),
@@ -155,6 +157,7 @@ export function secretsFromEnv(text: string): Partial<Secrets> {
   }
   const out: Partial<Secrets> = {}
   if (env.CIRCLE_LEADS_DB) out.dbUrl = env.CIRCLE_LEADS_DB
+  if (env.OPENROUTER_API_KEY) out.openrouterKey = env.OPENROUTER_API_KEY
   if (env.OPENAI_API_KEY) out.openaiKey = env.OPENAI_API_KEY
   if (env.ANTHROPIC_API_KEY) out.anthropicKey = env.ANTHROPIC_API_KEY
   if (env.CIRCLE_EMAIL) out.circleEmail = env.CIRCLE_EMAIL

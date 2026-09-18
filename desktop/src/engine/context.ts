@@ -2,6 +2,7 @@ import type { Sql } from './db/client'
 import type { LocalSettings, LogLevel, SharedSettings } from '../shared/types'
 
 export interface EngineSecrets {
+  openrouterKey?: string
   openaiKey?: string
   anthropicKey?: string
   circleEmail?: string

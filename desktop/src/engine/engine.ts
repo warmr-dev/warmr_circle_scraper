@@ -33,6 +33,7 @@ import { completeJson } from './llm/client'
 import { z } from 'zod'
 import { AbortedError, errorMessage } from './util'
 import { circleGovernor } from './circle/governor'
+import { PROVIDER_LABEL } from '../shared/models'
 import {
   STAGES,
   type ActionResult,
@@ -371,6 +372,10 @@ export class Engine extends EventEmitter {
     return s.join.everyHours * 60
   }
 
+  private joinQueueOptions(): { includePaid: boolean; approvedOnly: boolean } {
+    return { includePaid: this.shared.join.includePaid, approvedOnly: this.shared.join.approvedOnly }
+  }
+
   private stageEnabled(stage: StageName): boolean {
     return this.shared[stage].enabled
   }
@@ -413,7 +418,7 @@ export class Engine extends EventEmitter {
         if (stage === 'join') {
           const used = await visitsToday(this.sql, JOIN_ACCOUNT)
           if (used >= this.shared.join.maxVisitsPerDay) continue
-          if ((await joinQueueSize(this.sql, this.shared.join.includePaid)) === 0) continue
+          if ((await joinQueueSize(this.sql, this.joinQueueOptions())) === 0) continue
         }
         const lastRun = last.get(stage)
         const lastAt = lastRun ? new Date(lastRun.finishedAt || lastRun.startedAt).getTime() : 0
@@ -489,7 +494,7 @@ export class Engine extends EventEmitter {
     }
     if (!secrets.dbUrl) warnings.push('Укажите строку подключения к базе Supabase в Настройках.')
     if (this.shared.icp.useLlm && !llm) {
-      warnings.push(`Нет API-ключа ${this.shared.llm.provider === 'anthropic' ? 'Anthropic' : 'OpenAI'}: оценка ICP идёт только по правилам.`)
+      warnings.push(`Нет API-ключа ${PROVIDER_LABEL[this.shared.llm.provider]}: оценка ICP идёт только по правилам.`)
     }
     if (this.shared.join.enabled && !secrets.circleEmail) {
       warnings.push('Для автоджойна на новых доменах нужен логин и пароль Circle (Настройки → Аккаунт Circle).')
@@ -575,7 +580,7 @@ export class Engine extends EventEmitter {
 
   async funnel(): Promise<Funnel> {
     return views.funnel(this.requireSql(), {
-      includePaid: this.shared.join.includePaid,
+      ...this.joinQueueOptions(),
       account: JOIN_ACCOUNT,
       visitCap: this.shared.join.maxVisitsPerDay
     })
@@ -590,7 +595,7 @@ export class Engine extends EventEmitter {
   }
 
   listJoinQueue(limit = 50) {
-    return views.joinQueue(this.requireSql(), { limit, includePaid: this.shared.join.includePaid })
+    return views.joinQueue(this.requireSql(), { limit, ...this.joinQueueOptions() })
   }
 
   listJoinAttempts(limit = 100) {

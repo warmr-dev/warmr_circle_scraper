@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { completeJson, type LlmConfig, type LlmUsage } from '../llm/client'
+import { completeJson, LlmUnavailableError, type LlmConfig, type LlmUsage } from '../llm/client'
 import { assessRules, hasText, ICP_CONFIDENT_NO, ICP_CONFIDENT_YES, NO_METADATA_REASON, type IcpInput } from './rules'
 
 export const ICP_VERSION = 'desktop-icp-v1'
@@ -85,6 +85,8 @@ export interface IcpDecision {
   ruleScore: number
   llm: (IcpVerdict & { model: string; usage: LlmUsage }) | null
   llmError: string | null
+  /** The LLM was out of reach (not this community's fault): judge it again later. */
+  llmRetryable: boolean
   skippedLlm: 'no_text' | 'rules_decisive' | 'disabled' | 'budget' | null
 }
 
@@ -115,11 +117,17 @@ export async function decideIcp(
       ruleScore: 0,
       llm: null,
       llmError: null,
+      llmRetryable: false,
       skippedLlm: 'no_text'
     }
   }
   const rules = assessRules(input)
-  const rulesDecision = (skip: IcpDecision['skippedLlm'], extraReason?: string, llmError: string | null = null): IcpDecision => ({
+  const rulesDecision = (
+    skip: IcpDecision['skippedLlm'],
+    extraReason?: string,
+    llmError: string | null = null,
+    llmRetryable = false
+  ): IcpDecision => ({
     score: clamp(rules.score, 0, 100),
     flag: rules.score >= ICP_CONFIDENT_YES,
     reasons: extraReason ? [...rules.reasons, extraReason] : rules.reasons,
@@ -127,6 +135,7 @@ export async function decideIcp(
     ruleScore: rules.score,
     llm: null,
     llmError,
+    llmRetryable,
     skippedLlm: skip
   })
 
@@ -163,11 +172,12 @@ export async function decideIcp(
       ruleScore: rules.score,
       llm: { ...verdict, model: result.model, usage: result.usage },
       llmError: null,
+      llmRetryable: false,
       skippedLlm: null
     }
   } catch (err) {
     if (opts.signal?.aborted) throw err
     const message = err instanceof Error ? err.message : String(err)
-    return rulesDecision(null, 'llm_error', message.slice(0, 300))
+    return rulesDecision(null, 'llm_error', message.slice(0, 300), err instanceof LlmUnavailableError)
   }
 }

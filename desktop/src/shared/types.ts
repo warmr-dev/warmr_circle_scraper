@@ -185,7 +185,7 @@ export interface PostFilter {
   limit?: number
 }
 
-export type LlmProvider = 'openai' | 'anthropic'
+export type LlmProvider = 'openrouter' | 'openai' | 'anthropic'
 
 export interface SharedSettings {
   autopilot: boolean
@@ -223,11 +223,15 @@ export interface SharedSettings {
     jitterSec: number
     batchSize: number
     includePaid: boolean
+    /** Scheduled joins only take communities the LLM or a human approved. */
+    approvedOnly: boolean
   }
   scrape: {
     enabled: boolean
     everyHours: number
     maxRequestsPerRun: number
+    /** One big community must not use a whole run: the rest wait otherwise. */
+    maxRequestsPerCommunity: number
     includePublic: boolean
     maxPostAgeDays: number
     withComments: boolean
@@ -249,6 +253,7 @@ export interface LocalSettings {
 
 export interface SecretsStatus {
   dbUrl: boolean
+  openrouterKey: boolean
   openaiKey: boolean
   anthropicKey: boolean
   circleEmail: boolean

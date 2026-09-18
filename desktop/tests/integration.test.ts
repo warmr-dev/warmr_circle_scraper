@@ -129,7 +129,7 @@ d('integration (disposable DB, live Circle)', () => {
   })
 
   it('UI queries run on real shapes', async () => {
-    const f = await views.funnel(sql, { includePaid: true, account: 'main', visitCap: 25 })
+    const f = await views.funnel(sql, { includePaid: true, approvedOnly: true, account: 'main', visitCap: 25 })
     expect(f.total).toBeGreaterThan(100)
     const list = await views.listCommunities(sql, { icp: 'all', sort: 'icp', limit: 20 })
     expect(list.rows.length).toBeGreaterThan(0)
@@ -140,7 +140,8 @@ d('integration (disposable DB, live Circle)', () => {
     const p = await views.posts(sql, { limit: 5 })
     expect(p.total).toBeGreaterThanOrEqual(0)
     expect(await views.tasks(sql, 'open')).toBeInstanceOf(Array)
-    expect(await joinCandidates(sql, { limit: 5, includePaid: true })).toBeInstanceOf(Array)
+    expect(await joinCandidates(sql, { limit: 5, includePaid: true, approvedOnly: false })).toBeInstanceOf(Array)
+    expect(await views.joinQueue(sql, { limit: 5, includePaid: true, approvedOnly: true })).toBeInstanceOf(Array)
     expect(await visitsToday(sql, 'main')).toBe(0)
     expect((await readOldWorkerSchedules(sql)).harvest_schedule).toBeDefined()
   })

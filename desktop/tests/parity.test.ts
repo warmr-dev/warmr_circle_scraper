@@ -4,6 +4,7 @@ import { contentHash, simhash, stripHtml, redactPii, tiptapText } from '@engine/
 import { communitySlugForHost, uniqueSlugForHost } from '@engine/discovery/hosts'
 import { classifyPayload, priceLabelFallback } from '@engine/circle/probe'
 import { assessRules } from '@engine/icp/rules'
+import { normalizeComment, normalizePost } from '@engine/stages/scrape'
 
 // Every expected value here was produced by the Python app's own functions
 // (tests/fixtures_python.json, generated from circle_leads). Both apps write
@@ -50,6 +51,27 @@ describe('parity with the Python app', () => {
       const got = priceLabelFallback(row.in as string | null)
       expect(got ? { join_type: got.joinType, detail: got.detail } : null).toEqual(row.out)
     }
+  })
+
+  it('posts and comments get the same stored key and text as the old worker', () => {
+    // scripts/gen_stored_key_fixture.py: Python's fetch_space_posts + triage_records.
+    const { input, expected } = fixtures.stored_keys
+    const space = { id: '1', name: 'Feed', slug: 'feed', type: 'basic', postsCount: null, isPrivate: null }
+    const base = 'https://x.circle.so'
+    const got: Array<{ circle_id: string; key: string; content: string; dedup_hash: string }> = []
+    for (const record of input.posts) {
+      const post = normalizePost(record, space, base, 'member_session')
+      if (post && post.content.trim()) got.push({ circle_id: post.circleId, key: post.sourceContentId, content: post.content, dedup_hash: post.dedupHash })
+      for (const comment of (input.comments as Record<string, Array<Record<string, unknown>>>)[String(record.id)] ?? []) {
+        const c = normalizeComment(comment, String(record.id), base, 'member_session', null)
+        if (c) got.push({ circle_id: c.circleId, key: c.sourceContentId, content: c.content, dedup_hash: c.dedupHash })
+        for (const reply of (input.replies as Record<string, Array<Record<string, unknown>>>)[String(comment.id)] ?? []) {
+          const r = normalizeComment(reply, String(record.id), base, 'member_session', null)
+          if (r) got.push({ circle_id: r.circleId, key: r.sourceContentId, content: r.content, dedup_hash: r.dedupHash })
+        }
+      }
+    }
+    expect(got).toEqual(expected.map((e) => ({ circle_id: e.circle_id, key: e.key, content: e.content, dedup_hash: e.dedup_hash })))
   })
 
   it('ICP rule scores match for single-goal inputs', () => {

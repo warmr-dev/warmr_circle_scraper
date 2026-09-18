@@ -1,4 +1,4 @@
-import { BrowserWindow } from 'electron'
+import { app, BrowserWindow } from 'electron'
 import type { BrowserHost } from '../engine/context'
 import { sleep } from '../engine/util'
 
@@ -18,6 +18,13 @@ const CHALLENGE_PROBE = `(() => {
 export class ElectronBrowserHost implements BrowserHost {
   private win: BrowserWindow | null = null
   private queue: Promise<unknown> = Promise.resolve()
+  private quitting = false
+
+  constructor() {
+    app.on('before-quit', () => {
+      this.quitting = true
+    })
+  }
 
   private window(): BrowserWindow {
     if (this.win && !this.win.isDestroyed()) return this.win
@@ -29,7 +36,9 @@ export class ElectronBrowserHost implements BrowserHost {
       webPreferences: { partition: PARTITION, contextIsolation: true, sandbox: true, nodeIntegration: false }
     })
     this.win.on('close', (e) => {
-      // Hide instead of destroying so the challenge cookie survives the session.
+      // Hide instead of destroying so the checked page stays loaded. Not while
+      // the app quits: a prevented close cancels the quit (seen 2026-09-18).
+      if (this.quitting) return
       if (this.win && !this.win.isDestroyed()) {
         e.preventDefault()
         this.win.hide()

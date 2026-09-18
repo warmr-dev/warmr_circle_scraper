@@ -9,7 +9,7 @@ import type {
   PostRow,
   TaskRow
 } from '../../shared/types'
-import { joinQueueSize, llmSpendToday, visitsToday } from './content'
+import { hasSessionSql, joinQueueSize, joinQueueSql, llmSpendToday, visitsToday, type JoinQueueOptions } from './content'
 
 const NOW = "(now() at time zone 'utc')"
 
@@ -19,7 +19,7 @@ function iso(value: unknown): string | null {
   return Number.isNaN(date.getTime()) ? null : date.toISOString()
 }
 
-export async function funnel(sql: Sql, opts: { includePaid: boolean; account: string; visitCap: number }): Promise<Funnel> {
+export async function funnel(sql: Sql, opts: JoinQueueOptions & { account: string; visitCap: number }): Promise<Funnel> {
   const [c] = await sql`
     select
       count(*) as total,
@@ -57,7 +57,7 @@ export async function funnel(sql: Sql, opts: { includePaid: boolean; account: st
     withText: n(c!.with_text),
     icpJudged: n(c!.icp_judged),
     icpFit: n(c!.icp_fit),
-    joinable: await joinQueueSize(sql, opts.includePaid),
+    joinable: await joinQueueSize(sql, { includePaid: opts.includePaid, approvedOnly: opts.approvedOnly }),
     joined: n(c!.joined),
     withSession: n(extra!.sessions),
     scrapedCommunities: n(c!.scraped),
@@ -73,8 +73,7 @@ export async function funnel(sql: Sql, opts: { includePaid: boolean; account: st
 const ROW_SELECT = (sql: Sql) => sql`
   c.id, c.slug, c.url, c.name, c.platform, c.join_type, c.icp_score, c.icp_flag, c.icp_decided_by, c.join_status,
   s.exists_status, s.spaces_public, s.members_total, s.posts_stored, s.probed_at, s.last_scraped_at,
-  exists (select 1 from public.replay_sessions rs
-          where rs.host = s.probe_host or 'https://' || rs.host = rtrim(c.url, '/')) as has_session`
+  ${hasSessionSql(sql)} as has_session`
 
 function toRow(r: Record<string, unknown>): CommunityRow {
   return {
@@ -113,7 +112,7 @@ export async function listCommunities(sql: Sql, f: CommunityFilter): Promise<{ r
   if (f.joinStatus) conditions.push(sql`coalesce(c.join_status, 'not_attempted') = ${f.joinStatus}`)
   if (f.joinType) conditions.push(sql`c.join_type = ${f.joinType}`)
   if (f.hasSession) {
-    conditions.push(sql`exists (select 1 from public.replay_sessions rs where rs.host = s.probe_host or 'https://' || rs.host = rtrim(c.url, '/'))`)
+    conditions.push(hasSessionSql(sql))
   }
   const where = conditions.length
     ? conditions.reduce((acc, cond, i) => (i === 0 ? sql`where ${cond}` : sql`${acc} and ${cond}`), sql``)
@@ -169,15 +168,12 @@ export async function communityDetail(sql: Sql, id: number): Promise<CommunityDe
   }
 }
 
-export async function joinQueue(sql: Sql, opts: { limit: number; includePaid: boolean }): Promise<CommunityRow[]> {
-  const types = opts.includePaid ? ['free_join', 'paid'] : ['free_join']
+export async function joinQueue(sql: Sql, opts: JoinQueueOptions & { limit: number }): Promise<CommunityRow[]> {
   const rows = await sql`
     select ${ROW_SELECT(sql)},
       (select count(*) from warmr_app.join_attempts a where a.community_id = c.id and not a.terminal) as handoffs
     from public.communities c left join warmr_app.community_state s on s.community_id = c.id
-    where c.icp_flag and c.join_type in ${sql(types)} and c.platform = 'circle'
-      and coalesce(c.join_status, 'not_attempted') = 'not_attempted'
-      and coalesce(s.exists_status, 'alive') <> 'not_circle'
+    where ${joinQueueSql(sql, opts)}
     order by handoffs asc, c.icp_score desc nulls last, c.id
     limit ${opts.limit}`
   return rows.map(toRow)
@@ -232,10 +228,12 @@ export async function posts(sql: Sql, f: PostFilter): Promise<{ rows: PostRow[];
     : sql``
   const limit = Math.min(Math.max(f.limit ?? 50, 1), 200)
   const rows = await sql`
-    select p.id, p.community_id, c.name as community_name, c.url as community_url, p.content_type, p.title, p.content, p.url,
+    select p.id, p.community_id, c.name as community_name, c.url as community_url,
+      coalesce(pm.kind, p.content_type) as content_type, p.title, p.content, p.url,
       p.published_at, a.display_name, sp.name as space_name
     from public.posts p
     join public.communities c on c.id = p.community_id
+    left join warmr_app.post_meta pm on pm.post_id = p.id
     left join public.authors a on a.id = p.author_id
     left join public.spaces sp on sp.id = p.space_id
     ${where}

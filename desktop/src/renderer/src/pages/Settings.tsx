@@ -144,11 +144,21 @@ export function Settings({ onChanged, dbConnected }: { onChanged: () => void; db
                       patch('llm', { provider: next, model: DEFAULT_MODEL[next] })
                     }}
                   >
+                    <option value="openrouter">OpenRouter (один ключ на все модели)</option>
                     <option value="openai">OpenAI</option>
                     <option value="anthropic">Anthropic (Claude)</option>
                   </Select>
                 </Field>
-                <Field label="Модель" hint={provider === 'anthropic' ? 'По умолчанию Opus 5; дешевле — Sonnet 5 или Haiku 4.5. Решать вам.' : undefined}>
+                <Field
+                  label="Модель"
+                  hint={
+                    provider === 'openrouter'
+                      ? 'Цена за 1M токенов (вход / выход). Бюджет $3 в день ≈ 1000 сообществ на Sonnet 5.'
+                      : provider === 'anthropic'
+                        ? 'По умолчанию Opus 5; дешевле — Sonnet 5 или Haiku 4.5. Решать вам.'
+                        : undefined
+                  }
+                >
                   <Select value={customModel ? '__custom' : draft.llm.model} onChange={(e) => patch('llm', { model: e.target.value === '__custom' ? '' : e.target.value })}>
                     {models.map((m) => (
                       <option key={m.id} value={m.id}>
@@ -161,10 +171,16 @@ export function Settings({ onChanged, dbConnected }: { onChanged: () => void; db
               </div>
               {customModel && (
                 <Field label="ID модели">
-                  <Input value={draft.llm.model} onChange={(e) => patch('llm', { model: e.target.value })} placeholder="например gpt-4.1-nano" />
+                  <Input
+                    value={draft.llm.model}
+                    onChange={(e) => patch('llm', { model: e.target.value })}
+                    placeholder={provider === 'openrouter' ? 'например deepseek/deepseek-v4-flash (id с openrouter.ai/models)' : 'например gpt-4.1-nano'}
+                  />
                 </Field>
               )}
-              {provider === 'openai' ? (
+              {provider === 'openrouter' ? (
+                <SecretInput name="openrouterKey" label="Ключ OpenRouter (OPENROUTER_API_KEY)" set={s.openrouterKey} placeholder="sk-or-…" onSaved={savedBundle} />
+              ) : provider === 'openai' ? (
                 <SecretInput name="openaiKey" label="Ключ OpenAI" set={s.openaiKey} placeholder="sk-…" onSaved={savedBundle} />
               ) : (
                 <SecretInput name="anthropicKey" label="Ключ Anthropic" set={s.anthropicKey} placeholder="sk-ant-…" onSaved={savedBundle} />
@@ -264,12 +280,14 @@ export function Settings({ onChanged, dbConnected }: { onChanged: () => void; db
                   <NumberField label="+ случайно до, сек" value={draft.join.jitterSec} onChange={(v) => patch('join', { jitterSec: v })} />
                 </div>
                 <Toggle checked={draft.join.includePaid} onChange={(v) => patch('join', { includePaid: v })} label="Пробовать и «платные»: у части есть бесплатный уровень, на оплате бот останавливается" />
+                <Toggle checked={draft.join.approvedOnly} onChange={(v) => patch('join', { approvedOnly: v })} label="Сам вступать только туда, где «подходит» решил LLM или вы (по одним ключевым словам в очередь попадает мусор)" />
               </div>
               <div className="grid gap-3">
                 <Toggle checked={draft.scrape.enabled} onChange={(v) => patch('scrape', { enabled: v })} label={<b>Чтение постов</b>} />
                 <div className="grid grid-cols-3 gap-4">
                   <NumberField label="Раз в N часов" value={draft.scrape.everyHours} onChange={(v) => patch('scrape', { everyHours: v })} />
                   <NumberField label="Запросов за прогон" value={draft.scrape.maxRequestsPerRun} onChange={(v) => patch('scrape', { maxRequestsPerRun: v })} />
+                  <NumberField label="На одно сообщество за прогон" value={draft.scrape.maxRequestsPerCommunity} onChange={(v) => patch('scrape', { maxRequestsPerCommunity: v })} hint="большое сообщество дочитается за несколько прогонов" />
                   <NumberField label="Не старше, дней (0 — все)" value={draft.scrape.maxPostAgeDays} onChange={(v) => patch('scrape', { maxPostAgeDays: v })} />
                 </div>
                 <Toggle checked={draft.scrape.withComments} onChange={(v) => patch('scrape', { withComments: v })} label="Читать комментарии и ответы" />

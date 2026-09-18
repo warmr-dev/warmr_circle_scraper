@@ -4,15 +4,21 @@ import { fetchPublicSpaces, priceLabelFallback, probeHost } from '../circle/prob
 import { icpCandidates, probeCandidates, saveIcp, saveProbe, logActivity, type ProbeCandidate } from '../db/repo'
 import { llmSpendToday, recordLlmCall } from '../db/content'
 import { decideIcp, ICP_VERSION } from '../icp/classify'
+import { hasText } from '../icp/rules'
 import type { LlmConfig } from '../llm/client'
 import { hostFromUrl, mapPool, throwIfAborted } from '../util'
 import { RateLimitedError } from '../circle/governor'
-import type { SharedSettings } from '../../shared/types'
+import type { LlmProvider, SharedSettings } from '../../shared/types'
 import type { EngineSecrets } from '../context'
 
 export function llmConfigFrom(settings: SharedSettings, secrets: EngineSecrets): LlmConfig | null {
   if (!settings.icp.useLlm) return null
-  const apiKey = settings.llm.provider === 'anthropic' ? secrets.anthropicKey : secrets.openaiKey
+  const keys: Record<LlmProvider, string | undefined> = {
+    openrouter: secrets.openrouterKey,
+    openai: secrets.openaiKey,
+    anthropic: secrets.anthropicKey
+  }
+  const apiKey = keys[settings.llm.provider]
   if (!apiKey) return null
   return { provider: settings.llm.provider, model: settings.llm.model, apiKey }
 }
@@ -92,36 +98,68 @@ export async function runVerify(ctx: StageContext, opts: { communityIds?: number
   throwIfAborted(ctx.signal)
   const llm = llmConfigFrom(settings, ctx.secrets)
   const version = icpVersionFor(settings, llm)
+  let spent = await llmSpendToday(sql)
+  // Out of budget: a row judged now would keep a rules-only verdict for good
+  // (and never reach the join queue), so rows with text wait for tomorrow.
+  const budgetOut = Boolean(llm) && spent >= settings.llm.dailyBudgetUsd
   const judged = await icpCandidates(sql, {
     limit: opts.communityIds?.length ? opts.communityIds.length : settings.icp.batchSize,
     version,
     withLlm: Boolean(llm),
-    ids: opts.communityIds
+    ids: opts.communityIds,
+    textlessOnly: budgetOut && !opts.communityIds?.length
   })
+  if (budgetOut) ctx.log('info', `Дневной бюджет LLM ($${settings.llm.dailyBudgetUsd}) исчерпан: сообщества с текстом оценю завтра`)
   if (judged.length) {
     ctx.log('info', `Оцениваю соответствие ICP: ${judged.length} сообществ${llm ? ` (LLM ${llm.model})` : ' (только правила)'}`)
   }
-  let spent = await llmSpendToday(sql)
   let icpDone = 0
+  let llmDown = false
+  let unavailable = 0
   await mapPool(
     judged,
     llm ? 3 : 1,
     async (c) => {
-      const decision = await decideIcp(
-        {
-          name: c.name,
-          description: c.description,
-          spaceNames: c.spaceNames,
-          goals: c.goals,
-          host: hostFromUrl(c.url),
-          priceLabel: c.priceLabel,
-          joinType: c.joinType,
-          membersTotal: c.membersTotal
-        },
-        settings.icp,
-        llm,
-        { budgetOk: spent < settings.llm.dailyBudgetUsd, signal: ctx.signal }
-      )
+      const input = {
+        name: c.name,
+        description: c.description,
+        spaceNames: c.spaceNames,
+        goals: c.goals,
+        host: hostFromUrl(c.url),
+        priceLabel: c.priceLabel,
+        joinType: c.joinType,
+        membersTotal: c.membersTotal
+      }
+      const defer = (): void => {
+        // Not this community's fault: leave it due and judge it with the LLM later.
+        counts.llmDeferred = (counts.llmDeferred ?? 0) + 1
+        icpDone++
+        ctx.progress(icpDone, judged.length, 'оценка ICP')
+      }
+      if (llm && llmDown && hasText(input)) return defer()
+      const decision = await decideIcp(input, settings.icp, llm, { budgetOk: spent < settings.llm.dailyBudgetUsd, signal: ctx.signal })
+      if (llm && decision.llmRetryable) {
+        await recordLlmCall(sql, {
+          purpose: 'icp',
+          communityId: c.id,
+          provider: llm.provider,
+          model: llm.model,
+          inputTokens: 0,
+          outputTokens: 0,
+          usd: 0,
+          ok: false,
+          error: decision.llmError
+        })
+        unavailable++
+        if (unavailable === 1) ctx.log('warn', `LLM недоступен: ${decision.llmError}`)
+        if (unavailable >= 3 && !llmDown) {
+          llmDown = true
+          ctx.log('warn', 'LLM не ответил три раза подряд: сообщества с текстом оценю в следующий запуск')
+        }
+        return defer()
+      }
+      if (llm && decision.skippedLlm === 'budget') return defer()
+      unavailable = 0
       if (decision.llm && llm) {
         spent += decision.llm.usage.usd
         counts.llmCalls = (counts.llmCalls ?? 0) + 1
@@ -151,7 +189,6 @@ export async function runVerify(ctx: StageContext, opts: { communityIds?: number
         })
         if ((counts.llmErrors ?? 0) <= 3) ctx.log('warn', `LLM не ответил для ${c.url}: ${decision.llmError}`)
       }
-      if (decision.skippedLlm === 'budget') counts.budgetSkipped = (counts.budgetSkipped ?? 0) + 1
       await saveIcp(sql, c.id, decision, version)
       counts.icpJudged = (counts.icpJudged ?? 0) + 1
       if (decision.flag) counts.icpFit = (counts.icpFit ?? 0) + 1
@@ -166,7 +203,7 @@ export async function runVerify(ctx: StageContext, opts: { communityIds?: number
     `недоступно ${counts.unreachable ?? 0}, не Circle ${counts.notCircle ?? 0}); ` +
     `ICP оценено ${counts.icpJudged ?? 0}, подходит ${counts.icpFit ?? 0}` +
     (counts.llmCalls ? `, LLM-вызовов ${counts.llmCalls}` : '') +
-    (counts.budgetSkipped ? `, без LLM из-за бюджета ${counts.budgetSkipped}` : '') +
+    (counts.llmDeferred ? `, отложено до LLM ${counts.llmDeferred}` : '') +
     (counts.rateLimited ? '; проверка приостановлена ограничением Circle' : '')
   if ((counts.probed ?? 0) + (counts.icpJudged ?? 0) > 0) {
     await logActivity(sql, { kind: 'classify', level: 'info', summary: `Desktop verify: ${summary}`, detail: counts, itemsSeen: counts.probed ?? 0 })
