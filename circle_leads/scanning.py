@@ -69,8 +69,11 @@ def scan_cookie_host(db: Database, requirements: Requirements, host: str, *,
     total = readable = spaces_total = leads = 0
     partial = False
     try:
+        # 1.2s between requests keeps a scan at <= ~50/min: Circle limits
+        # per IP (~100/min got every host 429'd), and on the Mac the worker
+        # shares that IP with enrichment and join runs.
         reader = MemberApiReader(host, cookies=cookies,
-                                 request_pause=0.2 if fast_pause else 0.7)
+                                 request_pause=0.2 if fast_pause else 1.2)
         try:
             spaces = reader.list_spaces()   # doubles as the session check
         except SessionInvalid:
