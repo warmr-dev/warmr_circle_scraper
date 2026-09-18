@@ -279,3 +279,23 @@ def test_extract_text_keeps_the_preview_when_tiptap_says_less():
               "tiptap_body": _tiptap("")}
     _, body = _extract_text(record)
     assert body == "We need a React developer for 3 months"
+
+
+def test_extract_text_keeps_mentions_and_post_links():
+    # Mentions and links to posts/events are leaf nodes without a text child;
+    # dropping them made the full text disagree with the stored preview
+    # (connect.ulule.com, 2026-09-19) and lost "#hashtag" words.
+    from circle_leads.scraper.public_reader import _extract_text
+
+    record = {"name": "t", "truncated_content": "Thanks @Jane Doe, see #Hiring board",
+              "tiptap_body": {"body": {"type": "doc", "content": [
+                  {"type": "paragraph", "content": [
+                      {"type": "text", "text": "Thanks"},
+                      {"type": "mention", "attrs": {"sgid": "x"},
+                       "circle_ios_fallback_text": "@Jane Doe"},
+                      {"type": "text", "text": ", see"},
+                      {"type": "entity", "attrs": {"sgid": "y"},
+                       "circle_ios_fallback_text": "#Hiring board"},
+                      {"type": "text", "text": "for the full role description."}]}]}}}
+    _, body = _extract_text(record)
+    assert "@Jane Doe" in body and "#Hiring board" in body and "full role" in body

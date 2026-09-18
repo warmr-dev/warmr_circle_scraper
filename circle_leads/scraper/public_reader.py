@@ -205,6 +205,10 @@ def _tiptap_text(node) -> str:
     if isinstance(node, dict):
         if node.get("type") == "text" and node.get("text"):
             out.append(node["text"])
+        elif node.get("circle_ios_fallback_text") and not node.get("content"):
+            # Mentions ("@Name") and links to posts or events ("#Title") are
+            # leaf nodes with no text child; this is the text readers see.
+            out.append(str(node["circle_ios_fallback_text"]))
         for child in node.get("content", []) or []:
             out.append(_tiptap_text(child))
     return " ".join(filter(None, out))
