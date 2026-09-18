@@ -16,19 +16,29 @@ client verbatim:
                ones (verified 2026-09-17), so ``locked_unknown`` alone proves
                nothing.
 * named     -- we know the community's name (needed to judge ICP fit at all).
+* live      -- named AND the join-type check got a definite answer
+               (``LIVE_JOIN_TYPES``). Named alone overstates it: names were
+               looked up after the join-type pass, so thousands of named rows
+               still carry ``unknown``, and some are lapsed subscriptions.
+* unchecked -- named, but the join type is still ``unknown``: not re-checked
+               since the name was found. Shown next to live, not in the funnel.
 * icp       -- ICP-fit AND worth pursuing. Excluded by decision of 2026-09-18:
                communities not hosted on Circle, and communities whose owner's
                Circle subscription has lapsed (``subscription_expired``).
 * read      -- ICP-fit communities whose posts we have read at least once.
 * posts / leads -- everything read / found, per source of the community.
+
+Queues (``QUEUES``) say how many rows wait at each step and when the step last
+moved, i.e. when a row last *left* the queue -- the timestamp its worker writes.
+A queue with rows waiting and no movement for ``STALE_QUEUE_HOURS`` is stale.
 """
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import and_, case, func, or_, select
+from sqlalchemy import String, and_, case, cast, func, or_, select
 from sqlalchemy.orm import Session
 
 from circle_leads.storage.models import (
@@ -46,6 +56,18 @@ SOURCES = [
 
 # A join-type check that got a real answer from the community's own API.
 DEFINITIVE_JOIN_TYPES = ("free_join", "paid", "invite_only", "subscription_expired")
+
+# A named community with one of these join types is proven to still be up.
+# locked_unknown counts here though not in `alive`: with a name already in
+# hand, the 401 is a real login wall rather than Circle's catch-all 401.
+LIVE_JOIN_TYPES = ("free_join", "paid", "invite_only", "locked_unknown")
+
+# Set in icp_reasons by the 2026-09-18 clean-up: the host redirected to
+# circle.so's marketing page, so its "name" was that page's title (erased).
+# Such a row is dead, not waiting for a name.
+DEAD_HOST_MARKER = "dead_host_marketing_title"
+
+STALE_QUEUE_HOURS = 24
 
 # Platforms we can actually join and read. "discover" is a Circle directory
 # card whose real host we have not resolved yet -- still on Circle.
@@ -94,6 +116,56 @@ def _count(condition) -> Any:
     return func.coalesce(func.sum(case((condition, 1), else_=0)), 0)
 
 
+def build_queues(s: Session, now: datetime, *, named) -> list[dict[str, Any]]:
+    """How many rows wait at each step, and when that step last moved.
+
+    "Moved" means a row left the queue, so each queue reads the timestamp its
+    own worker writes -- over the rows that can leave it, not only those still
+    waiting. Arrivals (new ICP-fit rows, say) are not movement: a queue can be
+    fed all day and still be stuck.
+    """
+    c, jt = Community, Community.join_type
+    fit = c.icp_flag.is_(True)
+    dead = func.coalesce(cast(c.icp_reasons, String), "").like(f"%{DEAD_HOST_MARKER}%")
+    specs = [
+        # No "name found at" column. The harvest and the join bot touch named
+        # rows every few minutes, which would make a stalled name lookup look
+        # busy, so their rows are left out of the proxy.
+        ("name", and_(~named, ~dead), c.updated_at,
+         and_(named, c.last_synced_at.is_(None), c.join_attempted_at.is_(None))),
+        ("join_type_recheck", and_(named, jt == "unknown"),
+         c.join_type_checked_at, named),
+        ("read", and_(fit, c.platform == "circle", c.last_synced_at.is_(None)),
+         c.last_synced_at, and_(fit, c.platform == "circle")),
+        ("join", and_(fit, jt == "free_join",
+                      c.join_status == JoinStatus.NOT_ATTEMPTED.value),
+         c.join_attempted_at, and_(fit, jt == "free_join")),
+        # Nothing automatic decides these; the bot's paywall skip is the only
+        # recorded decision.
+        ("paid_decision", and_(fit, jt == "paid"),
+         c.join_attempted_at, and_(fit, jt == "paid")),
+    ]
+    # One round trip, as elsewhere on this page.
+    values = s.execute(select(*[
+        sub
+        for _, waiting, field, moved_in in specs
+        for sub in (
+            select(func.count()).select_from(c).where(waiting).scalar_subquery(),
+            select(func.max(field)).where(moved_in).scalar_subquery(),
+        )
+    ])).one()
+    stale_after = timedelta(hours=STALE_QUEUE_HOURS)
+    queues = []
+    for i, (key, _, field, _) in enumerate(specs):
+        waiting, moved = int(values[2 * i] or 0), values[2 * i + 1]
+        queues.append({
+            "key": key, "waiting": waiting, "last_moved": _iso(moved),
+            "field": field.key,
+            "stale": bool(waiting) and (moved is None or now - moved > stale_after),
+        })
+    return queues
+
+
 def build_overview(s: Session, now: datetime) -> dict[str, Any]:
     """``now`` is naive UTC, like every timestamp in the database."""
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -111,6 +183,8 @@ def build_overview(s: Session, now: datetime) -> dict[str, Any]:
     )
     icp = and_(Community.icp_flag.is_(True), on_circle, not_expired)
     read = Community.last_synced_at.is_not(None)
+    jt = Community.join_type
+    live = and_(named, jt.in_(LIVE_JOIN_TYPES))
 
     # --- 1. funnel by source ---------------------------------------------
     rows = s.execute(
@@ -120,13 +194,19 @@ def build_overview(s: Session, now: datetime) -> dict[str, Any]:
             _count(alive), _count(named), _count(icp), _count(and_(icp, read)),
             _count(and_(read, ~icp)),
             _count(Community.discovered_at >= today_start),
+            _count(live), _count(and_(named, jt == "unknown")),
+            _count(and_(named, jt == "subscription_expired")),
+            _count(and_(named, jt.is_(None))),
         ).group_by(src)
     ).all()
     per_source = {
         r[0]: {
             "found": int(r[1]), "alive": int(r[2]), "named": int(r[3]),
             "icp": int(r[4]), "read": int(r[5]), "read_other": int(r[6]),
-            "found_today": int(r[7]),
+            "found_today": int(r[7]), "live": int(r[8]),
+            # The rest of `named`, so the split adds up on the page.
+            "unchecked": int(r[9]), "named_lapsed": int(r[10]),
+            "named_untyped": int(r[11]),
         }
         for r in rows
     }
@@ -145,8 +225,9 @@ def build_overview(s: Session, now: datetime) -> dict[str, Any]:
     ).all():
         per_source.setdefault(key, {})["leads"] = int(n)
 
-    stages = ("found", "alive", "named", "icp", "read", "posts", "leads",
-              "read_other", "found_today")
+    stages = ("found", "alive", "named", "live", "icp", "read", "posts", "leads",
+              "read_other", "found_today", "unchecked", "named_lapsed",
+              "named_untyped")
     sources = []
     for key, label in SOURCES:
         counts = per_source.get(key, {})
@@ -161,17 +242,19 @@ def build_overview(s: Session, now: datetime) -> dict[str, Any]:
         # No dedicated "name found at" column; the row's last change is the
         # closest honest proxy and the page labels it as such.
         select(func.max(Community.updated_at)).where(named).scalar_subquery(),
+        select(func.max(Community.join_type_checked_at)).where(live).scalar_subquery(),
         select(func.max(Community.icp_checked_at)).scalar_subquery(),
         select(func.max(Community.last_synced_at)).scalar_subquery(),
         select(func.max(Post.scraped_at)).scalar_subquery(),
         select(func.max(Lead.created_at)).where(Lead.classification == "LEAD")
         .scalar_subquery(),
     )).one()
-    updated = dict(zip(("found", "alive", "named", "icp", "read", "posts", "leads"), u))
+    updated = dict(zip(
+        ("found", "alive", "named", "live", "icp", "read", "posts", "leads"), u))
 
     # --- 2. ICP-fit by how reachable they are ------------------------------
     fit = Community.icp_flag.is_(True)
-    jt, js = Community.join_type, Community.join_status
+    js = Community.join_status
     free = and_(fit, on_circle, jt == "free_join")
     paid = and_(fit, on_circle, jt == "paid")
     closed = and_(fit, on_circle, or_(jt.is_(None), ~jt.in_(
@@ -207,6 +290,8 @@ def build_overview(s: Session, now: datetime) -> dict[str, Any]:
     icp_groups["excluded"]["total"] = sum(icp_groups["excluded"].values())
     icp_groups["total"] = (icp_groups["free"]["total"] + icp_groups["paid"]["total"]
                            + icp_groups["closed"]["total"])
+
+    queues = build_queues(s, now, named=named)
 
     # --- 3. cookie connections ----------------------------------------------
     connections = []
@@ -294,6 +379,7 @@ def build_overview(s: Session, now: datetime) -> dict[str, Any]:
         "funnel": {"sources": sources, "total": total,
                    "updated": {k: _iso(v) for k, v in updated.items()}},
         "icp_groups": icp_groups,
+        "queues": queues,
         "connections": {"counts": buckets, "items": connections},
         "leads": {"total": leads_total, "today": leads_today,
                   "by_community": by_community, "recent": recent},
