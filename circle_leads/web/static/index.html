@@ -167,6 +167,59 @@
   .legend-row .legend-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .legend-row .legend-val { font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
 
+  /* --- Client overview ---------------------------------------------- */
+  .ov-head { display: flex; justify-content: space-between; align-items: flex-end; gap: 12px; flex-wrap: wrap; }
+  .ov-refresh { display: flex; align-items: center; gap: 10px; }
+  .ov-lede { margin: -6px 0 14px; color: var(--muted); font-size: 13px; max-width: 760px; }
+  .ov-sub { margin: 20px 0 8px; font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+  .ov-funnel { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 8px; }
+  @media (max-width: 1100px) { .ov-funnel { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+  @media (max-width: 560px) { .ov-funnel { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  .ov-step { border: 1px solid var(--line); border-radius: 10px; padding: 12px; background: var(--soft); min-width: 0; }
+  .ov-step .k { font-size: 12.5px; color: var(--muted); font-weight: 600; display: flex; align-items: center; gap: 5px; }
+  .ov-step .n { font-size: 24px; font-weight: 700; letter-spacing: -.02em; margin: 4px 0 2px; font-variant-numeric: tabular-nums; }
+  .ov-step .pct { font-size: 12px; color: var(--muted); }
+  .ov-step .when { font-size: 11.5px; color: var(--muted); margin-top: 6px; }
+  .ov-step.hl { background: color-mix(in srgb, var(--accent) 7%, var(--panel)); border-color: color-mix(in srgb, var(--accent) 30%, var(--line)); }
+  .ov-groups { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+  @media (max-width: 900px) { .ov-groups { grid-template-columns: 1fr; } }
+  .ov-group { border: 1px solid var(--line); border-radius: 10px; padding: 14px; border-top: 4px solid var(--c); }
+  .ov-group .n { font-size: 26px; font-weight: 700; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+  .ov-group .t { font-weight: 600; display: flex; align-items: center; gap: 5px; }
+  .ov-group ul { margin: 8px 0 0; padding: 0; list-style: none; font-size: 13px; }
+  .ov-group li { display: flex; justify-content: space-between; gap: 10px; padding: 4px 0; border-top: 1px dashed var(--line); }
+  .ov-group li b { font-variant-numeric: tabular-nums; }
+  .ov-stack { display: flex; height: 12px; border-radius: 99px; overflow: hidden; margin: 4px 0 14px; background: var(--soft); gap: 2px; }
+  .ov-stack span { display: block; height: 100%; }
+  .ov-callout { border-radius: 9px; padding: 11px 13px; font-size: 13px; margin: 12px 0 0; background: var(--soft); border-left: 3px solid var(--c, var(--muted)); }
+  .ov-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 12px; }
+  .ov-kpi { border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+  .ov-kpi .n { font-size: 24px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .ov-kpi .k { font-size: 12.5px; color: var(--muted); }
+  .ov-now { display: grid; gap: 0; }
+  .ov-now .r { display: grid; grid-template-columns: 14px minmax(0, 1fr) auto; gap: 10px; align-items: baseline; padding: 9px 0; border-bottom: 1px solid var(--line); }
+  .ov-now .r:last-child { border-bottom: 0; }
+  .ov-now .dot { width: 9px; height: 9px; border-radius: 99px; display: inline-block; }
+  .ov-now .v { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .ov-quote { margin: 6px 0; padding: 8px 10px; background: var(--soft); border-radius: 7px; font-size: 13px; }
+  .ov-two { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 980px) { .ov-two { grid-template-columns: 1fr; } }
+  table.ov-table { min-width: 560px; }
+  table.ov-table td.num, table.ov-table th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  table.ov-table tr.total td { font-weight: 700; background: var(--soft); }
+  .tip, .tip-inline {
+    display: inline-grid; place-items: center; width: 16px; height: 16px; border-radius: 99px;
+    font-size: 10.5px; font-weight: 700; color: var(--muted); border: 1px solid var(--line);
+    background: var(--panel); cursor: help; position: relative; flex: none; text-transform: none; letter-spacing: 0;
+  }
+  .tip:hover::after, .tip:focus::after {
+    content: attr(data-tip); position: absolute; z-index: 30; left: 50%; top: 22px;
+    transform: translateX(-50%); width: max-content; max-width: min(300px, 80vw);
+    background: var(--ink); color: #fff; font-size: 12.5px; font-weight: 400; line-height: 1.45;
+    padding: 9px 11px; border-radius: 8px; white-space: normal; text-align: left;
+    box-shadow: 0 6px 20px rgba(16,24,40,.18);
+  }
+  .tip:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
   [hidden] { display: none !important; }
   .empty { padding: 26px; text-align: center; color: var(--muted); }
   .toast {
@@ -250,33 +303,58 @@
 
   <!-- STATS -->
   <section id="view-stats">
-    <div class="page-head">
-      <h1>Overview</h1>
-      <p>Leads, communities, and classification at a glance.</p>
+    <div class="page-head ov-head">
+      <div>
+        <h1>Overview</h1>
+        <p>Live numbers from the production database. Hover or tap <span class="tip-inline">?</span> for what each number means.</p>
+      </div>
+      <div class="ov-refresh">
+        <span class="meta" id="ov-generated"></span>
+        <button class="ghost" id="ov-reload">Refresh</button>
+      </div>
     </div>
-    <div class="grid" id="stat-cards"></div>
+    <div id="ov-error" class="panel" hidden></div>
 
     <div class="panel">
-      <h2 style="margin:0 0 2px">Воронка сообществ</h2>
-      <span class="muted" style="font-size:13px">Найдено поиском → проанализировано (ICP) → в очереди на скрапер (ICP-fit на реальном Circle-хосте) → поставлено на скрапер (прочитано хотя бы раз).</span>
-      <div class="grid" id="funnel-cards" style="margin-top:10px"></div>
+      <h2>1. Community funnel</h2>
+      <p class="ov-lede">Every community we have found, and how many make it through each step, from first discovery to a lead.</p>
+      <div class="ov-funnel" id="ov-funnel"><div class="empty">Loading…</div></div>
+      <h3 class="ov-sub">By source</h3>
+      <div id="ov-sources"></div>
+      <p class="meta" id="ov-funnel-note"></p>
+    </div>
+
+    <div class="panel">
+      <h2>2. ICP-fit communities by access <span class="tip" tabindex="0" data-tip="ICP (ideal customer profile): a community whose members look like the people we want to reach, founders and business owners who hire developers. Judged from the community's name and description, by rules first and an AI model when the rules are unsure.">?</span></h2>
+      <p class="ov-lede">Fitting the profile is not enough: we can only read a community we can get into. This splits the ICP-fit communities by how they can be joined.</p>
+      <div id="ov-icp"><div class="empty">Loading…</div></div>
+    </div>
+
+    <div class="panel">
+      <h2>3. Reading private communities with saved logins <span class="tip" tabindex="0" data-tip="For communities we have joined, we save the login cookie (a small file the browser keeps after sign-in) so the cloud server can read posts without a person present.">?</span></h2>
+      <div id="ov-conn"><div class="empty">Loading…</div></div>
+    </div>
+
+    <div class="panel">
+      <h2>4. Leads <span class="tip" tabindex="0" data-tip="A lead is a post where someone says they want to hire or pay for software or development work. Found automatically, then checked by a person.">?</span></h2>
+      <div id="ov-leads"><div class="empty">Loading…</div></div>
+    </div>
+
+    <div class="panel">
+      <h2>5. What is happening right now</h2>
+      <div id="ov-now"><div class="empty">Loading…</div></div>
     </div>
 
     <div class="overview-grid">
       <div class="panel">
-        <h2>Growth — last 14 days</h2>
+        <h2>Leads, last 14 days</h2>
         <div id="growth-chart"></div>
         <div class="chart-legend" id="growth-legend"></div>
       </div>
       <div class="panel">
-        <h2>By priority</h2>
+        <h2>Leads by priority</h2>
         <div id="donut-priority"></div>
       </div>
-    </div>
-
-    <div class="panel">
-      <h2>Communities by platform</h2>
-      <div id="donut-platform"></div>
     </div>
   </section>
 
@@ -859,47 +937,241 @@ const PLATFORM_COLOR = {
 };
 
 async function loadStats() {
+  loadOverview();
   const data = await api('/api/stats');
   if (!data) return;
 
-  const circleCount = (data.by_platform || {}).circle || 0;
-  $('stat-cards').innerHTML = [
-    ['ICP-flagged', data.icp_flagged || 0, '🎯', `of ${data.communities} communities fit the ICP`, 'var(--accent)'],
-    ['Joined', data.joined_count || 0, '✅', `+${data.joined_today || 0} today · ${data.free_join_backlog || 0} backlog remaining`, 'var(--high)'],
-    ['Circle communities', circleCount, '🌐', `of ${data.communities} discovered total`, 'var(--violet)'],
-    ['Leads', data.leads || 0, '🔥', `+${data.leads_today || 0} today · ${data.by_priority.HIGH || 0} high priority`, 'var(--medium)'],
-  ].map(([k, n, ic, sub, color]) =>
-    `<div class="stat"><span class="ic" style="background:color-mix(in srgb, ${color} 16%, transparent);color:${color}">${ic}</span>
-       <div class="k">${k}</div><div class="n">${n}</div>
-       <div class="sub">${sub}</div></div>`).join('');
-
-  const f = data.funnel || {};
-  $('funnel-cards').innerHTML = [
-    ['Найдено', f.found_total || 0, '🔎', `+${f.found_today || 0} сегодня`, 'var(--info)'],
-    ['Проанализировано', f.analyzed_total || 0, '🧭', `+${f.analyzed_today || 0} сегодня`, 'var(--accent)'],
-    ['В очереди на скрапер', f.queued_for_scraper || 0, '⏳',
-      f.queued_unresolved ? `на Circle-хосте · ещё ${f.queued_unresolved} без хоста` : 'сейчас в очереди',
-      'var(--medium)'],
-    ['Поставлено на скрапер', f.on_scraper_total || 0, '⚙️', `${f.on_scraper_today || 0} прочитано сегодня`, 'var(--high)'],
-  ].map(([k, n, ic, sub, color]) =>
-    `<div class="stat"><span class="ic" style="background:color-mix(in srgb, ${color} 16%, transparent);color:${color}">${ic}</span>
-       <div class="k">${k}</div><div class="n">${n}</div>
-       <div class="sub">${sub}</div></div>`).join('');
-
   const leadsTimeline = data.leads_timeline || data.timeline || [];
-  const communitiesTimeline = data.communities_timeline || [];
   const categories = leadsTimeline.map(p => p.date.slice(5).replace('-', '/'));
+  // Leads only: the 10k-row DNS import on 15 Sep flattens any shared axis.
   renderGrowthChart('growth-chart', categories, [
     { name: 'Leads', color: 'var(--accent)', area: true, values: leadsTimeline.map(p => p.count) },
-    { name: 'New communities', color: 'var(--info)', area: false, values: communitiesTimeline.map(p => p.count) },
   ]);
   $('growth-legend').innerHTML = `
-    <span class="item"><span class="dot" style="background:var(--accent)"></span>Leads</span>
-    <span class="item"><span class="dot" style="background:var(--info)"></span>New communities</span>`;
+    <span class="item"><span class="dot" style="background:var(--accent)"></span>Leads found per day</span>`;
 
   renderDonut('donut-priority', data.by_priority, (k) => PRIORITY_COLOR[k] || 'var(--low)');
-  renderDonut('donut-platform', data.by_platform, (k) => PLATFORM_COLOR[k] || 'var(--low)');
 }
+
+
+// --- Client overview (/api/overview) ------------------------------------
+// Every timestamp in the database is naive UTC; say so to Date().
+function parseUtc(iso) {
+  if (!iso) return null;
+  return new Date(/[zZ]|[+-]\d\d:?\d\d$/.test(iso) ? iso : iso + 'Z');
+}
+function ago(iso) {
+  const d = parseUtc(iso);
+  if (!d || isNaN(d)) return 'never';
+  const min = Math.round((Date.now() - d.getTime()) / 60000);
+  if (min < 1) return 'just now';
+  if (min < 60) return `${min} min ago`;
+  const h = Math.round(min / 60);
+  if (h < 48) return `${h} h ago`;
+  return `${Math.round(h / 24)} days ago`;
+}
+function localTime(iso) {
+  const d = parseUtc(iso);
+  return d && !isNaN(d) ? d.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : '';
+}
+function whenSpan(iso, prefix = 'updated ') {
+  return iso ? `<span title="${esc(localTime(iso))}">${prefix}${esc(ago(iso))}</span>` : '<span>no data yet</span>';
+}
+// Green under 2 h, amber under 12 h, red beyond: how stale is this stage?
+function freshColor(iso) {
+  const d = parseUtc(iso);
+  if (!d || isNaN(d)) return 'var(--low)';
+  const h = (Date.now() - d.getTime()) / 3600000;
+  return h < 2 ? 'var(--high)' : h < 12 ? 'var(--medium)' : 'var(--danger)';
+}
+const fmtN = (n) => Number(n || 0).toLocaleString('en-US');
+const pctOf = (a, b) => (b ? Math.round((a / b) * 1000) / 10 : 0);
+const tip = (text) => `<span class="tip" tabindex="0" data-tip="${esc(text)}">?</span>`;
+
+const FUNNEL_STEPS = [
+  ['found', 'Found', 'Every community we have collected, from Circle\'s public directory, a list of Circle web addresses (DNS export), and a few smaller sources.'],
+  ['alive', 'Responded', 'The community really exists: it is listed in Circle\'s own directory, or its page returned a name, or it told us how to join. A generic "login required" reply does not count, because Circle sends that even for addresses that do not exist.'],
+  ['named', 'Named', 'We know the community\'s name. Without a name there is nothing to judge, so these are the only ones we can check against the profile.'],
+  ['icp', 'ICP fit', 'The community\'s audience matches the ideal customer profile (ICP): founders and business owners who hire developers. Not counted: communities not hosted on Circle, and communities whose owner stopped paying for Circle.'],
+  ['read', 'Read', 'ICP-fit communities whose posts we have read at least once.'],
+  ['posts', 'Posts', 'Posts and comments saved from all communities we have read.'],
+  ['leads', 'Leads', 'Posts where someone wants to hire or pay for software or development work.'],
+];
+
+function renderFunnel(f) {
+  const t = f.total, u = f.updated;
+  $('ov-funnel').innerHTML = FUNNEL_STEPS.map(([key, label, help], i) => {
+    const prev = i > 0 ? t[FUNNEL_STEPS[i - 1][0]] : null;
+    const share = (i > 0 && i < 5 && prev) ? `${pctOf(t[key], prev)}% of previous step` : '&nbsp;';
+    const today = key === 'found' && t.found_today ? `+${fmtN(t.found_today)} today` : share;
+    return `<div class="ov-step${key === 'icp' || key === 'leads' ? ' hl' : ''}">
+      <div class="k">${label} ${tip(help)}</div>
+      <div class="n">${fmtN(t[key])}</div>
+      <div class="pct">${today}</div>
+      <div class="when">${whenSpan(u[key], key === 'named' ? 'last change ' : 'updated ')}</div>
+    </div>`;
+  }).join('');
+
+  const cols = FUNNEL_STEPS.map(([k, l]) => `<th class="num">${l}</th>`).join('');
+  const row = (label, x, cls = '') => `<tr class="${cls}"><td>${label}</td>${
+    FUNNEL_STEPS.map(([k]) => `<td class="num">${fmtN(x[k])}</td>`).join('')}</tr>`;
+  const srcHelp = {
+    directory: 'Communities listed in Circle\'s own public directory (discover.circle.so). Small, but already described, so the most likely to fit.',
+    dns: 'About 10,000 Circle web addresses from a public DNS record export (15 Sep). Large, but most have no description and many are inactive. Names are still being looked up.',
+    other: 'Smaller sources: a hand-picked list, a paid list of Circle sites (BuiltWith), web search, and addresses added manually.',
+  };
+  $('ov-sources').innerHTML = `<div class="table-wrap"><table class="ov-table">
+    <thead><tr><th>Source</th>${cols}</tr></thead>
+    <tbody>${f.sources.map(x => row(`${esc(x.label)} ${tip(srcHelp[x.key] || '')}`, x)).join('')}
+    ${row('Total', t, 'total')}</tbody></table></div>`;
+  $('ov-funnel-note').innerHTML = t.read_other
+    ? `Posts and leads also include ${fmtN(t.read_other)} communities read outside the ICP list (added by hand, or read before the profile check existed).`
+    : '';
+}
+
+function renderIcp(g) {
+  const groups = [
+    ['var(--high)', 'Free to join', g.free.total,
+      'Anyone can join for free. Our bot joins these automatically, then we read them.',
+      [['Joined', g.free.joined], ['Waiting to be joined', g.free.waiting],
+       ['Asked for payment at sign-up', g.free.hit_paywall], ...(g.free.failed ? [['Join failed', g.free.failed]] : [])]],
+    ['var(--medium)', 'Paid', g.paid.total,
+      'Membership costs money. We do not pay to join, so these can only be read if they have public posts.',
+      [['Directory listings without a community address yet', g.paid.directory_cards], ['Paid communities on Circle', g.paid.on_circle]]],
+    ['var(--low)', 'Closed or unclear', g.closed.total,
+      'We could not see how to get in: the community only shows a login screen, is invite-only, or did not answer our check.',
+      [['Login screen only', g.closed.locked], ['Invite only', g.closed.invite_only], ['Could not check yet', g.closed.unclear]]],
+  ];
+  const total = g.total || 1;
+  $('ov-icp').innerHTML = `
+    <div class="meta" style="margin-bottom:4px"><b style="color:var(--ink);font-size:15px">${fmtN(g.total)}</b> ICP-fit communities we can pursue</div>
+    <div class="ov-stack">${groups.map(([c, , n]) => `<span style="width:${(n / total) * 100}%;background:${c}" title="${n}"></span>`).join('')}</div>
+    <div class="ov-groups">${groups.map(([c, title, n, help, items]) => `
+      <div class="ov-group" style="--c:${c}">
+        <div class="t">${title} ${tip(help)}</div>
+        <div class="n">${fmtN(n)}</div>
+        <ul>${items.map(([l, v]) => `<li><span>${l}</span><b>${fmtN(v)}</b></li>`).join('')}</ul>
+      </div>`).join('')}</div>
+    <p class="meta" style="margin:12px 0 0">Not counted above: ${fmtN(g.excluded.not_on_circle)} ICP-fit communities that are not hosted on Circle,
+      and ${fmtN(g.excluded.subscription_expired)} whose owner's Circle plan has lapsed (the site no longer works).</p>`;
+}
+
+const CONN_BUCKETS = {
+  working: ['Working', 'var(--high)', 'The cloud server reads these with the saved login.'],
+  cloudflare_blocked: ['Blocked on the cloud server', 'var(--medium)',
+    'Circle\'s bot protection (Cloudflare) stops requests from our cloud server (Railway). The logins themselves are fine: the same cookies read these communities from a regular computer. Nothing for you to do: we are moving this reading to a local computer.'],
+  session_expired: ['Login expired', 'var(--danger)', 'The saved login no longer works and has to be renewed by signing in again.'],
+  error: ['Other error', 'var(--danger)', 'Reading failed for another reason, see details.'],
+  not_connected: ['Not connected yet', 'var(--low)', 'No saved login yet.'],
+};
+function renderConnections(c) {
+  const order = ['working', 'cloudflare_blocked', 'session_expired', 'error', 'not_connected'];
+  const present = order.filter(k => c.counts[k]);
+  if (!present.length) { $('ov-conn').innerHTML = '<div class="empty">No saved logins yet.</div>'; return; }
+  const cf = c.counts.cloudflare_blocked || 0;
+  $('ov-conn').innerHTML = `
+    <div class="ov-kpis">${present.map(k => {
+      const [l, col, h] = CONN_BUCKETS[k];
+      return `<div class="ov-kpi" style="border-top:3px solid ${col}"><div class="n">${fmtN(c.counts[k])}</div><div class="k">${l} ${tip(h)}</div></div>`;
+    }).join('')}</div>
+    ${cf ? `<div class="ov-callout" style="--c:var(--medium)"><b>${cf} logins are blocked on the cloud server, not expired.</b>
+      Circle's bot protection (Cloudflare) has blocked requests from our cloud server since 16 Sep. The same cookies still read these communities from a regular computer,
+      so there is nothing to renew. The fix is on our side: reading these from a local computer.</div>` : ''}
+    <details style="margin-top:12px"><summary class="meta" style="cursor:pointer">Show all ${fmtN(c.items.length)} communities</summary>
+      <div class="table-wrap" style="margin-top:8px"><table class="ov-table">
+        <thead><tr><th>Community</th><th>Status</th><th class="num">Readable sections</th><th>Last attempt</th></tr></thead>
+        <tbody>${c.items.map(x => {
+          const [l, col] = CONN_BUCKETS[x.bucket] || CONN_BUCKETS.error;
+          return `<tr><td><b>${esc(x.name)}</b><div class="meta">${esc(x.host)}</div></td>
+            <td><span class="pill" style="color:${col};background:color-mix(in srgb, ${col} 14%, transparent)">${l}</span></td>
+            <td class="num">${x.spaces_readable}/${x.spaces_total}</td>
+            <td class="meta">${whenSpan(x.last_sync_at, '')}</td></tr>`;
+        }).join('')}</tbody></table></div>
+    </details>`;
+}
+
+function renderLeads(l, todayStart) {
+  const top = l.by_community.slice(0, 10);
+  $('ov-leads').innerHTML = `
+    <div class="ov-kpis">
+      <div class="ov-kpi"><div class="n">${fmtN(l.total)}</div><div class="k">Leads in total</div></div>
+      <div class="ov-kpi"><div class="n">${fmtN(l.today)}</div><div class="k">Found today ${tip('Since midnight UTC (' + localTime(todayStart) + ' your time).')}</div></div>
+      <div class="ov-kpi"><div class="n">${fmtN(l.by_community.length)}</div><div class="k">Communities with leads</div></div>
+    </div>
+    <div class="ov-two">
+      <div>
+        <h3 class="ov-sub" style="margin-top:4px">Latest leads</h3>
+        ${l.recent.length ? l.recent.map(x => `
+          <div style="padding:8px 0;border-bottom:1px solid var(--line)">
+            <div class="row" style="gap:6px">
+              ${x.priority ? `<span class="pill ${esc(x.priority)}">${esc(x.priority)}</span>` : ''}
+              <b>${esc(x.job_title || x.post_title || 'Hiring request')}</b>
+              <span class="meta">· ${esc(x.community || '')} · ${whenSpan(x.created_at, '')}</span>
+            </div>
+            ${x.quote ? `<div class="ov-quote">“${esc(x.quote)}”</div>` : ''}
+            ${x.post_url ? `<a href="${esc(x.post_url)}" target="_blank" rel="noopener noreferrer" style="font-size:13px">Open the post ↗</a>` : ''}
+          </div>`).join('') : '<div class="empty">No leads yet.</div>'}
+      </div>
+      <div>
+        <h3 class="ov-sub" style="margin-top:4px">Where leads come from</h3>
+        <div class="table-wrap"><table class="ov-table" style="min-width:0">
+          <thead><tr><th>Community</th><th class="num">Leads</th><th class="num">Today</th></tr></thead>
+          <tbody>${top.map(x => `<tr><td><a href="${esc(x.url)}" target="_blank" rel="noopener noreferrer">${esc(x.name)}</a>
+            <div class="meta">last ${whenSpan(x.last, '')}</div></td>
+            <td class="num">${fmtN(x.leads)}</td><td class="num">${x.today ? fmtN(x.today) : '–'}</td></tr>`).join('')}</tbody>
+        </table></div>
+        ${l.by_community.length > top.length ? `<p class="meta">and ${l.by_community.length - top.length} more communities.</p>` : ''}
+      </div>
+    </div>`;
+}
+
+const SCHEDULE_LABEL = { every_5min: 'every 5 minutes', every_15min: 'every 15 minutes', every_6h: 'every 6 hours', every_12h: 'every 12 hours', daily: 'once a day', hourly: 'every hour', off: 'switched off' };
+function renderNow(a) {
+  const st = a.settings || {};
+  const val = (k) => (st[k] || {}).value;
+  const upd = (k) => (st[k] || {}).updated_at;
+  const sched = val('harvest_schedule');
+  const rows = [
+    [val('harvest_last_run'), 'Reading posts from communities',
+      `Runs ${esc(SCHEDULE_LABEL[sched] || sched || 'on a schedule')}. Today: ${fmtN(a.read_today)} communities read, ${fmtN(a.posts_today)} posts saved.`],
+    [val('icp_classification_last_run'), 'Profile (ICP) check on the cloud server', 'Scores newly named communities against the profile.'],
+    [a.dns_last_change, 'Name lookup for the DNS export (local computer)',
+      `Runs in batches of 200: finds each community's name, then checks it against the profile. ${fmtN(a.unnamed_dns)} DNS addresses still have no name (${fmtN(a.unnamed_total)} across all sources). The funnel numbers for this source grow while it runs.`],
+    [upd('enrichment_cursor_id'), 'Name lookup on the cloud server',
+      'Works poorly: Circle answers only about 5% of these requests from the cloud server, against about 90% from a regular computer.'],
+  ];
+  $('ov-now').innerHTML = `<div class="ov-now">${rows.map(([iso, title, sub]) => `
+    <div class="r"><span class="dot" style="background:${freshColor(iso)}"></span>
+      <div><b>${title}</b><div class="meta">${sub}</div></div>
+      <div class="v meta">${whenSpan(iso, 'last run ')}</div></div>`).join('')}
+    ${a.jobs_active ? `<div class="r"><span class="dot" style="background:var(--info)"></span><div><b>${a.jobs_active} manual job(s) in the queue</b></div><div></div></div>` : ''}
+  </div>
+  <p class="meta" style="margin:8px 0 0">Dot colour: green = ran in the last 2 hours, amber = in the last 12 hours, red = longer ago.</p>`;
+}
+
+let overviewTimer = null;
+async function loadOverview() {
+  let d;
+  try {
+    d = await api('/api/overview');
+  } catch (err) {
+    $('ov-error').hidden = false;
+    $('ov-error').innerHTML = `<b>Could not load the numbers.</b> <span class="meta">${esc(String(err.message || err).slice(0, 200))}</span>`;
+    return;
+  }
+  if (!d) return;
+  $('ov-error').hidden = true;
+  $('ov-generated').innerHTML = `Numbers as of ${esc(localTime(d.generated_at))}`;
+  renderFunnel(d.funnel);
+  renderIcp(d.icp_groups);
+  renderConnections(d.connections);
+  renderLeads(d.leads, d.today_start);
+  renderNow(d.activity);
+  // Refresh while the Overview is on screen; the batch jobs move these numbers.
+  clearTimeout(overviewTimer);
+  overviewTimer = setTimeout(() => { if (!$('view-stats').hidden) loadOverview(); }, 120000);
+}
+$('ov-reload').addEventListener('click', () => loadStats());
 
 // --- Communities ------------------------------------------------------
 const PLATFORM_LABEL = {
@@ -1034,6 +1306,15 @@ const CONN_STATE = {
   error: ['Error', 'var(--danger)', '✗'],
 };
 
+// A Cloudflare challenge on the cloud worker is not a dead cookie: the same
+// cookies read fine from a home IP. Say so instead of "Error" / "re-authenticate".
+function connStateView(c, fallback = CONN_STATE.not_connected) {
+  if (/cloudflare challenge/i.test(c.state_detail || '')) {
+    return ['Blocked by Cloudflare on the cloud server — cookie is fine', 'var(--medium)', '⛨'];
+  }
+  return CONN_STATE[c.state] || fallback;
+}
+
 // Poll the scan-job queue; when jobs finish, refresh the connection list.
 let scanJobTimer = null;
 async function pollScanJobs() {
@@ -1070,7 +1351,7 @@ async function loadConnector() {
     return;
   }
   $('connections-table').innerHTML = data.connections.map(c => {
-    const [label, color, icon] = CONN_STATE[c.state] || CONN_STATE.not_connected;
+    const [label, color, icon] = connStateView(c);
     return `<div class="lead" style="margin-bottom:8px">
       <div class="lead-head">
         <b>${esc(c.name || c.host)}</b>
@@ -1284,7 +1565,7 @@ async function loadConnectionsToRefresh() {
     return;
   }
   box.innerHTML = data.to_refresh.map(c => {
-    const [label, color, icon] = CONN_STATE[c.state] || CONN_STATE.error;
+    const [label, color, icon] = connStateView(c, CONN_STATE.error);
     return `<div class="lead" style="margin-bottom:8px">
       <div class="lead-head">
         <b>${esc(c.name)}</b>

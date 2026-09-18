@@ -1092,6 +1092,14 @@ def create_app(
 
     # --- Stats and activity ----------------------------------------------
 
+    @app.get("/api/overview")
+    def api_overview(_: None = Depends(require_auth)) -> dict[str, Any]:
+        """The client-facing funnel -- see web/overview.py for definitions."""
+        from circle_leads.web.overview import build_overview
+
+        with db.session() as s:
+            return build_overview(s, datetime.now(timezone.utc).replace(tzinfo=None))
+
     @app.get("/api/stats")
     def api_stats(_: None = Depends(require_auth)) -> dict[str, Any]:
         now = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -1351,6 +1359,7 @@ def create_app(
         (circle_leads/join/, built separately) and has been removed outright.
         """
         from circle_leads.storage.models import CircleConnection, ConnectionState
+        from circle_leads.web.overview import connection_bucket
 
         broken = {
             ConnectionState.SESSION_EXPIRED.value,
@@ -1381,6 +1390,11 @@ def create_app(
                     }
                     for c in s.scalars(select(CircleConnection)).all()
                     if c.state in broken and c.host not in non_circle_hosts
+                    # A Cloudflare challenge on the cloud worker is not a dead
+                    # cookie -- the same cookies read fine from a home IP, so a
+                    # fresh paste would change nothing. Listed on the overview
+                    # instead, as a cloud-side block.
+                    and connection_bucket(c.state, c.state_detail) != "cloudflare_blocked"
                 ),
                 key=lambda r: r["host"],
             )
