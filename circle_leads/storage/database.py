@@ -338,13 +338,16 @@ def get_or_create_author(
         # read) used to create a fresh row per post per read: prod had 54,579
         # authors for 2,256 distinct names on 2026-09-19. Reuse the row that
         # name already has in this community.
-        a = session.scalar(
-            select(Author).where(
-                Author.community_id == community_id,
-                Author.source_author_id.is_(None),
-                Author.display_name == kw["display_name"],
-            ).order_by(Author.id).limit(1)
-        )
+        # A profile URL, when the reader has one, tells two same-named people
+        # apart, so it has to match as well.
+        same = [
+            Author.community_id == community_id,
+            Author.source_author_id.is_(None),
+            Author.display_name == kw["display_name"],
+        ]
+        if kw.get("profile_url"):
+            same.append(Author.profile_url == kw["profile_url"])
+        a = session.scalar(select(Author).where(*same).order_by(Author.id).limit(1))
         if a:
             return a
     a = Author(
@@ -358,21 +361,34 @@ def get_or_create_author(
 
 
 def retire_lead(session: Session, lead: Lead, *, reason: str,
-                decided_by: str | None = None) -> None:
+                decided_by: str | None = None) -> str:
     """Take back a lead that a re-classification says is not one.
 
-    A lead production (Vini) has already received is kept as the record of
-    what was sent -- demoted to NOT_LEAD, so it stops counting as a lead
-    everywhere -- rather than deleted, which would erase the only trace of a
-    lead that now needs cleaning up on the other side. Any other is deleted.
+    Deleted only while nothing depends on it. It is kept, demoted to NOT_LEAD
+    (every LEAD count drops it) with the new reason, when production (Vini)
+    already received it -- the row is the only record of what was sent --
+    when an operator already reviewed it, or when other leads are filed as its
+    duplicates (leads.duplicate_of_id has no ON DELETE, so deleting it would
+    fail the whole read). Returns "deleted" or "demoted".
     """
-    if lead.external_synced_at is None:
+    referenced = session.scalar(
+        select(Lead.id).where(Lead.duplicate_of_id == lead.id).limit(1)
+    )
+    untouched = (lead.external_synced_at is None
+                 and (lead.review_status or "pending_review") == "pending_review"
+                 and referenced is None)
+    if untouched:
         session.delete(lead)
-        return
+        return "deleted"
+    why = ("after it was sent to Vini" if lead.external_synced_at is not None
+           else "after review" if (lead.review_status or "pending_review") != "pending_review"
+           else "while other leads are filed as its duplicates")
     lead.classification = "NOT_LEAD"
-    lead.reason = f"Re-judged after it was sent to Vini: {reason}"[:2000]
+    lead.reason = f"Re-judged not a lead {why}: {reason}"[:2000]
     if decided_by:
         lead.decided_by = decided_by
+    logging.getLogger(__name__).info("Lead %s demoted, not deleted (%s)", lead.id, why)
+    return "demoted"
 
 
 # Circle's list responses carry a ~255-char preview (truncated_content) next to
@@ -386,27 +402,39 @@ _PREVIEW_TAIL = re.compile(r"(?:\.{3}|…)$")
 _PREVIEW_SLACK = 12
 
 
-def _is_preview_of(old: str | None, new: str | None) -> bool:
-    """True when ``old`` is a truncated preview of ``new``, whitespace aside."""
+def _stored_match(old: str | None, new: str | None) -> str | None:
+    """How a stored text relates to a newly read one of the same post.
+
+    "same" when they differ only in whitespace (two readers used to join
+    TipTap nodes differently), "preview" when the stored one is a truncated
+    preview of the new one, None when they are different texts.
+    """
     o = _PREVIEW_TAIL.sub("", "".join((old or "").split()))
     n = "".join((new or "").split())
+    if o and o == n:
+        return "same"
     if len(o) < 40 or len(o) >= len(n):
-        return False
-    return n.startswith(o[: len(o) - _PREVIEW_SLACK])
+        return None
+    return "preview" if n.startswith(o[: len(o) - _PREVIEW_SLACK]) else None
 
 
-def _stored_preview_of(
+def _is_preview_of(old: str | None, new: str | None) -> bool:
+    """True when ``old`` is a truncated preview of ``new``, whitespace aside."""
+    return _stored_match(old, new) == "preview"
+
+
+def _stored_copy_of(
     session: Session, *, community_id: int, ctype: str,
     published_at: datetime | None, text: str,
-) -> Post | None:
-    """The row holding an earlier, truncated copy of this post, if any.
+) -> tuple[Post | None, str | None]:
+    """The row holding an earlier copy of this post, and how it relates.
 
     Matched on the post's exact Circle timestamp (readers take it from
     created_at, to the millisecond), then on the text. Undated posts are never
     matched: nothing ties them to a stored row but the text itself.
     """
     if not isinstance(published_at, datetime):
-        return None
+        return None, None
     if published_at.tzinfo is not None:
         published_at = published_at.astimezone(timezone.utc).replace(tzinfo=None)
     rows = session.scalars(
@@ -414,9 +442,18 @@ def _stored_preview_of(
             Post.community_id == community_id,
             Post.content_type == ctype,
             Post.published_at == published_at,
-        )
+        ).order_by(Post.id)
     ).all()
-    return next((r for r in rows if _is_preview_of(r.content, text)), None)
+    for row in rows:
+        how = _stored_match(row.content, text)
+        if how:
+            return row, how
+    return None, None
+
+
+def _stored_preview_of(session: Session, **kw) -> Post | None:
+    row, how = _stored_copy_of(session, **kw)
+    return row if how == "preview" else None
 
 
 def upsert_post(session: Session, *, community_id: int, record: dict) -> tuple[Post, str]:
@@ -439,10 +476,20 @@ def upsert_post(session: Session, *, community_id: int, record: dict) -> tuple[P
         )
     )
     if existing is None:
-        preview = _stored_preview_of(
+        preview, how = _stored_copy_of(
             session, community_id=community_id, ctype=ctype,
             published_at=record.get("published_at"), text=text,
         )
+        if preview is not None and how == "same":
+            # Same text, other whitespace: take over the new identity, keep
+            # the verdict -- there is nothing new to classify.
+            preview.source_content_id = source_id
+            preview.content = text
+            preview.dedup_hash = new_hash
+            preview.simhash = simhash(text)
+            preview.url = record.get("url") or preview.url
+            session.flush()
+            return preview, "unchanged"
         if preview is not None:
             # Same post, stored earlier as Circle's preview. Upgrade that row
             # to the full text under the new identity (so the next read finds

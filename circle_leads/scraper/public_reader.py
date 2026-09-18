@@ -22,6 +22,7 @@ import requests
 
 from circle_leads.scraper.http_client import BROWSER_UA, shared_session
 from circle_leads.scraper.normalize import parse_timestamp, redact_pii, strip_html
+from circle_leads.scraper.tiptap import tiptap_plain, tiptap_text
 
 logger = logging.getLogger(__name__)
 
@@ -199,19 +200,9 @@ class PublicReader:
         return True, records
 
 
-def _tiptap_text(node) -> str:
-    """Flatten Circle's TipTap rich-text JSON (used by comments) to plain text."""
-    out = []
-    if isinstance(node, dict):
-        if node.get("type") == "text" and node.get("text"):
-            out.append(node["text"])
-        elif node.get("circle_ios_fallback_text") and not node.get("content"):
-            # Mentions ("@Name") and links to posts or events ("#Title") are
-            # leaf nodes with no text child; this is the text readers see.
-            out.append(str(node["circle_ios_fallback_text"]))
-        for child in node.get("content", []) or []:
-            out.append(_tiptap_text(child))
-    return " ".join(filter(None, out))
+# One flattener for every reader (see scraper/tiptap.py): a post's storage
+# identity is a hash of its text, so all readers must produce the same string.
+_tiptap_text = tiptap_text
 
 
 def _extract_text(record: dict) -> tuple[str, str]:
@@ -231,7 +222,7 @@ def _extract_text(record: dict) -> tuple[str, str]:
         tb = record["tiptap_body"]
         # The doc may be nested under a "body" key.
         node = tb.get("body") if isinstance(tb.get("body"), dict) else tb
-        full = strip_html(_tiptap_text(node))
+        full = tiptap_plain(node)
         if len(full) > len(body):
             body = full
     return title, body

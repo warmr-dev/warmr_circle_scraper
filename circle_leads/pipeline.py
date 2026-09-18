@@ -465,6 +465,13 @@ def classify_pending(
             lead = s.scalar(select(Lead).where(Lead.post_id == post.id)) or Lead(
                 post_id=post.id
             )
+
+            # A lead once filed as a duplicate stays one. Re-judged on its full
+            # text while the original is still a preview, the post no longer
+            # looks near-identical, and dropping the link would push the same
+            # lead to Vini a second time.
+            if duplicate_lead_id is None and lead.duplicate_of_id not in (None, lead.id):
+                duplicate_lead_id = lead.duplicate_of_id
             lead.classification = result.classification
             lead.confidence = result.confidence
             lead.reason = result.reason

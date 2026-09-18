@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 import requests
 
 from circle_leads.scraper.normalize import parse_timestamp, redact_pii, strip_html
+from circle_leads.scraper.tiptap import tiptap_plain, tiptap_text
 
 logger = logging.getLogger(__name__)
 
@@ -173,46 +174,16 @@ def _post_id(record: dict):
     return record.get("id") or record.get("post_id")
 
 
-def _tiptap_text(node) -> str:
-    """Flatten Circle's tiptap/ProseMirror JSON body to plain text.
-
-    Posts and comments carry the full body as tiptap_body (structured JSON);
-    truncated_content is only a preview. Walking the tree gets the whole text.
-    """
-    if node is None:
-        return ""
-    if isinstance(node, str):
-        return node
-    out: list[str] = []
-    if isinstance(node, dict):
-        # A post's tiptap_body wraps the document -- {"body": {"type": "doc",
-        # ...}, "circle_ios_fallback_text": ..., ...} -- so the walk has to
-        # step into "body". Without it every cookie-read post fell back to
-        # the preview (productizeyourself, 2026-09-19: 252 of 1,039 chars).
-        if "type" not in node and isinstance(node.get("body"), dict):
-            return _tiptap_text(node["body"])
-        if node.get("type") == "text" and isinstance(node.get("text"), str):
-            out.append(node["text"])
-        elif node.get("circle_ios_fallback_text") and not node.get("content"):
-            # Mentions ("@Name") and links to posts or events ("#Title") are
-            # leaf nodes with no text child; this is the text readers see.
-            out.append(str(node["circle_ios_fallback_text"]))
-        for child in (node.get("content") or []):
-            out.append(_tiptap_text(child))
-        # Block nodes -> newline so paragraphs don't run together.
-        if node.get("type") in ("paragraph", "heading", "listItem", "blockquote"):
-            out.append("\n")
-    elif isinstance(node, list):
-        for child in node:
-            out.append(_tiptap_text(child))
-    return "".join(out)
+# One flattener for every reader (see scraper/tiptap.py): a post's storage
+# identity is a hash of its text, so all readers must produce the same string.
+_tiptap_text = tiptap_text
 
 
 def _extract_text(record: dict) -> tuple[str, str]:
     title = strip_html(record.get("name") or record.get("title") or "")
     # Prefer the full tiptap body over the truncated preview, unless the walk
     # came back with less (an unknown body shape).
-    body = _tiptap_text(record.get("tiptap_body")).strip()
+    body = tiptap_plain(record.get("tiptap_body"))
     preview = strip_html(record.get("truncated_content") or "")
     if len(preview) > len(body):
         body = preview

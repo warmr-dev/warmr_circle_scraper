@@ -313,6 +313,13 @@ def _triage_posts(
             lead = s.scalar(select(Lead).where(Lead.post_id == post_pk)) or Lead(
                 post_id=post_pk
             )
+
+            # A lead once filed as a duplicate stays one. Re-judged on its full
+            # text while the original is still a preview, the post no longer
+            # looks near-identical, and dropping the link would push the same
+            # lead to Vini a second time.
+            if duplicate_lead_id is None and lead.duplicate_of_id not in (None, lead.id):
+                duplicate_lead_id = lead.duplicate_of_id
             lead.classification = classification.classification
             lead.confidence = classification.confidence
             lead.reason = classification.reason
