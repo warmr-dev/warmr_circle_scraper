@@ -187,34 +187,9 @@ def create_app(
         with db.session() as s:
             rows = query_leads(
                 s, role=role, skills=skill_list, community=community,
-                priority=priority, min_score=min_score, limit=limit,
+                priority=priority, min_score=min_score, review_status=status,
+                limit=limit,
             )
-            # query_leads does not carry review state, so join it on here.
-            review = {
-                lid: (st, note)
-                for lid, st, note in s.execute(
-                    select(Lead.id, Lead.review_status, Lead.reason)
-                ).all()
-            }
-            ids = {
-                (p.content, l.id)
-                for l, p in s.execute(
-                    select(Lead, Post).join(Post, Lead.post_id == Post.id)
-                ).all()
-            }
-            by_content = {c: i for c, i in ids}
-
-        for row in rows:
-            lead_id = by_content.get(row["content"])
-            row["id"] = lead_id
-            row["review_status"] = (
-                review.get(lead_id, ("pending_review", None))[0]
-                if lead_id
-                else "pending_review"
-            )
-
-        if status:
-            rows = [r for r in rows if r.get("review_status") == status]
         return {"leads": rows, "count": len(rows)}
 
     @app.post("/api/leads/{lead_id}/status")
@@ -1104,184 +1079,134 @@ def create_app(
     def api_stats(_: None = Depends(require_auth)) -> dict[str, Any]:
         now = datetime.now(timezone.utc).replace(tzinfo=None)
         today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        # Every figure below used to be its own COUNT query -- 21 round trips
+        # per Overview load, each one a trip to the database. They're folded
+        # into a handful of conditional aggregates (COUNT(*) FILTER (WHERE ..))
+        # so the page costs ~5 queries on one connection.
+        c = Community
+        not_attempted = c.join_status == JoinStatus.NOT_ATTEMPTED.value
+        joined = c.join_status == JoinStatus.JOINED.value
+
+        def n(*conds):
+            return func.count().filter(*conds)
+
         with db.session() as s:
-            communities = s.scalar(select(func.count()).select_from(Community)) or 0
-            posts = s.scalar(select(func.count()).select_from(Post)) or 0
-            leads = s.scalar(
-                select(func.count()).select_from(Lead).where(Lead.classification == "LEAD")
-            ) or 0
-            leads_today = s.scalar(
-                select(func.count()).select_from(Lead).where(
-                    Lead.classification == "LEAD", Lead.created_at >= today_start,
+            comm = s.execute(
+                select(
+                    func.count().label("communities"),
+                    n(c.icp_flag.is_(True)).label("icp_flagged"),
+                    n(joined).label("joined_count"),
+                    n(joined, c.join_attempted_at >= today_start).label("joined_today"),
+                    # Mirrors classify_icp_pending's own join-queue gate
+                    # (icp_flag AND circle AND free_join/paid AND not_attempted).
+                    n(c.icp_flag.is_(True), c.platform == "circle",
+                      c.join_type.in_(["free_join", "paid"]),
+                      not_attempted).label("free_join_backlog"),
+                    # The community-scraping funnel: found (persisted) ->
+                    # analyzed (ICP scored) -> queued for the scraper (ICP-fit,
+                    # on a real Circle host, not attempted yet) -> actually on
+                    # the scraper (harvest.py has synced it at least once).
+                    n(c.discovered_at >= today_start).label("found_today"),
+                    n(c.icp_checked_at.is_not(None)).label("analyzed_total"),
+                    n(c.icp_checked_at >= today_start).label("analyzed_today"),
+                    # Only a real Circle host can be read or joined; unfiltered
+                    # this also counted discover.circle.so marketing cards and
+                    # non-Circle landing pages, overstating the backlog ~9x.
+                    n(c.icp_flag.is_(True), c.platform == "circle",
+                      not_attempted).label("queued_for_scraper"),
+                    # ICP-fit but stuck *before* the queue (mostly unresolved
+                    # Discover cards) -- reported so the drop stays visible.
+                    n(c.icp_flag.is_(True),
+                      or_(c.platform != "circle", c.platform.is_(None)),
+                      not_attempted).label("queued_unresolved"),
+                    n(c.last_synced_at.is_not(None)).label("on_scraper_total"),
+                    # Communities *read* today, not newly added: harvest re-reads
+                    # its head of the list every run, so this is throughput.
+                    n(c.last_synced_at >= today_start).label("on_scraper_today"),
+                    select(func.count()).select_from(Post)
+                    .scalar_subquery().label("posts"),
                 )
-            ) or 0
-            by_priority = dict(
-                s.execute(
-                    select(Lead.priority, func.count()).group_by(Lead.priority)
-                ).all()
-            )
-            by_status = dict(
-                s.execute(
-                    select(Lead.review_status, func.count()).group_by(Lead.review_status)
-                ).all()
-            )
-            decided = dict(
-                s.execute(
-                    select(Lead.decided_by, func.count()).group_by(Lead.decided_by)
-                ).all()
-            )
-
-            # Overview additions for the ICP/auto-join pivot: communities by
-            # platform, how many passed the ICP filter, how many the bot has
-            # actually joined, and how big the free-join backlog still is.
-            # "Backlog remaining" mirrors classify_icp_pending's own join-queue
-            # gate (icp_flag AND circle AND free_join/paid AND not_attempted).
+            ).one()._mapping
             by_platform = dict(
-                s.execute(
-                    select(Community.platform, func.count()).group_by(Community.platform)
-                ).all()
+                s.execute(select(c.platform, func.count()).group_by(c.platform)).all()
             )
-            icp_flagged = s.scalar(
-                select(func.count()).select_from(Community).where(Community.icp_flag.is_(True))
-            ) or 0
-            joined_count = s.scalar(
-                select(func.count()).select_from(Community)
-                .where(Community.join_status == JoinStatus.JOINED.value)
-            ) or 0
-            joined_today = s.scalar(
-                select(func.count()).select_from(Community).where(
-                    Community.join_status == JoinStatus.JOINED.value,
-                    Community.join_attempted_at.is_not(None),
-                    Community.join_attempted_at >= today_start,
-                )
-            ) or 0
-            free_join_backlog = s.scalar(
-                select(func.count()).select_from(Community).where(
-                    Community.icp_flag.is_(True),
-                    Community.platform == "circle",
-                    Community.join_type.in_(["free_join", "paid"]),
-                    Community.join_status == JoinStatus.NOT_ATTEMPTED.value,
-                )
-            ) or 0
 
-            # The community-scraping funnel: found (persisted) -> analyzed (ICP
-            # scored) -> queued for the scraper (ICP-fit, on a real Circle host,
-            # not attempted yet) -> actually put on the scraper (harvest.py has
-            # synced it at least once -- ScrapeRun/pipeline.py is the older,
-            # consent-gated path and isn't written by the live public-read
-            # worker, so it can't be used here). Each stage's "found"/"analyzed"
-            # split by today vs all-time; the queue is a point-in-time depth,
-            # not a rate, so it gets no today figure.
-            #
-            # Caveat worth knowing when reading these numbers: `on_scraper_today`
-            # counts communities *read* today, not communities that entered the
-            # scraper today. harvest re-reads its head of the list every run, so
-            # the same rows recur day after day and this is a throughput figure,
-            # not growth. The UI labels it accordingly.
-            found_today = s.scalar(
-                select(func.count()).select_from(Community)
-                .where(Community.discovered_at >= today_start)
-            ) or 0
-            analyzed_total = s.scalar(
-                select(func.count()).select_from(Community)
-                .where(Community.icp_checked_at.is_not(None))
-            ) or 0
-            analyzed_today = s.scalar(
-                select(func.count()).select_from(Community).where(
-                    Community.icp_checked_at.is_not(None),
-                    Community.icp_checked_at >= today_start,
-                )
-            ) or 0
-            # Only a real Circle host can actually be read or joined. Every
-            # other consumer of this backlog already says so -- harvest's
-            # _community_hosts, joiner.select_join_candidates, and
-            # free_join_backlog a few lines above -- and this counter was the
-            # single place that forgot to. Unfiltered it also counted
-            # discover.circle.so marketing cards (which carry a /products/
-            # checkout URL, not a community host) and outright non-Circle
-            # landing pages, overstating the workable backlog roughly 9x.
-            queued_for_scraper = s.scalar(
-                select(func.count()).select_from(Community).where(
-                    Community.icp_flag.is_(True),
-                    Community.platform == "circle",
-                    Community.join_status == JoinStatus.NOT_ATTEMPTED.value,
-                )
-            ) or 0
-            # The rows the filter above removes: ICP-fit but stuck *before* the
-            # queue rather than standing in it. Reported alongside so the drop
-            # stays visible instead of silently disappearing from the funnel --
-            # most are unresolved Discover cards, which
-            # `discover-directory --recheck-unresolved` converts into real hosts.
-            queued_unresolved = s.scalar(
-                select(func.count()).select_from(Community).where(
-                    Community.icp_flag.is_(True),
-                    or_(Community.platform != "circle", Community.platform.is_(None)),
-                    Community.join_status == JoinStatus.NOT_ATTEMPTED.value,
-                )
-            ) or 0
-            on_scraper_total = s.scalar(
-                select(func.count()).select_from(Community)
-                .where(Community.last_synced_at.is_not(None))
-            ) or 0
-            on_scraper_today = s.scalar(
-                select(func.count()).select_from(Community).where(
-                    Community.last_synced_at.is_not(None),
-                    Community.last_synced_at >= today_start,
-                )
-            ) or 0
+            # One grouped pass over leads gives the three breakdowns and the
+            # LEAD totals together.
+            is_lead = Lead.classification == "LEAD"
+            by_priority: Counter = Counter()
+            by_status: Counter = Counter()
+            decided: Counter = Counter()
+            leads = leads_today = 0
+            for prio, status, who, total, lead_n, lead_today_n in s.execute(
+                select(
+                    Lead.priority, Lead.review_status, Lead.decided_by,
+                    func.count(), n(is_lead),
+                    n(is_lead, Lead.created_at >= today_start),
+                ).group_by(Lead.priority, Lead.review_status, Lead.decided_by)
+            ).all():
+                by_priority[prio] += total
+                by_status[status] += total
+                decided[who] += total
+                leads += lead_n
+                leads_today += lead_today_n
 
             # Leads and communities per day for the last fortnight (drives the
-            # Overview growth chart).
-            cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=14)
-            daily_rows = s.execute(
-                select(Lead.created_at).where(Lead.created_at >= cutoff)
-            ).all()
-            community_daily_rows = s.execute(
-                select(Community.discovered_at).where(Community.discovered_at >= cutoff)
-            ).all()
+            # Overview growth chart), counted in the database.
+            cutoff = now - timedelta(days=14)
 
-        def daily_timeline(rows: list) -> list[dict[str, Any]]:
-            counts = Counter(d[0].date().isoformat() for d in rows if d[0])
-            points = [
-                {
-                    "date": (
-                        datetime.now(timezone.utc).date() - timedelta(days=i)
-                    ).isoformat(),
-                    "count": 0,
+            def per_day(col) -> dict[str, int]:
+                day = func.date(col)
+                return {
+                    str(d)[:10]: cnt
+                    for d, cnt in s.execute(
+                        select(day, func.count()).where(col >= cutoff).group_by(day)
+                    ).all()
+                    if d is not None
                 }
-                for i in range(13, -1, -1)
-            ]
-            for point in points:
-                point["count"] = counts.get(point["date"], 0)
-            return points
 
-        leads_timeline = daily_timeline(daily_rows)
-        communities_timeline = daily_timeline(community_daily_rows)
+            lead_days = per_day(Lead.created_at)
+            community_days = per_day(c.discovered_at)
+
+        communities = comm["communities"]
+        posts = comm["posts"] or 0
+
+        def daily_timeline(counts: dict[str, int]) -> list[dict[str, Any]]:
+            today = datetime.now(timezone.utc).date()
+            return [
+                {"date": d, "count": counts.get(d, 0)}
+                for d in (
+                    (today - timedelta(days=i)).isoformat() for i in range(13, -1, -1)
+                )
+            ]
+
+        leads_timeline = daily_timeline(lead_days)
+        communities_timeline = daily_timeline(community_days)
 
         return {
             "communities": communities,
             "posts": posts,
             "leads": leads,
             "leads_today": leads_today,
-            "by_priority": by_priority,
-            "by_status": by_status,
-            "decided_by": decided,
+            "by_priority": dict(by_priority),
+            "by_status": dict(by_status),
+            "decided_by": dict(decided),
             "by_platform": by_platform,
-            "icp_flagged": icp_flagged,
-            "joined_count": joined_count,
-            "joined_today": joined_today,
-            "free_join_backlog": free_join_backlog,
+            "icp_flagged": comm["icp_flagged"],
+            "joined_count": comm["joined_count"],
+            "joined_today": comm["joined_today"],
+            "free_join_backlog": comm["free_join_backlog"],
             # The scraping pipeline funnel: found -> analyzed -> queued for the
             # scraper -> actually on the scraper. See api_stats for definitions.
             "funnel": {
-                "found_today": found_today,
+                "found_today": comm["found_today"],
                 "found_total": communities,
-                "analyzed_today": analyzed_today,
-                "analyzed_total": analyzed_total,
-                "queued_for_scraper": queued_for_scraper,
-                "queued_unresolved": queued_unresolved,
-                "on_scraper_today": on_scraper_today,
-                "on_scraper_total": on_scraper_total,
+                "analyzed_today": comm["analyzed_today"],
+                "analyzed_total": comm["analyzed_total"],
+                "queued_for_scraper": comm["queued_for_scraper"],
+                "queued_unresolved": comm["queued_unresolved"],
+                "on_scraper_today": comm["on_scraper_today"],
+                "on_scraper_total": comm["on_scraper_total"],
             },
             # "timeline" kept for backward compatibility with older clients;
             # new dashboards should use leads_timeline / communities_timeline.
@@ -1367,17 +1292,21 @@ def create_app(
             ConnectionState.ERROR.value,
         }
         with db.session() as s:
-            all_communities = s.scalars(select(Community)).all()
             # A community can migrate off Circle after we already had a
             # session for it; there's no Circle login left to refresh, so
-            # exclude it rather than showing a permanently-broken row.
+            # exclude it rather than showing a permanently-broken row. Only the
+            # url column of non-Circle rows is needed -- loading every
+            # Community object (12k+) made this the slowest request.
             non_circle_hosts: set[str] = set()
-            for c in all_communities:
-                if c.platform is not None and c.platform != "circle":
-                    try:
-                        non_circle_hosts.add(_clean_host(c.url))
-                    except HTTPException:
-                        pass
+            for (url,) in s.execute(
+                select(Community.url).where(
+                    Community.platform.is_not(None), Community.platform != "circle"
+                )
+            ).all():
+                try:
+                    non_circle_hosts.add(_clean_host(url))
+                except HTTPException:
+                    pass
             to_refresh = sorted(
                 (
                     {
@@ -1532,21 +1461,28 @@ def create_app(
 
     @app.get("/api/schedule")
     def api_schedule(_: None = Depends(require_auth)) -> dict[str, Any]:
+        from circle_leads.storage.models import Setting
         from circle_leads.storage.settings_store import (
-            get_schedule, get_discovery_schedule, get_setting, SCHEDULE_INTERVALS,
-            KEY_LAST_RUN, KEY_DISCOVERY_LAST_RUN,
+            SCHEDULE_INTERVALS, DEFAULT_SCHEDULE, DEFAULT_DISCOVERY,
+            KEY_SCHEDULE, KEY_LAST_RUN, KEY_DISCOVERY, KEY_DISCOVERY_LAST_RUN,
         )
+        # One query for all four settings instead of a get_setting() each.
+        keys = (KEY_SCHEDULE, KEY_LAST_RUN, KEY_DISCOVERY, KEY_DISCOVERY_LAST_RUN)
+        with db.session() as s:
+            vals = dict(s.execute(
+                select(Setting.key, Setting.value).where(Setting.key.in_(keys))
+            ).all())
         return {
-            "schedule": get_schedule(db),
+            "schedule": vals.get(KEY_SCHEDULE) or DEFAULT_SCHEDULE,
             "options": list(SCHEDULE_INTERVALS.keys()),
-            "last_run": get_setting(db, KEY_LAST_RUN),
+            "last_run": vals.get(KEY_LAST_RUN),
             # Second schedule: how often the harvest's web-search (discovery)
             # phase runs. Reading known communities always runs; searching for
             # new ones is metered, so it runs less often.
-            "discovery_schedule": get_discovery_schedule(db),
+            "discovery_schedule": vals.get(KEY_DISCOVERY) or DEFAULT_DISCOVERY,
             "discovery_options": ["every_run", "every_6h", "every_12h",
                                   "daily", "weekly", "off"],
-            "last_search": get_setting(db, KEY_DISCOVERY_LAST_RUN),
+            "last_search": vals.get(KEY_DISCOVERY_LAST_RUN),
         }
 
     @app.post("/api/schedule")
