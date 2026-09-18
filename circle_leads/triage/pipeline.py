@@ -30,6 +30,7 @@ from circle_leads.storage.database import (
     find_near_duplicate,
     get_or_create_author,
     get_or_create_community,
+    live_original,
     retire_lead,
     upsert_post,
 )
@@ -304,7 +305,8 @@ def _triage_posts(
             )
             duplicate = find_near_duplicate(s, post)
             duplicate_lead_id = (
-                duplicate.lead.id if duplicate is not None and duplicate.lead else None
+                duplicate.lead.id
+                if duplicate is not None and live_original(duplicate.lead) else None
             )
             if duplicate_lead_id:
                 result.duplicates += 1
@@ -319,7 +321,8 @@ def _triage_posts(
             # looks near-identical, and dropping the link would push the same
             # lead to Vini a second time.
             if duplicate_lead_id is None and lead.duplicate_of_id not in (None, lead.id):
-                duplicate_lead_id = lead.duplicate_of_id
+                if live_original(s.get(Lead, lead.duplicate_of_id)):
+                    duplicate_lead_id = lead.duplicate_of_id
             lead.classification = classification.classification
             lead.confidence = classification.confidence
             lead.reason = classification.reason

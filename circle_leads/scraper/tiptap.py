@@ -9,8 +9,6 @@ readers became two rows (review of 2026-09-19).
 
 from __future__ import annotations
 
-from circle_leads.scraper.normalize import strip_html
-
 # Block nodes end a line, so paragraphs and list items don't run together.
 _BLOCKS = frozenset({"paragraph", "heading", "listItem", "blockquote", "codeBlock"})
 
@@ -49,5 +47,9 @@ def tiptap_text(node) -> str:
 
 
 def tiptap_plain(node) -> str:
-    """tiptap_text on one line, the way every reader stores a post body."""
-    return strip_html(tiptap_text(node))
+    """tiptap_text on one line, the way every reader stores a post body.
+
+    Whitespace only: TipTap text nodes are plain text, and strip_html would
+    delete anything between a literal "<" and ">" ("<5 years ... ->").
+    """
+    return " ".join(tiptap_text(node).split())

@@ -178,3 +178,78 @@ def test_same_name_with_a_different_profile_is_another_author(db):
         again = get_or_create_author(s, community_id=c.id, source_author_id=None,
                                      display_name="Alex", profile_url="https://x/u/1")
         assert a.id != b.id and again.id == a.id
+
+
+# --- second review (2026-09-19) ---------------------------------------------
+
+def _rejudge(s, post):
+    """What both pipelines do for a post judged LEAD: link it to an original."""
+    from circle_leads.storage.database import find_near_duplicate, live_original
+
+    lead = s.scalar(select(Lead).where(Lead.post_id == post.id))
+    dup = find_near_duplicate(s, post)
+    link = dup.lead.id if dup is not None and live_original(dup.lead) else None
+    if link is None and lead.duplicate_of_id not in (None, lead.id):
+        if live_original(s.get(Lead, lead.duplicate_of_id)):
+            link = lead.duplicate_of_id
+    lead.duplicate_of_id = link
+    return lead
+
+
+def test_an_original_is_never_filed_as_its_reposts_duplicate(db):
+    # Cookie scans read newest first: the repost is upgraded before the
+    # original, and the original then found the repost as its "duplicate" --
+    # two leads pointing at each other, both gone from the lead list.
+    text = "We are hiring a contract Flutter developer for our delivery app, DM me. " * 3
+    with db.session() as s:
+        c = get_or_create_community(s, slug="acme", url="https://acme.circle.so")
+        x = _post(s, c.id, "x", text, when=datetime(2026, 8, 1))
+        z = _post(s, c.id, "z", text + " (reposted)", when=datetime(2026, 9, 1))
+        lx = Lead(post_id=x.id, classification="LEAD", external_synced_at=datetime(2026, 8, 2))
+        s.add(lx)
+        s.flush()
+        lz = Lead(post_id=z.id, classification="LEAD", duplicate_of_id=lx.id)
+        s.add(lz)
+        s.flush()
+        assert _rejudge(s, z).duplicate_of_id == lx.id
+        assert _rejudge(s, x).duplicate_of_id is None     # the original stays one
+
+
+def test_a_repost_of_a_demoted_unsent_original_stands_on_its_own(db):
+    text = "We are hiring a contract Flutter developer for our delivery app, DM me. " * 3
+    with db.session() as s:
+        c = get_or_create_community(s, slug="acme", url="https://acme.circle.so")
+        x = _post(s, c.id, "x", text, when=datetime(2026, 8, 1))
+        z = _post(s, c.id, "z", text + " (reposted)", when=datetime(2026, 9, 1))
+        lx = Lead(post_id=x.id, classification="NOT_LEAD", review_status="contacted")
+        s.add(lx)
+        s.flush()
+        s.add(Lead(post_id=z.id, classification="LEAD", duplicate_of_id=lx.id))
+        s.flush()
+        assert _rejudge(s, z).duplicate_of_id is None     # visible, and pushable
+
+
+def test_a_repost_of_a_sent_original_stays_its_duplicate(db):
+    text = "We are hiring a contract Flutter developer for our delivery app, DM me. " * 3
+    with db.session() as s:
+        c = get_or_create_community(s, slug="acme", url="https://acme.circle.so")
+        x = _post(s, c.id, "x", text, when=datetime(2026, 8, 1))
+        z = _post(s, c.id, "z", text + " (reposted)", when=datetime(2026, 9, 1))
+        lx = Lead(post_id=x.id, classification="NOT_LEAD", external_synced_at=datetime(2026, 8, 2))
+        s.add(lx)
+        s.flush()
+        s.add(Lead(post_id=z.id, classification="LEAD", duplicate_of_id=lx.id))
+        s.flush()
+        assert _rejudge(s, z).duplicate_of_id == lx.id    # Vini has it already
+
+
+def test_angle_brackets_in_a_post_survive_the_flattening():
+    from circle_leads.scraper.tiptap import tiptap_plain
+
+    doc = {"type": "doc", "content": [
+        {"type": "paragraph", "content": [
+            {"type": "text", "text": "Need a Flutter dev with <5 years is fine, budget $6k/month."}]},
+        {"type": "paragraph", "content": [
+            {"type": "text", "text": "Apply -> DM me with your portfolio."}]}]}
+    assert tiptap_plain(doc) == ("Need a Flutter dev with <5 years is fine, budget "
+                                 "$6k/month. Apply -> DM me with your portfolio.")

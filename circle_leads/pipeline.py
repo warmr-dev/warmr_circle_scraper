@@ -53,6 +53,7 @@ from circle_leads.storage.database import (
     get_or_create_author,
     get_or_create_community,
     get_or_create_space,
+    live_original,
     retire_lead,
     upsert_post,
 )
@@ -458,7 +459,7 @@ def classify_pending(
 
             duplicate = find_near_duplicate(s, post)
             duplicate_lead_id = None
-            if duplicate is not None and duplicate.lead is not None:
+            if duplicate is not None and live_original(duplicate.lead):
                 duplicate_lead_id = duplicate.lead.id
                 stats["duplicates"] += 1
 
@@ -471,7 +472,8 @@ def classify_pending(
             # looks near-identical, and dropping the link would push the same
             # lead to Vini a second time.
             if duplicate_lead_id is None and lead.duplicate_of_id not in (None, lead.id):
-                duplicate_lead_id = lead.duplicate_of_id
+                if live_original(s.get(Lead, lead.duplicate_of_id)):
+                    duplicate_lead_id = lead.duplicate_of_id
             lead.classification = result.classification
             lead.confidence = result.confidence
             lead.reason = result.reason

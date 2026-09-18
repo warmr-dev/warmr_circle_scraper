@@ -360,6 +360,18 @@ def get_or_create_author(
     return a
 
 
+def live_original(lead: Lead | None) -> bool:
+    """Whether a lead can stand as the original its near-copies point at.
+
+    Still a LEAD, or already sent to Vini (production has that content, so a
+    repost must not go out again). A demoted lead that was never sent is
+    neither: filing a repost as its duplicate would hide the repost for good.
+    """
+    return lead is not None and (
+        lead.classification == "LEAD" or lead.external_synced_at is not None
+    )
+
+
 def retire_lead(session: Session, lead: Lead, *, reason: str,
                 decided_by: str | None = None) -> str:
     """Take back a lead that a re-classification says is not one.
@@ -591,7 +603,7 @@ def find_near_duplicate(
         .where(
             Post.community_id == post.community_id,
             Post.dedup_hash == post.dedup_hash,
-            Post.id != post.id,
+            Post.id < post.id,
         )
         .order_by(Post.id)
     )
@@ -606,9 +618,14 @@ def find_near_duplicate(
     rows = session.execute(
         select(Post.id, Post.simhash).where(
             Post.community_id == post.community_id,
-            Post.id != post.id,
+            # Earlier posts only, as the docstring always said: the oldest copy
+            # is the original. With "any other post", re-judging an original
+            # after its repost filed each lead as the other's duplicate, and
+            # both vanished from the lead list.
+            Post.id < post.id,
             Post.simhash.is_not(None),
         )
+        .order_by(Post.id)
     ).all()
     for other_id, other_simhash in rows:
         if hamming_distance(post.simhash, other_simhash) <= threshold:
