@@ -281,6 +281,14 @@ def test_confident_llm_no_is_stored_as_a_low_fit_score():
     assert result.score == 10
 
 
+def test_llm_no_read_as_fit_probability_also_stays_low():
+    # The same model also answers a "no" as "0.1 chance it fits"; inverting
+    # that blindly would store 90. Either reading of a "no" must land low.
+    backend = StubBackend({"fit": False, "confidence": 0.1, "reason": "unclear"})
+    result = classify_icp_fit("Product People", "A group of product managers", llm=backend)
+    assert result.score == 10
+
+
 def test_confident_llm_fit_keeps_its_confidence_as_the_score():
     backend = StubBackend({"fit": True, "confidence": 0.8, "reason": "builders"})
     result = classify_icp_fit("Product People", "A group of product managers",
