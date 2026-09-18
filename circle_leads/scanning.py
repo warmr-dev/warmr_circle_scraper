@@ -49,7 +49,7 @@ def scan_cookie_host(db: Database, requirements: Requirements, host: str, *,
     """
     from circle_leads.web.replay_store import load_cookies
     from circle_leads.scraper.member_api_reader import (
-        MemberApiReader, SessionInvalid, ChallengeHit, fetch_space_posts,
+        MemberApiReader, SessionInvalid, ChallengeHit, ProfileIncomplete, fetch_space_posts,
     )
     from circle_leads.triage.pipeline import triage_records
     from circle_leads.discovery.discover_communities import unique_slug_for_host
@@ -115,6 +115,11 @@ def scan_cookie_host(db: Database, requirements: Requirements, host: str, *,
         state = ConnectionState.SESSION_EXPIRED
         detail = "Session rejected -- refresh the cookie."
     except ChallengeHit as exc:
+        state = ConnectionState.ERROR
+        detail = str(exc)
+    except ProfileIncomplete as exc:
+        # Joined but the profile step is open: reported as such instead of the
+        # old silent "connected, 0 spaces" (the 400 used to read as no spaces).
         state = ConnectionState.ERROR
         detail = str(exc)
     except Exception as exc:  # noqa: BLE001 - one bad host must not stop a batch

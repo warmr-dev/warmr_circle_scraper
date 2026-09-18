@@ -1,0 +1,33 @@
+# What the join bot may say about each Circle account when a community's
+# sign-up or profile form has a required question (circle_leads/join/forms.py).
+#
+# The bot answers ONLY from these facts. Anything they don't cover -- or any
+# fact left null -- sends that community to a human instead of letting the
+# model invent an answer. Keep every value true: community admins read these,
+# and the people who post in those communities are the ones we want to work
+# with.
+#
+# `default` applies to every account; an entry under `accounts` (main, test,
+# 3, ...) adds or overrides facts for that one account. Override the whole file
+# with JOIN_PERSONAS_PATH.
+
+# Profile texts approved by the user on 2026-09-23 (WORKLOG.md, the
+# foundercareers join). A choice field such as "Role" takes the option closest
+# to these facts -- "Partner" on foundercareers.
+default:
+  full_name: "Erkebulan"
+  time_zone: "(GMT +07:00) Jakarta"
+  location: "Vietnam"
+  headline: "Business development at Rapid Developers"
+  bio: >-
+    I work with a small software development team. Here to follow the
+    discussions, meet founders and see where we can help.
+  company: "Rapid Developers"
+  company_website: "rapidevelopers.com"
+  what_the_company_does: "Software development"
+  role: "Business development"
+  reason_for_joining: "To follow the discussions, meet founders and see where we can help."
+
+accounts:
+  main: {}
+  test: {}

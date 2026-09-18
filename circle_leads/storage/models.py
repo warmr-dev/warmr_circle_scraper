@@ -378,6 +378,18 @@ class JoinStatus(str, enum.Enum):
     INVITE_SKIP = "invite_skip"
     SUBSCRIPTION_EXPIRED_SKIP = "subscription_expired_skip"
     FAILED = "failed"
+    # The host (or the custom domain it redirects to) no longer resolves --
+    # nothing to join. Recorded so the queue stops spending visits on it.
+    DEAD_HOST = "dead_host"
+    # Circle made us a member but the new-member "Create a profile" step is
+    # still open: until it is saved every API call answers 400 "Please confirm
+    # before proceeding", so nothing can be read. Stays in the join queue so
+    # the bot comes back to finish it.
+    PROFILE_PENDING = "profile_pending"
+    # Signing in goes through the community's own website (ecommerce, ulule),
+    # not Circle: it needs an account there, which is a person's decision. The
+    # bot never types the Circle login into such a page.
+    EXTERNAL_LOGIN = "external_login"
 
 
 class ConnectionState(str, enum.Enum):
@@ -636,3 +648,70 @@ class WatchState(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=utcnow, onupdate=utcnow
     )
+
+
+class JoinFormQuestion(Base):
+    """A question some community's join/profile form asked, seen by the bot.
+
+    One row per distinct question, keyed by its field type plus normalised
+    label, so the same "Company" field on fifty communities is one row with
+    ``times_seen=50``. Choices are per community and kept only as the last
+    example -- the answer is matched against each form's own options at fill
+    time. See circle_leads/join/forms.py.
+    """
+
+    __tablename__ = "join_form_questions"
+    __table_args__ = (UniqueConstraint("question_key", name="uq_join_form_question_key"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    question_key: Mapped[str] = mapped_column(String(300), index=True)
+    label: Mapped[str] = mapped_column(Text)
+    field_type: Mapped[str] = mapped_column(String(32))
+    description: Mapped[str | None] = mapped_column(Text)
+    example_choices: Mapped[list | None] = mapped_column(JSON, default=list)
+    # Set when a differently-worded question was judged to mean the same thing
+    # as an earlier one; its answers are then shared with that one.
+    same_as_id: Mapped[int | None] = mapped_column(ForeignKey("join_form_questions.id"))
+    times_seen: Mapped[int] = mapped_column(Integer, default=0)
+    first_host: Mapped[str | None] = mapped_column(String(255))
+    last_host: Mapped[str | None] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class JoinFormAnswer(Base):
+    """The answer one account gives to one question -- reused on every form
+    that asks it. ``source`` says who wrote it (the persona file, the LLM, or a
+    person); a person can correct any row and later fills use the correction."""
+
+    __tablename__ = "join_form_answers"
+    __table_args__ = (
+        UniqueConstraint("question_id", "account", name="uq_join_form_answer_question_account"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    question_id: Mapped[int] = mapped_column(ForeignKey("join_form_questions.id"), index=True)
+    account: Mapped[str] = mapped_column(String(32), index=True)
+    answer: Mapped[str] = mapped_column(Text)
+    source: Mapped[str] = mapped_column(String(16))  # persona | ai | human
+    reviewed: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class JoinFormFill(Base):
+    """What the bot put into which community's form, as which account --
+    the audit trail for "what did we tell this community about ourselves"."""
+
+    __tablename__ = "join_form_fills"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    community_id: Mapped[int | None] = mapped_column(ForeignKey("communities.id"), index=True)
+    host: Mapped[str | None] = mapped_column(String(255))
+    account: Mapped[str] = mapped_column(String(32))
+    question_id: Mapped[int | None] = mapped_column(ForeignKey("join_form_questions.id"))
+    label: Mapped[str] = mapped_column(Text)
+    answer: Mapped[str | None] = mapped_column(Text)
+    # answered | needs_human (no answer the bot may give)
+    outcome: Mapped[str] = mapped_column(String(32))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)

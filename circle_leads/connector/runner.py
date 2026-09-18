@@ -66,7 +66,7 @@ def sync_community_http(
     """
     from circle_leads.scraper.browser_reader import BrowserFeedReader, NotLoggedIn
     from circle_leads.scraper.member_api_reader import (
-        MemberApiReader, SessionInvalid, fetch_space_posts as http_fetch,
+        MemberApiReader, ProfileIncomplete, SessionInvalid, fetch_space_posts as http_fetch,
     )
 
     host = host.replace("https://", "").strip("/")
@@ -92,6 +92,10 @@ def sync_community_http(
     except SessionInvalid:
         backend.report_connection(host=host, state=ConnectionState.SESSION_EXPIRED.value)
         return {"host": host, "state": "session_expired"}
+    except ProfileIncomplete as exc:
+        backend.report_connection(host=host, state=ConnectionState.ERROR.value,
+                                  state_detail=str(exc))
+        return {"host": host, "state": "error"}
 
     if not spaces:
         backend.report_connection(host=host, state=ConnectionState.ACCESS_DENIED.value,

@@ -411,3 +411,52 @@ def test_tiptap_mentions_and_post_links_keep_their_text():
     ]}]}
     text = _tiptap_text(doc)
     assert "@Jane Doe" in text and "#Hiring board" in text
+
+
+# --- a join whose new-member profile step is still open --------------------
+
+def test_profile_step_still_open_is_reported_not_read_as_no_spaces():
+    # Confirmed live 2026-09-18: until "Create a profile" is saved, Circle
+    # answers every API call with this 400. It used to come back as None, so
+    # the scan wrote "connected, 0 spaces" -- a silent failure.
+    from circle_leads.scraper.member_api_reader import ProfileIncomplete
+
+    routes = {"/internal_api/spaces": _Resp(
+        400, {"success": False, "message": "Please confirm before proceeding", "error_details": []})}
+    with pytest.raises(ProfileIncomplete, match="profile step"):
+        _reader(routes).list_spaces()
+
+
+def test_any_other_400_still_reads_as_nothing():
+    routes = {"/internal_api/spaces": _Resp(400, {"success": False, "message": "Bad request"})}
+    assert _reader(routes).list_spaces() == []
+
+
+def test_scan_reports_an_unfinished_join_as_an_error_with_the_reason(monkeypatch):
+    import tempfile
+
+    from sqlalchemy import select
+
+    from circle_leads.config.settings import load_requirements
+    from circle_leads.scanning import scan_cookie_host
+    from circle_leads.scraper import member_api_reader
+    from circle_leads.storage.database import Database
+    from circle_leads.storage.models import CircleConnection
+    from circle_leads.web import replay_store
+
+    db = Database("sqlite:///" + tempfile.mktemp(suffix=".db"))
+    monkeypatch.setattr(replay_store, "load_cookies",
+                        lambda db_, host: [{"name": "_circle_session", "value": "tok"}])
+
+    def fake_list_spaces(self):
+        raise member_api_reader.ProfileIncomplete("Circle answered 400: the join is not finished")
+
+    monkeypatch.setattr(member_api_reader.MemberApiReader, "list_spaces", fake_list_spaces)
+
+    out = scan_cookie_host(db, load_requirements(), "x.circle.so")
+
+    assert out["state"] == "error"
+    with db.session() as s:
+        conn = s.scalar(select(CircleConnection).where(CircleConnection.host == "x.circle.so"))
+        assert conn.state == "error"
+        assert "join is not finished" in conn.state_detail

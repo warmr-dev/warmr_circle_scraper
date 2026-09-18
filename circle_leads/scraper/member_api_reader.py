@@ -55,6 +55,14 @@ class ChallengeHit(RuntimeError):
     for /internal_api, but reported rather than worked around if it does)."""
 
 
+class ProfileIncomplete(RuntimeError):
+    """Circle answered 400 "Please confirm before proceeding": the member has
+    joined but never saved the new-member "Create a profile" step, and every
+    API call is refused until they do. Confirmed live 2026-09-18 on two
+    bot-joined communities. Not an expired session -- re-pasting the cookie
+    won't help; finishing the profile step will."""
+
+
 @dataclass
 class MemberApiReader:
     """Reads a Circle community's spaces and posts over HTTP with a session."""
@@ -95,6 +103,16 @@ class MemberApiReader:
                 f"Circle rejected the session on {path} ({r.status_code}). "
                 "The cookie is missing or expired -- re-authenticate."
             )
+        if r.status_code == 400:
+            try:
+                message = str((r.json() or {}).get("message") or "")
+            except ValueError:
+                message = ""
+            if "please confirm" in message.lower():
+                raise ProfileIncomplete(
+                    f"Circle answered 400 \"{message}\" on {path}: the join is not finished -- "
+                    "the new-member profile step is still open."
+                )
         if r.status_code >= 400:
             return None
         try:
