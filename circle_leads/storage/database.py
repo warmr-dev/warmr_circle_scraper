@@ -333,6 +333,20 @@ def get_or_create_author(
         )
         if a:
             return a
+    elif kw.get("display_name"):
+        # Readers that only know a display name (every triage/harvest/cookie
+        # read) used to create a fresh row per post per read: prod had 54,579
+        # authors for 2,256 distinct names on 2026-09-19. Reuse the row that
+        # name already has in this community.
+        a = session.scalar(
+            select(Author).where(
+                Author.community_id == community_id,
+                Author.source_author_id.is_(None),
+                Author.display_name == kw["display_name"],
+            ).order_by(Author.id).limit(1)
+        )
+        if a:
+            return a
     a = Author(
         community_id=community_id,
         source_author_id=str(source_author_id) if source_author_id else None,
@@ -341,6 +355,50 @@ def get_or_create_author(
     session.add(a)
     session.flush()
     return a
+
+
+# Circle's list responses carry a ~255-char preview (truncated_content) next to
+# the whole post (tiptap_body). Every post stored before 2026-09-18 is that
+# preview, and a read's identity is a hash of the text, so reading the same
+# post in full would store it a second time. A preview ends in an ellipsis,
+# often mid-word, and its line breaks differ from the full text's.
+_PREVIEW_TAIL = re.compile(r"(?:\.{3}|…)$")
+# Characters left off the end of a preview before comparing: the cut can land
+# inside a word or an HTML entity.
+_PREVIEW_SLACK = 12
+
+
+def _is_preview_of(old: str | None, new: str | None) -> bool:
+    """True when ``old`` is a truncated preview of ``new``, whitespace aside."""
+    o = _PREVIEW_TAIL.sub("", "".join((old or "").split()))
+    n = "".join((new or "").split())
+    if len(o) < 40 or len(o) >= len(n):
+        return False
+    return n.startswith(o[: len(o) - _PREVIEW_SLACK])
+
+
+def _stored_preview_of(
+    session: Session, *, community_id: int, ctype: str,
+    published_at: datetime | None, text: str,
+) -> Post | None:
+    """The row holding an earlier, truncated copy of this post, if any.
+
+    Matched on the post's exact Circle timestamp (readers take it from
+    created_at, to the millisecond), then on the text. Undated posts are never
+    matched: nothing ties them to a stored row but the text itself.
+    """
+    if not isinstance(published_at, datetime):
+        return None
+    if published_at.tzinfo is not None:
+        published_at = published_at.astimezone(timezone.utc).replace(tzinfo=None)
+    rows = session.scalars(
+        select(Post).where(
+            Post.community_id == community_id,
+            Post.content_type == ctype,
+            Post.published_at == published_at,
+        )
+    ).all()
+    return next((r for r in rows if _is_preview_of(r.content, text)), None)
 
 
 def upsert_post(session: Session, *, community_id: int, record: dict) -> tuple[Post, str]:
@@ -362,6 +420,26 @@ def upsert_post(session: Session, *, community_id: int, record: dict) -> tuple[P
             Post.content_type == ctype,
         )
     )
+    if existing is None:
+        preview = _stored_preview_of(
+            session, community_id=community_id, ctype=ctype,
+            published_at=record.get("published_at"), text=text,
+        )
+        if preview is not None:
+            # Same post, stored earlier as Circle's preview. Upgrade that row
+            # to the full text under the new identity (so the next read finds
+            # it directly) and re-classify it; its lead, if any, stays on it.
+            # Not an edit by the author, so edited_at is left alone.
+            preview.source_content_id = source_id
+            preview.content = text
+            preview.title = record.get("title") or preview.title
+            preview.url = record.get("url") or preview.url
+            preview.dedup_hash = new_hash
+            preview.simhash = simhash(text)
+            preview.scraped_at = utcnow()
+            preview.classified = False
+            session.flush()
+            return preview, "updated"
 
     if existing is not None:
         if existing.dedup_hash == new_hash:
