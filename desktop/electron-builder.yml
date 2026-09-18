@@ -1,0 +1,38 @@
+appId: com.warmr.circle
+productName: Warmr Circle
+directories:
+  buildResources: resources
+  output: dist
+files:
+  - out/**
+  - package.json
+asarUnpack:
+  - resources/**
+mac:
+  category: public.app-category.business
+  target:
+    - target: dmg
+      arch: [arm64]
+  # Unsigned internal build: first launch needs right-click > Open.
+  identity: null
+  notarize: false
+dmg:
+  artifactName: ${productName}-${version}-mac-${arch}.${ext}
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  signAndEditExecutable: false
+nsis:
+  artifactName: ${productName}-${version}-win-${arch}.${ext}
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+npmRebuild: false
+extraResources:
+  - from: resources/trayTemplate.png
+    to: trayTemplate.png
+  - from: resources/trayTemplate@2x.png
+    to: trayTemplate@2x.png
+  - from: resources/icon.png
+    to: icon.png

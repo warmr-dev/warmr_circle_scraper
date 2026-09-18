@@ -1,0 +1,346 @@
+{
+ "hash": [
+  {
+   "text": "We are looking for a backend developer to join our team!",
+   "content_hash": "9d5c53d4b48c32083ae804082b227f0830edffaf3426e3e1dfb4fd87a50d10c2",
+   "simhash": "b24f5b4898fa7e6a"
+  },
+  {
+   "text": "  Hello   World \n\n  multiple   spaces ",
+   "content_hash": "43aeeac521259b52f83654e2a57fc9a95a34ea06bb0ba76ee99ae81405038fe1",
+   "simhash": "d0090530081d9291"
+  },
+  {
+   "text": "short",
+   "content_hash": "f9b0078b5df596d2ea19010c001bbd009e651de2c57e8fb7e355f31eb9d3f739",
+   "simhash": "6a302407a0e0babe"
+  },
+  {
+   "text": "Ищем разработчика на Python, бюджет $5k. Contact: jane@acme.com or +44 20 7946 0958",
+   "content_hash": "b7cd08ad8a9bb6b71fdd1f5b5194aa03b9de0c7a44e2cd1f1f414f3c9995d047",
+   "simhash": "8504add21ba8a7bf"
+  },
+  {
+   "text": "",
+   "content_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+   "simhash": "0000000000000000"
+  },
+  {
+   "text": "a b",
+   "content_hash": "c8687a08aa5d6ed2044328fa6a697ab8e96dc34291e8c2034ae8c38e6fcc6d65",
+   "simhash": "30c3186261310601"
+  },
+  {
+   "text": "The quick brown fox jumps over the lazy dog. The quick brown fox jumps again!",
+   "content_hash": "5e34530bda55252cac1d469ef8ff6fb75fbe20eeb82158c4c988a27eccc0c78c",
+   "simhash": "8d2e0d3871231b83"
+  }
+ ],
+ "slugs": [
+  {
+   "host": "foo.circle.so",
+   "community": "foo",
+   "unique": "foo"
+  },
+  {
+   "host": "www.siliconslopes.com",
+   "community": "siliconslopes",
+   "unique": "www.siliconslopes.com"
+  },
+  {
+   "host": "community.bigstarlights.com",
+   "community": "bigstarlights",
+   "unique": "community.bigstarlights.com"
+  },
+  {
+   "host": "forum.joelpilger.com",
+   "community": "joelpilger",
+   "unique": "forum.joelpilger.com"
+  },
+  {
+   "host": "siliconslopes.com",
+   "community": "siliconslopes",
+   "unique": "siliconslopes.com"
+  },
+  {
+   "host": "example.co.uk",
+   "community": "example",
+   "unique": "example.co.uk"
+  },
+  {
+   "host": "members.skl.club",
+   "community": "skl",
+   "unique": "members.skl.club"
+  },
+  {
+   "host": "learn.buildingasecondbrain.com",
+   "community": "buildingasecondbrain",
+   "unique": "learn.buildingasecondbrain.com"
+  },
+  {
+   "host": "a.b.c.circle.so",
+   "community": "c",
+   "unique": "c"
+  },
+  {
+   "host": "go.acme.io",
+   "community": "acme",
+   "unique": "go.acme.io"
+  },
+  {
+   "host": "join.foo.com.au",
+   "community": "foo",
+   "unique": "join.foo.com.au"
+  },
+  {
+   "host": "circle.acme.org",
+   "community": "acme",
+   "unique": "circle.acme.org"
+  }
+ ],
+ "strip_html": [
+  {
+   "in": "<p>Hello <b>world</b> &amp; friends&nbsp;!</p>",
+   "out": "Hello world & friends !"
+  },
+  {
+   "in": "a &lt;tag&gt; &#39;quoted&#39; &#x41;",
+   "out": "a <tag> 'quoted' A"
+  },
+  {
+   "in": null,
+   "out": ""
+  },
+  {
+   "in": "plain",
+   "out": "plain"
+  }
+ ],
+ "redact": [
+  {
+   "in": "mail me at john.doe+x@example.org now",
+   "out": "mail me at [email removed] now"
+  },
+  {
+   "in": "call (555) 123-4567 or 555-123-4567",
+   "out": "[phone removed] or [phone removed]"
+  },
+  {
+   "in": "whatsapp: +1 415 555 0100 thanks",
+   "out": "[phone removed] thanks"
+  },
+  {
+   "in": "no pii here, version 1.2.3",
+   "out": "no pii here, version 1.2.3"
+  }
+ ],
+ "tiptap": {
+  "in": {
+   "type": "doc",
+   "content": [
+    {
+     "type": "paragraph",
+     "content": [
+      {
+       "type": "text",
+       "text": "Hello "
+      },
+      {
+       "type": "text",
+       "text": "there"
+      }
+     ]
+    },
+    {
+     "type": "bulletList",
+     "content": [
+      {
+       "type": "listItem",
+       "content": [
+        {
+         "type": "paragraph",
+         "content": [
+          {
+           "type": "text",
+           "text": "item one"
+          }
+         ]
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "type": "heading",
+     "content": [
+      {
+       "type": "text",
+       "text": "Title"
+      }
+     ]
+    }
+   ]
+  },
+  "out": "Hello there\nitem one\n\nTitle\n"
+ },
+ "classify": [
+  {
+   "in": {
+    "is_private": false,
+    "allow_signups_to_public_community": true
+   },
+   "out": {
+    "join_type": "free_join",
+    "detail": "allow_signups_to_public_community=true"
+   }
+  },
+  {
+   "in": {
+    "is_private": true
+   },
+   "out": {
+    "join_type": "invite_only",
+    "detail": "is_private=true"
+   }
+  },
+  {
+   "in": {
+    "is_private": false,
+    "has_non_draft_paywalls": true
+   },
+   "out": {
+    "join_type": "paid",
+    "detail": "paywall present, no public free signup"
+   }
+  },
+  {
+   "in": {
+    "is_private": false
+   },
+   "out": {
+    "join_type": "invite_only",
+    "detail": "no public signup, no paywall detected"
+   }
+  },
+  {
+   "in": {
+    "is_private": false,
+    "subscription_cancelled": true,
+    "allow_signups_to_public_community": true
+   },
+   "out": {
+    "join_type": "subscription_expired",
+    "detail": "subscription_cancelled=true"
+   }
+  },
+  {
+   "in": {
+    "is_private": false,
+    "has_non_draft_paywalls": true,
+    "allow_signups_to_public_community": true
+   },
+   "out": {
+    "join_type": "free_join",
+    "detail": "allow_signups_to_public_community=true"
+   }
+  }
+ ],
+ "price": [
+  {
+   "in": "Free",
+   "out": {
+    "join_type": "free_join",
+    "detail": "price_label fallback: 'Free'"
+   }
+  },
+  {
+   "in": "$0",
+   "out": {
+    "join_type": "free_join",
+    "detail": "price_label fallback: '$0'"
+   }
+  },
+  {
+   "in": "From $0",
+   "out": {
+    "join_type": "free_join",
+    "detail": "price_label fallback: 'From $0'"
+   }
+  },
+  {
+   "in": "From $49/mo",
+   "out": {
+    "join_type": "paid",
+    "detail": "price_label fallback: 'From $49/mo'"
+   }
+  },
+  {
+   "in": "",
+   "out": null
+  },
+  {
+   "in": null,
+   "out": null
+  },
+  {
+   "in": "$17",
+   "out": {
+    "join_type": "paid",
+    "detail": "price_label fallback: '$17'"
+   }
+  }
+ ],
+ "icp": [
+  {
+   "name": "SaaS Founders Club",
+   "description": "A community for startup founders building B2B software",
+   "goal": null,
+   "score": 55,
+   "reasons": [
+    "startup",
+    "saas",
+    "technology"
+   ]
+  },
+  {
+   "name": "Yoga & Wellness",
+   "description": "Daily yoga and meditation practice",
+   "goal": null,
+   "score": -30,
+   "reasons": [
+    "not_fitness",
+    "not_personal"
+   ]
+  },
+  {
+   "name": "The Technical Freelancer Academy",
+   "description": null,
+   "goal": "build-my-tech-skills",
+   "score": 50,
+   "reasons": [
+    "technology",
+    "agency",
+    "goal:build-my-tech-skills"
+   ]
+  },
+  {
+   "name": null,
+   "description": null,
+   "goal": null,
+   "score": 0,
+   "reasons": []
+  },
+  {
+   "name": "Agency Growth",
+   "description": "Grow your agency with client work tips; jobs board inside",
+   "goal": "start-and-scale-my-business",
+   "score": 50,
+   "reasons": [
+    "agency",
+    "marketing",
+    "hiring_related_space",
+    "goal:start-and-scale-my-business"
+   ]
+  }
+ ]
+}

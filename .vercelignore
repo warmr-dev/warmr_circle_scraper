@@ -31,3 +31,7 @@ migrations/
 extension/
 docs/
 .DS_Store
+
+# The desktop app (Electron) has its own build; its node_modules alone would
+# blow the function size limit.
+desktop/
