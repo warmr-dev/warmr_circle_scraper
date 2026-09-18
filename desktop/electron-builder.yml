@@ -13,8 +13,12 @@ mac:
   target:
     - target: dmg
       arch: [arm64]
-  # Unsigned internal build: first launch needs right-click > Open.
-  identity: null
+  # Ad-hoc signature ("-"): no Apple certificate, but a valid bundle signature,
+  # without which Apple Silicon refuses to launch the app from Finder.
+  identity: "-"
+  # Hardened runtime only matters for notarization; with an ad-hoc signature it
+  # makes library validation reject Electron's own frameworks.
+  hardenedRuntime: false
   notarize: false
 dmg:
   artifactName: ${productName}-${version}-mac-${arch}.${ext}
