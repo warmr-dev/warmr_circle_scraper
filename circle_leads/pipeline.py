@@ -14,6 +14,7 @@ function for why that distinction is the whole point.
 
 from __future__ import annotations
 
+import html
 import logging
 import re
 from concurrent.futures import ThreadPoolExecutor
@@ -711,6 +712,10 @@ _BOILERPLATE_PATTERNS = (
     re.compile(r"^log ?in to\b.{0,120}?\bvia (email|sso)\b", re.I),
     re.compile(r"^(log ?in|sign ?in|sign ?up) to\b.{0,80}?\bcommunity\b", re.I),
     re.compile(r"^create an account or log ?in\b", re.I),
+    # circle.so's own marketing <title>. A host with no community left behind it
+    # falls through to the marketing site, so this is a dead host, not a name --
+    # 738 DNS-import rows were stored with it as their name on 2026-09-18.
+    re.compile(r"^circle\s*[|\-–—]\s*a new era for digital businesses\b", re.I),
 )
 
 # Exact titles that carry no information about the community at all.
@@ -718,6 +723,30 @@ _JUNK_NAMES = frozenset({
     "circle", "circle.so", "community", "home", "loading", "log in", "login",
     "redirecting", "sign in", "sign up", "untitled",
 })
+
+# "Log in | Acme", "Home | Acme", "Login – Acme": a page title wrapped around
+# the community's name. The name is still in there; only the prefix is noise.
+_PAGE_TITLE_PREFIX = re.compile(
+    r"^\s*(?:log ?in|sign ?in|home|welcome)\s*[|\-–—:]\s*", re.I
+)
+
+
+def _clean_name(text: str | None) -> str | None:
+    """Unescape HTML entities, drop a page-title prefix and a doubled title.
+
+    Landing-page <title>s arrive HTML-escaped ("Founder&#39;s Circle") and
+    often as "<page> | <site>" -- the part worth keeping is the community's
+    own name, not the page it was read from.
+    """
+    if text is None:
+        return None
+    value = html.unescape(text).strip()
+    value = _PAGE_TITLE_PREFIX.sub("", value, count=1).strip()
+    # "Ulule Connect | Ulule Connect" -> "Ulule Connect".
+    parts = [p.strip() for p in value.split("|")]
+    if len(parts) == 2 and parts[0].lower() == parts[1].lower():
+        value = parts[0]
+    return value or None
 
 
 def _is_boilerplate(text: str | None) -> bool:
@@ -764,7 +793,7 @@ def fetch_community_metadata(
     meta = CommunityMetadata()
 
     if want_name:
-        name = PublicReader(host, session=http).community_name()
+        name = _clean_name(PublicReader(host, session=http).community_name())
         if name:
             if _is_boilerplate(name):
                 meta.rejected.append("name")
@@ -779,12 +808,13 @@ def fetch_community_metadata(
                 meta.rejected.append("description")
             else:
                 meta.description = check.description
-        if want_name and meta.name is None and check.name:
-            if _is_boilerplate(check.name):
+        page_name = _clean_name(check.name)
+        if want_name and meta.name is None and page_name:
+            if _is_boilerplate(page_name):
                 if "name" not in meta.rejected:
                     meta.rejected.append("name")
             else:
-                meta.name = check.name
+                meta.name = page_name
         if meta.name is None and meta.description is None and not meta.rejected:
             meta.note = check.note or f"HTTP {check.http_status}"
 

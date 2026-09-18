@@ -23,6 +23,7 @@ from circle_leads.export.exporters import query_leads, to_csv, to_json
 from circle_leads.pipeline import (
     ENRICH_MAX_WORKERS,
     CommunityMetadata,
+    _clean_name,
     _is_boilerplate,
     _llm_eligible_icp_ids,
     ICP_SCHEDULED_BATCH,
@@ -624,6 +625,10 @@ def test_a_dead_host_does_not_end_the_pass(tmp_path):
     "Log in to Acme community via SSO today.",
     "Sign up to the Foo community",
     "Create an account or log in to continue",
+    # circle.so's marketing title: what a host with no community behind it
+    # serves. 738 DNS rows stored it as their name on 2026-09-18.
+    "Circle | A new era for digital businesses",
+    "Circle - A new era for digital businesses",
 ])
 def test_circle_boilerplate_is_rejected(text):
     assert _is_boilerplate(text) is True
@@ -703,6 +708,46 @@ def test_fetch_falls_back_to_the_page_title_when_the_json_name_is_junk(monkeypat
     assert meta.name == "Acme Founders"
     assert meta.description == "A community for indie SaaS founders."
     assert meta.rejected == ["name"]
+
+
+@pytest.mark.parametrize("raw, clean", [
+    ("Log in | AI Marketer HQ (AI Agency™)", "AI Marketer HQ (AI Agency™)"),
+    ("Home | B2B NEXT AI Community", "B2B NEXT AI Community"),
+    ("Login &#8211; B2B eCommerce Association", "B2B eCommerce Association"),
+    ("Founder&#39;s Circle", "Founder's Circle"),
+    ("Ulule Connect | Ulule Connect", "Ulule Connect"),
+    # Not a page prefix: real names that start with one of the words.
+    ("Homebrew Founders", "Homebrew Founders"),
+    ("Welcome Wagon Club", "Welcome Wagon Club"),
+    ("AI Builders | Build agents with LLMs", "AI Builders | Build agents with LLMs"),
+    ("", None),
+    (None, None),
+])
+def test_clean_name(raw, clean):
+    assert _clean_name(raw) == clean
+
+
+def test_fetch_rejects_circles_marketing_title_as_a_name(monkeypatch):
+    # A dead host redirects to circle.so, so the landing page is the marketing
+    # site -- the row must stay nameless, not get "Circle | A new era ...".
+    monkeypatch.setattr("circle_leads.pipeline.PublicReader", StubReader(None))
+    _stub_access_check(monkeypatch, name="Circle | A new era for digital businesses")
+
+    meta = fetch_community_metadata(
+        "gone.circle.so", "https://gone.circle.so", want_description=False
+    )
+    assert meta.name is None
+    assert meta.rejected == ["name"]
+
+
+def test_fetch_strips_a_login_page_prefix_from_the_name(monkeypatch):
+    monkeypatch.setattr("circle_leads.pipeline.PublicReader", StubReader(None))
+    _stub_access_check(monkeypatch, name="Log in | Acme Founders")
+
+    meta = fetch_community_metadata(
+        "acme.circle.so", "https://acme.circle.so", want_description=False
+    )
+    assert meta.name == "Acme Founders"
 
 
 def test_fetch_skips_the_landing_page_when_only_a_name_is_wanted(monkeypatch):

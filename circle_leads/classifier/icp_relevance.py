@@ -311,8 +311,13 @@ def classify_icp_fit(
         # Confident enough to be worth a look, not enough to auto-join on.
         reasons = reasons + [LLM_FIT_NEEDS_REVIEW]
 
+    # icp_score means "how well does this fit", on every path -- rules rows
+    # already store it that way, and the join queue and harvest sort by it. The
+    # LLM's confidence is confidence in its *verdict*, so a confident "no" at
+    # 0.9 is a fit of 10, not 90 (651 prod rows were stored the other way).
+    fit_score = verdict.confidence if verdict.fit else 1.0 - verdict.confidence
     return IcpResult(
-        score=round(verdict.confidence * 100),
+        score=round(fit_score * 100),
         flag=verdict.fit and confident and llm_may_flag,
         reasons=reasons,
         decided_by="llm",

@@ -271,6 +271,23 @@ def test_confidence_floor_is_overridable_by_the_caller():
     assert result.flag is True
 
 
+def test_confident_llm_no_is_stored_as_a_low_fit_score():
+    # icp_score is "how well it fits" on every path; a 0.9-confident "no" used
+    # to be stored as 90 and outranked real fits in the join queue.
+    backend = StubBackend({"fit": False, "confidence": 0.9, "reason": "herbalism"})
+    result = classify_icp_fit("Product People", "A group of product managers", llm=backend)
+    assert result.decided_by == "llm"
+    assert result.flag is False
+    assert result.score == 10
+
+
+def test_confident_llm_fit_keeps_its_confidence_as_the_score():
+    backend = StubBackend({"fit": True, "confidence": 0.8, "reason": "builders"})
+    result = classify_icp_fit("Product People", "A group of product managers",
+                              llm=backend, llm_may_flag=True)
+    assert result.score == 80
+
+
 # --- An LLM fit does not reach the auto-join queue on its own ----------------
 
 
