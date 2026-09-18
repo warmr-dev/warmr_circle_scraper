@@ -218,12 +218,18 @@ def _extract_text(record: dict) -> tuple[str, str]:
             if record.get(key):
                 body = strip_html(str(record[key]))
                 break
-    # Comments carry their text in tiptap_body rather than truncated_content.
-    if not body and isinstance(record.get("tiptap_body"), dict):
+    # truncated_content is a ~255-char preview; the same list response carries
+    # the whole post as tiptap_body (measured 2026-09-18: 3,979 chars behind a
+    # 255-char preview). Every stored post was the preview until then, so a
+    # hiring ask past the first lines never reached the classifier. Comments
+    # carry their text only in tiptap_body.
+    if isinstance(record.get("tiptap_body"), dict):
         tb = record["tiptap_body"]
         # The doc may be nested under a "body" key.
         node = tb.get("body") if isinstance(tb.get("body"), dict) else tb
-        body = strip_html(_tiptap_text(node))
+        full = strip_html(_tiptap_text(node))
+        if len(full) > len(body):
+            body = full
     return title, body
 
 

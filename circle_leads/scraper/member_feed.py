@@ -135,11 +135,10 @@ def _post_id(record: dict):
 def _extract_text(record: dict) -> tuple[str, str]:
     """Return (title, body) from an internal-feed post record.
 
-    Circle's internal feed puts the title in ``name`` and the (truncated) body
-    in ``truncated_content``. The list response does not carry the full body --
-    ``show_more: true`` marks a post whose text is cut -- but the title plus the
-    first ~255 chars is enough to classify hiring intent. Falls back to the
-    several other body shapes for robustness.
+    Circle's internal feed puts the title in ``name``, a ~255-char preview in
+    ``truncated_content`` and the whole post in ``tiptap_body``. The full text
+    wins when present: a hiring ask below the first lines is invisible in the
+    preview. Falls back to the several other body shapes for robustness.
     """
     title = strip_html(record.get("name") or record.get("title") or "")
     body = strip_html(record.get("truncated_content") or "")
@@ -151,8 +150,14 @@ def _extract_text(record: dict) -> tuple[str, str]:
     if not body and isinstance(record.get("body"), dict):
         b = record["body"]
         body = strip_html(str(b.get("body") or b.get("plain_text") or b.get("text") or ""))
-    if not body and isinstance(record.get("tiptap_body"), dict):
-        body = strip_html(_tiptap_text(record["tiptap_body"]))
+    # The preview is ~255 chars; tiptap_body in the same response is the whole
+    # post, so prefer it whenever it says more (see public_reader._extract_text).
+    if isinstance(record.get("tiptap_body"), dict):
+        tb = record["tiptap_body"]
+        node = tb.get("body") if isinstance(tb.get("body"), dict) else tb
+        full = strip_html(_tiptap_text(node))
+        if len(full) > len(body):
+            body = full
     return title, body
 
 

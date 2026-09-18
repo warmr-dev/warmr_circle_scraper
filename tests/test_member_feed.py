@@ -124,3 +124,15 @@ def test_cookie_never_appears_in_repr():
     # The cookie is a field, so guard that logging the client won't leak it in
     # our own code paths -- callers must not print it.
     assert client.cookie == "SECRET-COOKIE"  # accessible for the request
+
+
+def test_extract_text_prefers_the_full_tiptap_body_over_the_preview():
+    full = "Some context about the product. " * 15 + "Looking for a Flutter developer."
+    record = {
+        "name": "Update",
+        "truncated_content": full[:255],
+        "tiptap_body": {"body": {"type": "doc", "content": [
+            {"type": "paragraph", "content": [{"type": "text", "text": full}]}]}},
+    }
+    _, body = _extract_text(record)
+    assert body.endswith("Looking for a Flutter developer.")

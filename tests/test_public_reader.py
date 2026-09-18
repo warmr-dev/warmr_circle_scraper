@@ -253,3 +253,29 @@ def test_no_permalink_without_space_slug():
         community_url="https://x.circle.so",
     )
     assert rec["url"] is None  # can't build a thread link without the space slug
+
+
+def _tiptap(text):
+    return {"body": {"type": "doc", "content": [
+        {"type": "paragraph", "content": [{"type": "text", "text": text}]}]}}
+
+
+def test_extract_text_prefers_the_full_tiptap_body_over_the_preview():
+    # The list response carries both; the preview stops at ~255 chars, so a
+    # hiring ask further down was never classified (every stored post, until
+    # 2026-09-18).
+    from circle_leads.scraper.public_reader import _extract_text
+
+    full = "Intro about our startup. " * 20 + "We are hiring a senior backend developer."
+    record = {"name": "Update", "truncated_content": full[:255], "tiptap_body": _tiptap(full)}
+    _, body = _extract_text(record)
+    assert "hiring a senior backend developer" in body
+
+
+def test_extract_text_keeps_the_preview_when_tiptap_says_less():
+    from circle_leads.scraper.public_reader import _extract_text
+
+    record = {"name": "t", "truncated_content": "We need a React developer for 3 months",
+              "tiptap_body": _tiptap("")}
+    _, body = _extract_text(record)
+    assert body == "We need a React developer for 3 months"
