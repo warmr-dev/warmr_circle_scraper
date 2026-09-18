@@ -103,6 +103,7 @@ export class Engine extends EventEmitter {
     checkedAt: 0
   }
   private ticking = false
+  private connecting: Promise<void> | null = null
 
   constructor(private readonly deps: EngineDeps) {
     super()
@@ -156,7 +157,17 @@ export class Engine extends EventEmitter {
     return this.sql
   }
 
-  async connect(): Promise<void> {
+  /** Resolves once any in-flight connect (first start, new DB URL) has finished. */
+  async settled(): Promise<void> {
+    await this.connecting?.catch(() => undefined)
+  }
+
+  connect(): Promise<void> {
+    this.connecting = this.doConnect()
+    return this.connecting
+  }
+
+  private async doConnect(): Promise<void> {
     await this.disconnect()
     const secrets = await this.deps.getSecrets()
     if (!secrets.dbUrl) {

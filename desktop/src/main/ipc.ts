@@ -28,8 +28,13 @@ export function registerIpc(deps: { engine: Engine; store: Store; mainWindow: ()
     secrets: await store.secretsStatus()
   })
 
+  // Wait for the first DB connect (migrations included) before serving the UI,
+  // so an early request does not fail with "database not configured".
   const handle = <A extends unknown[], R>(channel: string, fn: (...args: A) => Promise<R> | R): void => {
-    ipcMain.handle(channel, async (_event, ...args) => fn(...(args as A)))
+    ipcMain.handle(channel, async (_event, ...args) => {
+      await engine.settled()
+      return fn(...(args as A))
+    })
   }
 
   handle('status', () => engine.status())
