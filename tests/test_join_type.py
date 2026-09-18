@@ -218,7 +218,7 @@ def test_www_retry_is_not_attempted_for_locked_unknown():
     session = RoutedStubSession({"locked.example.com": StubResp(401, None)})
     c = fetch_join_classification("locked.example.com", session=session)
     assert c.join_type == JoinType.LOCKED_UNKNOWN
-    assert c.detail == "HTTP 401 on communities/current"
+    assert c.detail == "private (members only): HTTP 401 on communities/current"
     # One call for the API check, one for the marketing-site redirect check --
     # neither is a www retry (the point of this test).
     assert session.calls == [
