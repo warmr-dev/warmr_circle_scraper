@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from circle_leads.storage.models import Community, Lead, Post, Space
 
@@ -61,11 +61,15 @@ def query_leads(
     min_score: int = 0,
     priority: str | None = None,
     exclude_duplicates: bool = True,
+    review_status: str | None = None,
     limit: int | None = None,
 ) -> list[dict[str, Any]]:
     """Search stored leads with the filters the CLI exposes."""
     stmt = (
         select(Lead, Post, Community, Space)
+        # Load the author in the same query: post.author is otherwise a lazy
+        # load, i.e. one extra round trip per lead (200+ on the dashboard).
+        .options(joinedload(Post.author))
         .join(Post, Lead.post_id == Post.id)
         .join(Community, Post.community_id == Community.id)
         .outerjoin(Space, Post.space_id == Space.id)
@@ -79,6 +83,8 @@ def query_leads(
         stmt = stmt.where(Lead.priority == priority.upper())
     if exclude_duplicates:
         stmt = stmt.where(Lead.duplicate_of_id.is_(None))
+    if review_status:
+        stmt = stmt.where(Lead.review_status == review_status)
     if limit:
         stmt = stmt.limit(limit)
 
@@ -96,6 +102,8 @@ def query_leads(
 
         rows.append(
             {
+                "id": lead.id,
+                "review_status": lead.review_status or "pending_review",
                 "community": comm.slug,
                 "community_url": comm.url,
                 "space": space.name if space else None,
