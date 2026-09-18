@@ -214,8 +214,17 @@ class Database:
         # trip. The shared owner commits once at the end.
         shared = getattr(self._shared, "session", None)
         if shared is not None:
-            yield shared              # no commit/close: the owner handles it
-            shared.flush()            # make writes visible to the next block
+            # Commit each block, keep the connection: sharing exists to save
+            # pooler checkouts, not to hold one transaction open. With an LLM
+            # call per post, one transaction spanning a whole space ran for
+            # minutes, and when the pooler dropped the connection the space's
+            # work was lost with it (awithub, 2026-09-19).
+            try:
+                yield shared
+                shared.commit()
+            except Exception:
+                shared.rollback()
+                raise
             return
         s = self._sessionmaker()
         try:

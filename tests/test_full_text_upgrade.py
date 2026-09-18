@@ -253,3 +253,22 @@ def test_angle_brackets_in_a_post_survive_the_flattening():
             {"type": "text", "text": "Apply -> DM me with your portfolio."}]}]}
     assert tiptap_plain(doc) == ("Need a Flutter dev with <5 years is fine, budget "
                                  "$6k/month. Apply -> DM me with your portfolio.")
+
+
+def test_a_shared_session_keeps_the_blocks_before_a_failure(tmp_path):
+    # One connection for a space's writes, but a transaction per block: a
+    # dropped connection mid-space must not take the earlier posts with it
+    # (awithub, 2026-09-19, after an LLM call per post made spaces slow).
+    from circle_leads.storage.models import Community
+
+    d = Database(f"sqlite:///{tmp_path}/shared.db")
+    with pytest.raises(RuntimeError):
+        with d.shared_session():
+            with d.session() as s:
+                get_or_create_community(s, slug="kept", url="https://kept.circle.so")
+            with d.session() as s:
+                get_or_create_community(s, slug="lost", url="https://lost.circle.so")
+                raise RuntimeError("connection dropped")
+    with d.session() as s:
+        slugs = set(s.scalars(select(Community.slug)).all())
+    assert slugs == {"kept"}
