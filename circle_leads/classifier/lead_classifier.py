@@ -122,9 +122,12 @@ def classify(
         rules.score -= 30
 
     lead_cutoff = min(RULE_CONFIDENT_LEAD, requirements.llm_escalation_threshold)
-    needs_llm = not (
-        rules.score >= lead_cutoff or rules.score <= RULE_CONFIDENT_NOT_LEAD
-    )
+    # Only a confident *not-lead* is left to the rules alone. A confident
+    # rules lead still gets one LLM call when a model is set: re-judged on
+    # 2026-09-19, the LLM confirmed 15 of the 46 leads the rules had filed on
+    # their own -- the rest were articles, welcome posts, job seekers and
+    # vendor pitches, and all of them were pushed to Vini automatically.
+    needs_llm = rules.score > RULE_CONFIDENT_NOT_LEAD
 
     if needs_llm and llm is not None:
         verdict = classify_with_llm(text, llm, model_name=model_name)

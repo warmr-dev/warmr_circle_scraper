@@ -53,6 +53,7 @@ from circle_leads.storage.database import (
     get_or_create_author,
     get_or_create_community,
     get_or_create_space,
+    retire_lead,
     upsert_post,
 )
 from circle_leads.storage.models import (
@@ -433,7 +434,8 @@ def classify_pending(
                 stats["not_leads"] += 1
                 existing = s.scalar(select(Lead).where(Lead.post_id == post.id))
                 if existing:
-                    s.delete(existing)
+                    retire_lead(s, existing, reason=result.reason,
+                                decided_by=result.decided_by)
                 continue
 
             # The confidence floor and role/skill filters always apply.
@@ -445,7 +447,9 @@ def classify_pending(
                 # quote, and extracted fields describe text that is now gone.
                 stale = s.scalar(select(Lead).where(Lead.post_id == post.id))
                 if stale:
-                    s.delete(stale)
+                    retire_lead(s, stale, reason="filtered out by the target roles/skills "
+                                f"or confidence floor ({result.reason})",
+                                decided_by=result.decided_by)
                 continue
 
             score, priority, breakdown = score_lead(

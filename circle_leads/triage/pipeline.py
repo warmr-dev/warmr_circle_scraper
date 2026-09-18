@@ -30,6 +30,7 @@ from circle_leads.storage.database import (
     find_near_duplicate,
     get_or_create_author,
     get_or_create_community,
+    retire_lead,
     upsert_post,
 )
 from circle_leads.storage.models import AccessState, Lead, PermissionStatus, Post
@@ -285,14 +286,17 @@ def _triage_posts(
                 result.not_leads += 1
                 stale = s.scalar(select(Lead).where(Lead.post_id == post_pk))
                 if stale:
-                    s.delete(stale)
+                    retire_lead(s, stale, reason=classification.reason,
+                                decided_by=classification.decided_by)
                 continue
 
             if not meets_requirements(classification, requirements):
                 result.filtered += 1
                 stale = s.scalar(select(Lead).where(Lead.post_id == post_pk))
                 if stale:
-                    s.delete(stale)
+                    retire_lead(s, stale, reason="filtered out by the target roles/skills "
+                                f"or confidence floor ({classification.reason})",
+                                decided_by=classification.decided_by)
                 continue
 
             score, priority, breakdown = score_lead(

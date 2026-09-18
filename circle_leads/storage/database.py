@@ -357,6 +357,24 @@ def get_or_create_author(
     return a
 
 
+def retire_lead(session: Session, lead: Lead, *, reason: str,
+                decided_by: str | None = None) -> None:
+    """Take back a lead that a re-classification says is not one.
+
+    A lead production (Vini) has already received is kept as the record of
+    what was sent -- demoted to NOT_LEAD, so it stops counting as a lead
+    everywhere -- rather than deleted, which would erase the only trace of a
+    lead that now needs cleaning up on the other side. Any other is deleted.
+    """
+    if lead.external_synced_at is None:
+        session.delete(lead)
+        return
+    lead.classification = "NOT_LEAD"
+    lead.reason = f"Re-judged after it was sent to Vini: {reason}"[:2000]
+    if decided_by:
+        lead.decided_by = decided_by
+
+
 # Circle's list responses carry a ~255-char preview (truncated_content) next to
 # the whole post (tiptap_body). Every post stored before 2026-09-18 is that
 # preview, and a read's identity is a hash of the text, so reading the same
