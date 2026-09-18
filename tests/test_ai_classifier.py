@@ -195,3 +195,17 @@ def test_openai_backend_parses_chat_completion(monkeypatch):
     b._client = FakeClient()
     out = b.complete("sys", "user")
     assert "LEAD" in out
+
+
+def test_the_remote_partner_scam_is_never_a_lead(dev_requirements):
+    # Posted verbatim across communities; the LLM called it a lead three times
+    # on 2026-09-19. A disqualifier stops it before the LLM is asked.
+    scam = ("Collab Opportunity Hello, We're looking for a reliable partner (must be "
+            "based in US, UK, CA, AU, DE, or NZ) to work with our team on a part-time "
+            "basis. We're offering a monthly salary of USD 2,000 - 3,000. No development "
+            "experience required!")
+    backend = StubBackend({"classification": "LEAD", "confidence": 1.0, "reason": "",
+                           "evidence_quote": "looking for a reliable partner"})
+    result = classify(scam, dev_requirements, llm=backend)
+    assert result.classification == "NOT_LEAD"
+    assert backend.calls == 0
