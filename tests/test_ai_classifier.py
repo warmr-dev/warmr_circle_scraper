@@ -209,3 +209,11 @@ def test_the_remote_partner_scam_is_never_a_lead(dev_requirements):
     result = classify(scam, dev_requirements, llm=backend)
     assert result.classification == "NOT_LEAD"
     assert backend.calls == 0
+
+
+def test_an_llm_outage_is_flagged_on_the_result():
+    reqs = load_requirements()
+    backend = StubBackend(None, raise_exc=RuntimeError("402"))
+    result = classify("We are hiring a Flutter developer for our team.", reqs, llm=backend)
+    assert result.decided_by == "rules" and result.llm_error
+    assert classify("We are hiring a Flutter developer for our team.", reqs).llm_error is None

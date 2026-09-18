@@ -430,11 +430,15 @@ def classify_pending(
             )
             post.classified = True
             stats["classified"] += 1
+            # No model verdict (an outage, spent credits): the rules decided
+            # alone -- enough to show a lead for review, not to retire an
+            # earlier one or push this one to Vini.
+            held = result.llm_error is not None
 
             if not result.is_lead:
                 stats["not_leads"] += 1
                 existing = s.scalar(select(Lead).where(Lead.post_id == post.id))
-                if existing:
+                if existing and not held:
                     retire_lead(s, existing, reason=result.reason,
                                 decided_by=result.decided_by)
                 continue
@@ -447,7 +451,7 @@ def classify_pending(
                 # Drop any prior lead: after an edit the stored score, evidence
                 # quote, and extracted fields describe text that is now gone.
                 stale = s.scalar(select(Lead).where(Lead.post_id == post.id))
-                if stale:
+                if stale and not held:
                     retire_lead(s, stale, reason="filtered out by the target roles/skills "
                                 f"or confidence floor ({result.reason})",
                                 decided_by=result.decided_by)
@@ -463,9 +467,10 @@ def classify_pending(
                 duplicate_lead_id = duplicate.lead.id
                 stats["duplicates"] += 1
 
-            lead = s.scalar(select(Lead).where(Lead.post_id == post.id)) or Lead(
-                post_id=post.id
-            )
+            existing = s.scalar(select(Lead).where(Lead.post_id == post.id))
+            if held and existing is not None:
+                continue   # keep the verdict the model gave earlier
+            lead = existing or Lead(post_id=post.id)
 
             # A lead once filed as a duplicate stays one. Re-judged on its full
             # text while the original is still a preview, the post no longer
@@ -477,6 +482,9 @@ def classify_pending(
             lead.classification = result.classification
             lead.confidence = result.confidence
             lead.reason = result.reason
+            if held:
+                lead.reason = (f"{result.reason} Held for review, not sent to "
+                               f"Vini: no LLM verdict ({result.llm_error}).")
             lead.classifier_version = result.classifier_version
             lead.decided_by = result.decided_by
             lead.evidence_quote = result.evidence_quote
@@ -496,7 +504,7 @@ def classify_pending(
             lead.urgency = extracted.get("urgency")
             s.add(lead)
             s.flush()
-            if duplicate_lead_id is None and lead.external_synced_at is None:
+            if duplicate_lead_id is None and lead.external_synced_at is None and not held:
                 pending_external_ids.append(lead.id)
             stats["leads"] += 1
 

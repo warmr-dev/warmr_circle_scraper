@@ -272,3 +272,66 @@ def test_a_shared_session_keeps_the_blocks_before_a_failure(tmp_path):
     with d.session() as s:
         slugs = set(s.scalars(select(Community.slug)).all())
     assert slugs == {"kept"}
+
+
+class _DownBackend:
+    """An LLM that is configured but answers nothing (outage, spent credits)."""
+
+    model = "down"
+
+    def complete(self, system, user):
+        raise RuntimeError("402: out of credits")
+
+
+def _outage(monkeypatch):
+    import circle_leads.triage.pipeline as tp
+
+    from circle_leads.export.vini_ingest import PushResult
+
+    pushed = []
+
+    def fake_push(_session, ids, **_kw):
+        pushed.extend(ids)
+        return PushResult()
+
+    monkeypatch.setattr(tp, "push_leads_by_ids", fake_push)
+    monkeypatch.setattr(tp, "make_backend", lambda: _DownBackend())
+    return tp, pushed
+
+
+def test_an_llm_outage_holds_a_rules_lead_instead_of_pushing_it(db, dev_requirements, monkeypatch):
+    # OpenRouter credits ran low on 2026-09-19: with the model silent, the
+    # rules alone would have pushed their leads -- two thirds of which the
+    # model had rejected the night before -- straight to Vini.
+    tp, pushed = _outage(monkeypatch)
+    tp.triage_records(
+        db, [{"content": FULL, "published_at": WHEN, "author": {"display_name": "Dana"}}],
+        dev_requirements, community="acme", use_llm=True)
+    with db.session() as s:
+        lead = s.scalar(select(Lead))
+        assert lead is not None and lead.classification == "LEAD"
+        assert lead.decided_by == "rules"
+        assert "Held for review" in lead.reason
+        assert lead.external_synced_at is None
+    assert pushed == []
+
+
+def test_an_llm_outage_does_not_retire_an_earlier_verdict(db, dev_requirements, monkeypatch):
+    tp, pushed = _outage(monkeypatch)
+    vague = ("Anyone around here tried a few different tools for our project "
+             "planning? Curious what works for small teams, happy to compare notes.")
+    with db.session() as s:
+        c = get_or_create_community(s, slug="acme", url="https://acme.circle.so")
+        y = _post(s, c.id, "triage:old", vague[:120] + "…")
+        y.classified = True
+        s.add(Lead(post_id=y.id, classification="LEAD", decided_by="llm",
+                   reason="judged by the model earlier"))
+    tp.triage_records(
+        db, [{"content": vague, "published_at": WHEN, "author": {"display_name": "Dana"}}],
+        dev_requirements, community="acme", use_llm=True)
+    with db.session() as s:
+        assert s.scalar(select(func.count()).select_from(Post)) == 1   # upgraded, re-judged
+        lead = s.scalar(select(Lead))
+        assert lead is not None
+        assert (lead.classification, lead.reason) == ("LEAD", "judged by the model earlier")
+    assert pushed == []

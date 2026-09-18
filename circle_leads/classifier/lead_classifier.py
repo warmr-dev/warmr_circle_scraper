@@ -45,6 +45,10 @@ class ClassificationResult:
     seeker_matches: list[str] = field(default_factory=list)
     disqualifiers: list[str] = field(default_factory=list)
     extracted: dict[str, Any] = field(default_factory=dict)
+    # Set when a model was asked and gave no usable verdict (an outage, spent
+    # credits, a quote it could not back up), so the rules decided instead.
+    # Callers hold such a verdict for review rather than act on it.
+    llm_error: str | None = None
 
     @property
     def is_lead(self) -> bool:
@@ -133,6 +137,7 @@ def classify(
         verdict = classify_with_llm(text, llm, model_name=model_name)
         if verdict.classification in ("LEAD", "NOT_LEAD") and not verdict.error:
             return _from_ai(verdict, rules, text, requirements, result)
+        result.llm_error = (verdict.error or verdict.reason or "no verdict")[:200]
         logger.debug("LLM inconclusive; falling back to rules")
 
     # Rule-only verdict.
