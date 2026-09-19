@@ -32,7 +32,12 @@ class JoinType:
     FREE_JOIN = "free_join"            # public self-signup, no payment required
     PAID = "paid"                      # signup requires payment; no free tier is public
     INVITE_ONLY = "invite_only"        # no public signup at all (private or closed)
-    LOCKED_UNKNOWN = "locked_unknown"  # even the public metadata call is refused
+    # Even the public metadata call is refused, but the host still serves a
+    # community (a dead host redirects to circle.so and is UNKNOWN instead).
+    # Checked by hand 2026-09-18 on 4 ICP-fit rows: all were private,
+    # members-only communities showing only a sign-in page. Free vs paid can't
+    # be told without an account, so a Discover price_label still refines it.
+    LOCKED_UNKNOWN = "locked_unknown"
     UNKNOWN = "unknown"                # not a reachable/recognizable Circle host
     SUBSCRIPTION_EXPIRED = "subscription_expired"  # operator's own Circle plan
     # lapsed -- nobody can get in, member or not, until they pay Circle again
@@ -146,7 +151,8 @@ def _fetch_join_classification_once(
                 "host no longer maps to a community (redirects to circle.so marketing site)",
             )
         return JoinClassification(
-            JoinType.LOCKED_UNKNOWN, f"HTTP {resp.status_code} on communities/current"
+            JoinType.LOCKED_UNKNOWN,
+            f"private (members only): HTTP {resp.status_code} on communities/current",
         )
     if resp.status_code != 200:
         return JoinClassification(JoinType.UNKNOWN, f"HTTP {resp.status_code}")

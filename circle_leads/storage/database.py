@@ -214,8 +214,17 @@ class Database:
         # trip. The shared owner commits once at the end.
         shared = getattr(self._shared, "session", None)
         if shared is not None:
-            yield shared              # no commit/close: the owner handles it
-            shared.flush()            # make writes visible to the next block
+            # Commit each block, keep the connection: sharing exists to save
+            # pooler checkouts, not to hold one transaction open. With an LLM
+            # call per post, one transaction spanning a whole space ran for
+            # minutes, and when the pooler dropped the connection the space's
+            # work was lost with it (awithub, 2026-09-19).
+            try:
+                yield shared
+                shared.commit()
+            except Exception:
+                shared.rollback()
+                raise
             return
         s = self._sessionmaker()
         try:
@@ -333,6 +342,23 @@ def get_or_create_author(
         )
         if a:
             return a
+    elif kw.get("display_name"):
+        # Readers that only know a display name (every triage/harvest/cookie
+        # read) used to create a fresh row per post per read: prod had 54,579
+        # authors for 2,256 distinct names on 2026-09-19. Reuse the row that
+        # name already has in this community.
+        # A profile URL, when the reader has one, tells two same-named people
+        # apart, so it has to match as well.
+        same = [
+            Author.community_id == community_id,
+            Author.source_author_id.is_(None),
+            Author.display_name == kw["display_name"],
+        ]
+        if kw.get("profile_url"):
+            same.append(Author.profile_url == kw["profile_url"])
+        a = session.scalar(select(Author).where(*same).order_by(Author.id).limit(1))
+        if a:
+            return a
     a = Author(
         community_id=community_id,
         source_author_id=str(source_author_id) if source_author_id else None,
@@ -341,6 +367,114 @@ def get_or_create_author(
     session.add(a)
     session.flush()
     return a
+
+
+def live_original(lead: Lead | None) -> bool:
+    """Whether a lead can stand as the original its near-copies point at.
+
+    Still a LEAD, or already sent to Vini (production has that content, so a
+    repost must not go out again). A demoted lead that was never sent is
+    neither: filing a repost as its duplicate would hide the repost for good.
+    """
+    return lead is not None and (
+        lead.classification == "LEAD" or lead.external_synced_at is not None
+    )
+
+
+def retire_lead(session: Session, lead: Lead, *, reason: str,
+                decided_by: str | None = None) -> str:
+    """Take back a lead that a re-classification says is not one.
+
+    Deleted only while nothing depends on it. It is kept, demoted to NOT_LEAD
+    (every LEAD count drops it) with the new reason, when production (Vini)
+    already received it -- the row is the only record of what was sent --
+    when an operator already reviewed it, or when other leads are filed as its
+    duplicates (leads.duplicate_of_id has no ON DELETE, so deleting it would
+    fail the whole read). Returns "deleted" or "demoted".
+    """
+    referenced = session.scalar(
+        select(Lead.id).where(Lead.duplicate_of_id == lead.id).limit(1)
+    )
+    untouched = (lead.external_synced_at is None
+                 and (lead.review_status or "pending_review") == "pending_review"
+                 and referenced is None)
+    if untouched:
+        session.delete(lead)
+        return "deleted"
+    why = ("after it was sent to Vini" if lead.external_synced_at is not None
+           else "after review" if (lead.review_status or "pending_review") != "pending_review"
+           else "while other leads are filed as its duplicates")
+    lead.classification = "NOT_LEAD"
+    lead.reason = f"Re-judged not a lead {why}: {reason}"[:2000]
+    if decided_by:
+        lead.decided_by = decided_by
+    logging.getLogger(__name__).info("Lead %s demoted, not deleted (%s)", lead.id, why)
+    return "demoted"
+
+
+# Circle's list responses carry a ~255-char preview (truncated_content) next to
+# the whole post (tiptap_body). Every post stored before 2026-09-18 is that
+# preview, and a read's identity is a hash of the text, so reading the same
+# post in full would store it a second time. A preview ends in an ellipsis,
+# often mid-word, and its line breaks differ from the full text's.
+_PREVIEW_TAIL = re.compile(r"(?:\.{3}|…)$")
+# Characters left off the end of a preview before comparing: the cut can land
+# inside a word or an HTML entity.
+_PREVIEW_SLACK = 12
+
+
+def _stored_match(old: str | None, new: str | None) -> str | None:
+    """How a stored text relates to a newly read one of the same post.
+
+    "same" when they differ only in whitespace (two readers used to join
+    TipTap nodes differently), "preview" when the stored one is a truncated
+    preview of the new one, None when they are different texts.
+    """
+    o = _PREVIEW_TAIL.sub("", "".join((old or "").split()))
+    n = "".join((new or "").split())
+    if o and o == n:
+        return "same"
+    if len(o) < 40 or len(o) >= len(n):
+        return None
+    return "preview" if n.startswith(o[: len(o) - _PREVIEW_SLACK]) else None
+
+
+def _is_preview_of(old: str | None, new: str | None) -> bool:
+    """True when ``old`` is a truncated preview of ``new``, whitespace aside."""
+    return _stored_match(old, new) == "preview"
+
+
+def _stored_copy_of(
+    session: Session, *, community_id: int, ctype: str,
+    published_at: datetime | None, text: str,
+) -> tuple[Post | None, str | None]:
+    """The row holding an earlier copy of this post, and how it relates.
+
+    Matched on the post's exact Circle timestamp (readers take it from
+    created_at, to the millisecond), then on the text. Undated posts are never
+    matched: nothing ties them to a stored row but the text itself.
+    """
+    if not isinstance(published_at, datetime):
+        return None, None
+    if published_at.tzinfo is not None:
+        published_at = published_at.astimezone(timezone.utc).replace(tzinfo=None)
+    rows = session.scalars(
+        select(Post).where(
+            Post.community_id == community_id,
+            Post.content_type == ctype,
+            Post.published_at == published_at,
+        ).order_by(Post.id)
+    ).all()
+    for row in rows:
+        how = _stored_match(row.content, text)
+        if how:
+            return row, how
+    return None, None
+
+
+def _stored_preview_of(session: Session, **kw) -> Post | None:
+    row, how = _stored_copy_of(session, **kw)
+    return row if how == "preview" else None
 
 
 def upsert_post(session: Session, *, community_id: int, record: dict) -> tuple[Post, str]:
@@ -362,6 +496,36 @@ def upsert_post(session: Session, *, community_id: int, record: dict) -> tuple[P
             Post.content_type == ctype,
         )
     )
+    if existing is None:
+        preview, how = _stored_copy_of(
+            session, community_id=community_id, ctype=ctype,
+            published_at=record.get("published_at"), text=text,
+        )
+        if preview is not None and how == "same":
+            # Same text, other whitespace: take over the new identity, keep
+            # the verdict -- there is nothing new to classify.
+            preview.source_content_id = source_id
+            preview.content = text
+            preview.dedup_hash = new_hash
+            preview.simhash = simhash(text)
+            preview.url = record.get("url") or preview.url
+            session.flush()
+            return preview, "unchanged"
+        if preview is not None:
+            # Same post, stored earlier as Circle's preview. Upgrade that row
+            # to the full text under the new identity (so the next read finds
+            # it directly) and re-classify it; its lead, if any, stays on it.
+            # Not an edit by the author, so edited_at is left alone.
+            preview.source_content_id = source_id
+            preview.content = text
+            preview.title = record.get("title") or preview.title
+            preview.url = record.get("url") or preview.url
+            preview.dedup_hash = new_hash
+            preview.simhash = simhash(text)
+            preview.scraped_at = utcnow()
+            preview.classified = False
+            session.flush()
+            return preview, "updated"
 
     if existing is not None:
         if existing.dedup_hash == new_hash:
@@ -448,7 +612,7 @@ def find_near_duplicate(
         .where(
             Post.community_id == post.community_id,
             Post.dedup_hash == post.dedup_hash,
-            Post.id != post.id,
+            Post.id < post.id,
         )
         .order_by(Post.id)
     )
@@ -463,9 +627,14 @@ def find_near_duplicate(
     rows = session.execute(
         select(Post.id, Post.simhash).where(
             Post.community_id == post.community_id,
-            Post.id != post.id,
+            # Earlier posts only, as the docstring always said: the oldest copy
+            # is the original. With "any other post", re-judging an original
+            # after its repost filed each lead as the other's duplicate, and
+            # both vanished from the lead list.
+            Post.id < post.id,
             Post.simhash.is_not(None),
         )
+        .order_by(Post.id)
     ).all()
     for other_id, other_simhash in rows:
         if hamming_distance(post.simhash, other_simhash) <= threshold:

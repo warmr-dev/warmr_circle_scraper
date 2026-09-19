@@ -30,6 +30,8 @@ from circle_leads.storage.database import (
     find_near_duplicate,
     get_or_create_author,
     get_or_create_community,
+    live_original,
+    retire_lead,
     upsert_post,
 )
 from circle_leads.storage.models import AccessState, Lead, PermissionStatus, Post
@@ -281,18 +283,27 @@ def _triage_posts(
                     decided_by=classification.decided_by,
                 )
 
+            # The model was asked and gave no verdict (an outage, spent
+            # credits), so the rules decided alone. Enough to show a lead for
+            # review, not to act on: it neither retires a lead judged earlier
+            # nor goes to Vini on its own.
+            held = classification.llm_error is not None
+
             if not classification.is_lead:
                 result.not_leads += 1
                 stale = s.scalar(select(Lead).where(Lead.post_id == post_pk))
-                if stale:
-                    s.delete(stale)
+                if stale and not held:
+                    retire_lead(s, stale, reason=classification.reason,
+                                decided_by=classification.decided_by)
                 continue
 
             if not meets_requirements(classification, requirements):
                 result.filtered += 1
                 stale = s.scalar(select(Lead).where(Lead.post_id == post_pk))
-                if stale:
-                    s.delete(stale)
+                if stale and not held:
+                    retire_lead(s, stale, reason="filtered out by the target roles/skills "
+                                f"or confidence floor ({classification.reason})",
+                                decided_by=classification.decided_by)
                 continue
 
             score, priority, breakdown = score_lead(
@@ -300,18 +311,31 @@ def _triage_posts(
             )
             duplicate = find_near_duplicate(s, post)
             duplicate_lead_id = (
-                duplicate.lead.id if duplicate is not None and duplicate.lead else None
+                duplicate.lead.id
+                if duplicate is not None and live_original(duplicate.lead) else None
             )
             if duplicate_lead_id:
                 result.duplicates += 1
 
             extracted = classification.extracted or {}
-            lead = s.scalar(select(Lead).where(Lead.post_id == post_pk)) or Lead(
-                post_id=post_pk
-            )
+            existing = s.scalar(select(Lead).where(Lead.post_id == post_pk))
+            if held and existing is not None:
+                continue   # keep the verdict the model gave earlier
+            lead = existing or Lead(post_id=post_pk)
+
+            # A lead once filed as a duplicate stays one. Re-judged on its full
+            # text while the original is still a preview, the post no longer
+            # looks near-identical, and dropping the link would push the same
+            # lead to Vini a second time.
+            if duplicate_lead_id is None and lead.duplicate_of_id not in (None, lead.id):
+                if live_original(s.get(Lead, lead.duplicate_of_id)):
+                    duplicate_lead_id = lead.duplicate_of_id
             lead.classification = classification.classification
             lead.confidence = classification.confidence
             lead.reason = classification.reason
+            if held:
+                lead.reason = (f"{classification.reason} Held for review, not sent to "
+                               f"Vini: no LLM verdict ({classification.llm_error}).")
             lead.classifier_version = classification.classifier_version
             lead.decided_by = classification.decided_by
             lead.evidence_quote = classification.evidence_quote
@@ -331,7 +355,7 @@ def _triage_posts(
             s.flush()
             # New non-duplicate leads go to production; already-synced rows are
             # skipped inside the push helper.
-            if duplicate_lead_id is None and lead.external_synced_at is None:
+            if duplicate_lead_id is None and lead.external_synced_at is None and not held:
                 pending_external_ids.append(lead.id)
 
             payload: dict[str, Any] = {

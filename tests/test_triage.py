@@ -316,3 +316,58 @@ def test_age_cap_of_zero_disables_the_filter(db, reqs):
 
     assert result.too_old == 0
     assert len(result.leads) == 1
+
+
+# --- a lead already sent to Vini is demoted, not deleted (2026-09-19) --------
+
+def _record(content, when):
+    return {"content": content, "published_at": when,
+            "author": {"display_name": "Dana Ops"}}
+
+
+def test_full_text_that_retires_a_sent_lead_keeps_it_as_a_record(db, reqs):
+    from datetime import datetime
+    from sqlalchemy import func, select
+    from circle_leads.storage.models import Lead, Post
+    from circle_leads.triage.pipeline import triage_records
+
+    when = datetime(2026, 9, 1, 10, 0, 0, 123000)
+    preview = ("We are hiring a Flutter developer to build our delivery app, "
+               "contract, remote, start next month. DM me with your portfolio "
+               "and your rate so we can talk this week about the details of…")
+    full = (preview[:-1] + " the project. Update: the role has been filled, "
+            "thank you all for the messages!")
+
+    first = triage_records(db, [_record(preview, when)], reqs, community="acme")
+    assert len(first.leads) == 1
+    with db.session() as s:
+        lead = s.scalar(select(Lead))
+        lead.external_synced_at = datetime(2026, 9, 2)   # production has it
+
+    second = triage_records(db, [_record(full, when)], reqs, community="acme")
+    assert second.leads == []
+    with db.session() as s:
+        assert s.scalar(select(func.count()).select_from(Post)) == 1   # upgraded in place
+        lead = s.scalar(select(Lead))
+        assert lead is not None                                  # still on record
+        assert lead.classification == "NOT_LEAD"                 # no longer counted
+        assert lead.external_synced_at is not None
+        assert "sent to Vini" in lead.reason
+
+
+def test_full_text_that_retires_an_unsent_lead_deletes_it(db, reqs):
+    from datetime import datetime
+    from sqlalchemy import select
+    from circle_leads.storage.models import Lead
+    from circle_leads.triage.pipeline import triage_records
+
+    when = datetime(2026, 9, 1, 10, 0, 0, 123000)
+    preview = ("We are hiring a Flutter developer to build our delivery app, "
+               "contract, remote, start next month. DM me with your portfolio "
+               "and your rate so we can talk this week about the details of…")
+    full = preview[:-1] + " the project. Update: the role has been filled."
+
+    triage_records(db, [_record(preview, when)], reqs, community="acme")
+    triage_records(db, [_record(full, when)], reqs, community="acme")
+    with db.session() as s:
+        assert s.scalar(select(Lead)) is None

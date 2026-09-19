@@ -210,3 +210,110 @@ def test_empty_port_url_builds_engine(monkeypatch):
     # Would previously raise ValueError: invalid literal for int() with base 10.
     d = dbmod.Database("postgresql://u:p@host:/circle")
     assert d.url == "postgresql+psycopg://u:p@host/circle"
+
+
+# --- preview -> full text (2026-09-19) --------------------------------------
+# Every post read before 2026-09-18 was stored as Circle's ~255-char preview,
+# and a read's identity is a hash of its text. Reading the same post in full
+# must upgrade that row, not store the post a second time.
+
+def _dated(content, sid, when):
+    return {"source_content_id": sid, "content": content, "published_at": when}
+
+
+_WHEN = __import__("datetime").datetime(2026, 6, 17, 13, 31, 4, 984000)
+_FULL = ("Weekly update\n\n" + "We shipped the new onboarding flow this week. " * 8
+         + "Also: we are hiring a contract Flutter developer, DM me.")
+# What the reader used to store: the title, then the body cut at 255 chars
+# (mid-word) with an ellipsis, on one line.
+_PREVIEW = "Weekly update\n\n" + " ".join(_FULL.split("\n\n", 1)[1][:255].split()) + "…"
+
+
+def test_full_text_upgrades_the_stored_preview_in_place(db):
+    from sqlalchemy import func, select
+    from circle_leads.storage.models import Post
+
+    with db.session() as s:
+        c = get_or_create_community(s, slug="acme", url="https://acme.circle.so")
+        old, _ = upsert_post(s, community_id=c.id, record=_dated(_PREVIEW, "triage:old", _WHEN))
+        old.classified = True
+        cid, pid = c.id, old.id
+
+    with db.session() as s:
+        post, outcome = upsert_post(s, community_id=cid, record=_dated(_FULL, "triage:new", _WHEN))
+        assert outcome == "updated"
+        assert post.id == pid                      # same row, not a second one
+        assert post.content == _FULL
+        assert post.source_content_id == "triage:new"
+        assert post.classified is False            # re-judged on the full text
+        assert post.edited_at is None              # we read more; nobody edited
+
+    with db.session() as s:
+        assert s.scalar(select(func.count()).select_from(Post)) == 1
+        # The next read of the full text finds the row by identity.
+        _, again = upsert_post(s, community_id=cid, record=_dated(_FULL, "triage:new", _WHEN))
+        assert again == "unchanged"
+
+
+def test_a_post_at_another_time_is_not_taken_for_a_preview(db):
+    from datetime import timedelta
+
+    with db.session() as s:
+        c = get_or_create_community(s, slug="acme", url="https://acme.circle.so")
+        upsert_post(s, community_id=c.id, record=_dated(_PREVIEW, "triage:old", _WHEN))
+        _, outcome = upsert_post(
+            s, community_id=c.id,
+            record=_dated(_FULL, "triage:new", _WHEN + timedelta(seconds=1)),
+        )
+    assert outcome == "new"
+
+
+def test_undated_posts_are_never_matched_as_previews(db):
+    with db.session() as s:
+        c = get_or_create_community(s, slug="acme", url="https://acme.circle.so")
+        upsert_post(s, community_id=c.id, record=_dated(_PREVIEW, "triage:old", None))
+        _, outcome = upsert_post(s, community_id=c.id, record=_dated(_FULL, "triage:new", None))
+    assert outcome == "new"
+
+
+def test_a_timezone_aware_timestamp_still_finds_the_preview(db):
+    from datetime import timezone
+
+    with db.session() as s:
+        c = get_or_create_community(s, slug="acme", url="https://acme.circle.so")
+        old, _ = upsert_post(s, community_id=c.id, record=_dated(_PREVIEW, "triage:old", _WHEN))
+        post, outcome = upsert_post(
+            s, community_id=c.id,
+            record=_dated(_FULL, "triage:new", _WHEN.replace(tzinfo=timezone.utc)),
+        )
+        same_row = post.id == old.id
+    assert outcome == "updated" and same_row
+
+
+def test_is_preview_of_ignores_whitespace_and_a_cut_mid_word():
+    from circle_leads.storage.database import _is_preview_of
+
+    full = "Title\n\n" + "We are looking for a senior engineer to join our team in Berlin. " * 3
+    assert _is_preview_of("Title We are looking for a senior engineer to join our team in Ber…", full)
+    assert _is_preview_of("Title\nWe are looking for a senior engineer to join our team in Berl...", full)
+    # Different words early on: another post, not a preview of this one.
+    assert not _is_preview_of("Title We are looking for a junior designer to join our team in Ber…", full)
+    assert not _is_preview_of(full, full)          # not shorter: nothing was cut
+    assert not _is_preview_of("Title We are…", full)  # too short to tell
+
+
+def test_display_name_only_authors_are_reused(db):
+    # Readers that know only a name created a new author row per post per
+    # read: 54,579 rows for 2,256 names in prod on 2026-09-19.
+    from circle_leads.storage.database import get_or_create_author
+
+    with db.session() as s:
+        c = get_or_create_community(s, slug="acme", url="https://acme.circle.so")
+        other = get_or_create_community(s, slug="other", url="https://other.circle.so")
+        a1 = get_or_create_author(s, community_id=c.id, source_author_id=None, display_name="Jane Doe")
+        a2 = get_or_create_author(s, community_id=c.id, source_author_id=None, display_name="Jane Doe")
+        b = get_or_create_author(s, community_id=c.id, source_author_id=None, display_name="John Roe")
+        elsewhere = get_or_create_author(s, community_id=other.id, source_author_id=None, display_name="Jane Doe")
+        assert a1.id == a2.id
+        assert b.id != a1.id
+        assert elsewhere.id != a1.id               # names are per community

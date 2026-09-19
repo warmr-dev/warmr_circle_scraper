@@ -170,7 +170,9 @@ Return ONLY a JSON object:
   "confidence": 0.0-1.0,
   "reason": "one sentence",
   "signals": ["short phrase", ...]
-}"""
+}
+"confidence" is how sure you are of your own "fit" answer, whichever way it
+goes: a clear NOT FIT is "fit": false with high confidence, not low."""
 
 
 def _extract_json(raw: str) -> dict[str, Any]:
@@ -311,8 +313,18 @@ def classify_icp_fit(
         # Confident enough to be worth a look, not enough to auto-join on.
         reasons = reasons + [LLM_FIT_NEEDS_REVIEW]
 
+    # icp_score means "how well does this fit", on every path -- rules rows
+    # already store it that way, and the join queue and harvest sort by it. A
+    # "no" must therefore land low. Models read "confidence" two ways on a "no"
+    # -- "0.9 sure it doesn't fit" and "0.1 chance it fits" were both seen from
+    # gpt-4o-mini on 2026-09-18 -- so take the low side of either reading
+    # instead of trusting one (storing it raw put 651 confident "no"s at 90).
+    if verdict.fit:
+        fit_score = verdict.confidence
+    else:
+        fit_score = min(verdict.confidence, 1.0 - verdict.confidence)
     return IcpResult(
-        score=round(verdict.confidence * 100),
+        score=round(fit_score * 100),
         flag=verdict.fit and confident and llm_may_flag,
         reasons=reasons,
         decided_by="llm",

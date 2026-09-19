@@ -99,15 +99,34 @@ def test_confidence_is_clamped():
     assert classify_with_llm(POST, backend).confidence == 1.0
 
 
-def test_llm_is_not_called_when_rules_are_decisive():
-    """The LLM is for ambiguity; obvious cases must not spend a request."""
+def test_llm_is_skipped_only_for_confident_non_leads():
+    """A clear job seeker costs no request; a clear rules lead gets one check."""
     reqs = load_requirements()
     backend = StubBackend({"classification": "LEAD", "confidence": 1.0, "reason": ""})
     classify("Open to work.", reqs, llm=backend)
     assert backend.calls == 0
 
     classify("We are hiring a Flutter developer for our team.", reqs, llm=backend)
-    assert backend.calls == 0
+    assert backend.calls == 1
+
+
+def test_llm_can_overrule_a_confident_rules_lead():
+    # 2026-09-19: the LLM confirmed only 15 of 46 leads the rules filed on
+    # their own; the rest (articles, intros, job seekers) went to Vini anyway.
+    reqs = load_requirements()
+    backend = StubBackend({"classification": "NOT_LEAD", "confidence": 0.9,
+                           "reason": "An article about hiring, not a request."})
+    result = classify("We are hiring a Flutter developer for our team.", reqs, llm=backend)
+    assert result.classification == "NOT_LEAD"
+    assert result.decided_by == "llm"
+
+
+def test_a_confident_rules_lead_survives_an_llm_outage():
+    reqs = load_requirements()
+    backend = StubBackend(None, raise_exc=RuntimeError("down"))
+    result = classify("We are hiring a Flutter developer for our team.", reqs, llm=backend)
+    assert result.classification == "LEAD"
+    assert result.decided_by == "rules"
 
 
 def test_llm_failure_falls_back_to_rules():
@@ -176,3 +195,25 @@ def test_openai_backend_parses_chat_completion(monkeypatch):
     b._client = FakeClient()
     out = b.complete("sys", "user")
     assert "LEAD" in out
+
+
+def test_the_remote_partner_scam_is_never_a_lead(dev_requirements):
+    # Posted verbatim across communities; the LLM called it a lead three times
+    # on 2026-09-19. A disqualifier stops it before the LLM is asked.
+    scam = ("Collab Opportunity Hello, We're looking for a reliable partner (must be "
+            "based in US, UK, CA, AU, DE, or NZ) to work with our team on a part-time "
+            "basis. We're offering a monthly salary of USD 2,000 - 3,000. No development "
+            "experience required!")
+    backend = StubBackend({"classification": "LEAD", "confidence": 1.0, "reason": "",
+                           "evidence_quote": "looking for a reliable partner"})
+    result = classify(scam, dev_requirements, llm=backend)
+    assert result.classification == "NOT_LEAD"
+    assert backend.calls == 0
+
+
+def test_an_llm_outage_is_flagged_on_the_result():
+    reqs = load_requirements()
+    backend = StubBackend(None, raise_exc=RuntimeError("402"))
+    result = classify("We are hiring a Flutter developer for our team.", reqs, llm=backend)
+    assert result.decided_by == "rules" and result.llm_error
+    assert classify("We are hiring a Flutter developer for our team.", reqs).llm_error is None

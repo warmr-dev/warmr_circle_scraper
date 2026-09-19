@@ -365,3 +365,49 @@ def test_comments_can_be_disabled():
     r = _reader(routes)
     recs = fetch_space_posts(r, 9, with_comments=False)
     assert all(x["content_type"] == "post" for x in recs)
+
+
+def test_extract_text_reads_the_wrapped_tiptap_body_circle_sends():
+    # The list response wraps the document -- tiptap_body = {"body": doc,
+    # "circle_ios_fallback_text": ..., ...} -- and the walk used to stop at the
+    # wrapper, so every cookie-read post kept its preview (productizeyourself,
+    # 2026-09-19: 252 of 1,039 chars).
+    from circle_leads.scraper.member_api_reader import _extract_text
+
+    full = "Intro about our startup. " * 20 + "We are hiring a senior backend developer."
+    rec = {
+        "name": "Update",
+        "truncated_content": full[:255],
+        "tiptap_body": {
+            "body": {"type": "doc", "content": [
+                {"type": "paragraph", "content": [{"type": "text", "text": full}]}]},
+            "circle_ios_fallback_text": full,
+            "attachments": [],
+        },
+    }
+    _, body = _extract_text(rec)
+    assert "hiring a senior backend developer" in body
+
+
+def test_extract_text_keeps_the_preview_when_the_walk_finds_less():
+    from circle_leads.scraper.member_api_reader import _extract_text
+
+    rec = {"name": "t", "truncated_content": "We need a React developer for 3 months",
+           "tiptap_body": {"body": {"type": "doc", "content": []}}}
+    _, body = _extract_text(rec)
+    assert body == "We need a React developer for 3 months"
+
+
+def test_tiptap_mentions_and_post_links_keep_their_text():
+    # Mentions and links to posts/events are leaf nodes without a text child;
+    # their visible text is circle_ios_fallback_text.
+    from circle_leads.scraper.member_api_reader import _tiptap_text
+
+    doc = {"type": "doc", "content": [{"type": "paragraph", "content": [
+        {"type": "text", "text": "Thanks "},
+        {"type": "mention", "attrs": {"sgid": "x"}, "circle_ios_fallback_text": "@Jane Doe"},
+        {"type": "text", "text": ", see "},
+        {"type": "entity", "attrs": {"sgid": "y"}, "circle_ios_fallback_text": "#Hiring board"},
+    ]}]}
+    text = _tiptap_text(doc)
+    assert "@Jane Doe" in text and "#Hiring board" in text

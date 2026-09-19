@@ -303,6 +303,15 @@ NEGATION_PATTERNS: list[tuple[str, str, int]] = [
     ("closed_applications", r"\b(?:applications?|role)\s+(?:are\s+|is\s+)?closed\b", -35),
 ]
 
+# Recruitment-scam templates posted verbatim across many communities. They
+# read as a hiring ask to a human and to the LLM alike (2026-09-19: the same
+# "Collab Opportunity" text became a lead in surferseo twice and in engglobal),
+# so they are disqualified before the LLM is asked. Keep each pattern to the
+# template's own wording, so no genuine post can match it.
+SCAM_PATTERNS: list[tuple[str, str, int]] = [
+    ("scam_remote_partner", r"\breliable\s+partner\s*\(\s*must\s+be\s+based\s+in\b", -60),
+]
+
 HYPOTHETICAL_PATTERNS: list[tuple[str, str, int]] = [
     ("hypothetical", r"\b(?:if\s+you\s+(?:were|are)\s+(?:hiring|looking)|hypothetically|imagine\s+(?:if|you))\b", -20),
     ("educational", r"\b(?:how\s+(?:do|would)\s+you\s+(?:go\s+about\s+)?(?:hire|hiring|find)|tips\s+for\s+hiring|guide\s+to\s+hiring|advice\s+on\s+hiring)\b", -20),
@@ -385,6 +394,7 @@ _HIRING = _compile(HIRING_PATTERNS)
 _SEEKER = _compile(JOB_SEEKER_PATTERNS)
 _NEGATION = _compile(NEGATION_PATTERNS)
 _HYPOTHETICAL = _compile(HYPOTHETICAL_PATTERNS)
+_SCAM = _compile(SCAM_PATTERNS)
 _DELIVERABLE = re.compile(DELIVERABLE_PATTERN, re.I)
 _BUDGET = re.compile(BUDGET_PATTERN, re.I)
 _TIMELINE = re.compile(TIMELINE_PATTERN, re.I)
@@ -523,6 +533,11 @@ def analyze(text: str) -> RuleResult:
             result.disqualifiers.append(name)
 
     for name, rx, weight in _HYPOTHETICAL:
+        if rx.search(text):
+            result.score += weight
+            result.disqualifiers.append(name)
+
+    for name, rx, weight in _SCAM:
         if rx.search(text):
             result.score += weight
             result.disqualifiers.append(name)

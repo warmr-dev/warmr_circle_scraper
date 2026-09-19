@@ -124,3 +124,27 @@ def test_cookie_never_appears_in_repr():
     # The cookie is a field, so guard that logging the client won't leak it in
     # our own code paths -- callers must not print it.
     assert client.cookie == "SECRET-COOKIE"  # accessible for the request
+
+
+def test_extract_text_prefers_the_full_tiptap_body_over_the_preview():
+    full = "Some context about the product. " * 15 + "Looking for a Flutter developer."
+    record = {
+        "name": "Update",
+        "truncated_content": full[:255],
+        "tiptap_body": {"body": {"type": "doc", "content": [
+            {"type": "paragraph", "content": [{"type": "text", "text": full}]}]}},
+    }
+    _, body = _extract_text(record)
+    assert body.endswith("Looking for a Flutter developer.")
+
+
+def test_tiptap_mentions_and_post_links_keep_their_text():
+    from circle_leads.scraper.member_feed import _tiptap_text
+
+    doc = {"type": "doc", "content": [{"type": "paragraph", "content": [
+        {"type": "text", "text": "Ask"},
+        {"type": "mention", "attrs": {"sgid": "x"}, "circle_ios_fallback_text": "@Jane Doe"},
+        {"type": "entity", "attrs": {"sgid": "y"}, "circle_ios_fallback_text": "#Jobs"},
+    ]}]}
+    text = _tiptap_text(doc)
+    assert "@Jane Doe" in text and "#Jobs" in text

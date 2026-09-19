@@ -14,6 +14,7 @@ function for why that distinction is the whole point.
 
 from __future__ import annotations
 
+import html
 import logging
 import re
 from concurrent.futures import ThreadPoolExecutor
@@ -52,6 +53,8 @@ from circle_leads.storage.database import (
     get_or_create_author,
     get_or_create_community,
     get_or_create_space,
+    live_original,
+    retire_lead,
     upsert_post,
 )
 from circle_leads.storage.models import (
@@ -427,12 +430,17 @@ def classify_pending(
             )
             post.classified = True
             stats["classified"] += 1
+            # No model verdict (an outage, spent credits): the rules decided
+            # alone -- enough to show a lead for review, not to retire an
+            # earlier one or push this one to Vini.
+            held = result.llm_error is not None
 
             if not result.is_lead:
                 stats["not_leads"] += 1
                 existing = s.scalar(select(Lead).where(Lead.post_id == post.id))
-                if existing:
-                    s.delete(existing)
+                if existing and not held:
+                    retire_lead(s, existing, reason=result.reason,
+                                decided_by=result.decided_by)
                 continue
 
             # The confidence floor and role/skill filters always apply.
@@ -443,8 +451,10 @@ def classify_pending(
                 # Drop any prior lead: after an edit the stored score, evidence
                 # quote, and extracted fields describe text that is now gone.
                 stale = s.scalar(select(Lead).where(Lead.post_id == post.id))
-                if stale:
-                    s.delete(stale)
+                if stale and not held:
+                    retire_lead(s, stale, reason="filtered out by the target roles/skills "
+                                f"or confidence floor ({result.reason})",
+                                decided_by=result.decided_by)
                 continue
 
             score, priority, breakdown = score_lead(
@@ -453,16 +463,28 @@ def classify_pending(
 
             duplicate = find_near_duplicate(s, post)
             duplicate_lead_id = None
-            if duplicate is not None and duplicate.lead is not None:
+            if duplicate is not None and live_original(duplicate.lead):
                 duplicate_lead_id = duplicate.lead.id
                 stats["duplicates"] += 1
 
-            lead = s.scalar(select(Lead).where(Lead.post_id == post.id)) or Lead(
-                post_id=post.id
-            )
+            existing = s.scalar(select(Lead).where(Lead.post_id == post.id))
+            if held and existing is not None:
+                continue   # keep the verdict the model gave earlier
+            lead = existing or Lead(post_id=post.id)
+
+            # A lead once filed as a duplicate stays one. Re-judged on its full
+            # text while the original is still a preview, the post no longer
+            # looks near-identical, and dropping the link would push the same
+            # lead to Vini a second time.
+            if duplicate_lead_id is None and lead.duplicate_of_id not in (None, lead.id):
+                if live_original(s.get(Lead, lead.duplicate_of_id)):
+                    duplicate_lead_id = lead.duplicate_of_id
             lead.classification = result.classification
             lead.confidence = result.confidence
             lead.reason = result.reason
+            if held:
+                lead.reason = (f"{result.reason} Held for review, not sent to "
+                               f"Vini: no LLM verdict ({result.llm_error}).")
             lead.classifier_version = result.classifier_version
             lead.decided_by = result.decided_by
             lead.evidence_quote = result.evidence_quote
@@ -482,7 +504,7 @@ def classify_pending(
             lead.urgency = extracted.get("urgency")
             s.add(lead)
             s.flush()
-            if duplicate_lead_id is None and lead.external_synced_at is None:
+            if duplicate_lead_id is None and lead.external_synced_at is None and not held:
                 pending_external_ids.append(lead.id)
             stats["leads"] += 1
 
@@ -711,6 +733,10 @@ _BOILERPLATE_PATTERNS = (
     re.compile(r"^log ?in to\b.{0,120}?\bvia (email|sso)\b", re.I),
     re.compile(r"^(log ?in|sign ?in|sign ?up) to\b.{0,80}?\bcommunity\b", re.I),
     re.compile(r"^create an account or log ?in\b", re.I),
+    # circle.so's own marketing <title>. A host with no community left behind it
+    # falls through to the marketing site, so this is a dead host, not a name --
+    # 738 DNS-import rows were stored with it as their name on 2026-09-18.
+    re.compile(r"^circle\s*[|\-–—]\s*a new era for digital businesses\b", re.I),
 )
 
 # Exact titles that carry no information about the community at all.
@@ -718,6 +744,30 @@ _JUNK_NAMES = frozenset({
     "circle", "circle.so", "community", "home", "loading", "log in", "login",
     "redirecting", "sign in", "sign up", "untitled",
 })
+
+# "Log in | Acme", "Home | Acme", "Login – Acme": a page title wrapped around
+# the community's name. The name is still in there; only the prefix is noise.
+_PAGE_TITLE_PREFIX = re.compile(
+    r"^\s*(?:log ?in|sign ?in|home|welcome)\s*[|\-–—:]\s*", re.I
+)
+
+
+def _clean_name(text: str | None) -> str | None:
+    """Unescape HTML entities, drop a page-title prefix and a doubled title.
+
+    Landing-page <title>s arrive HTML-escaped ("Founder&#39;s Circle") and
+    often as "<page> | <site>" -- the part worth keeping is the community's
+    own name, not the page it was read from.
+    """
+    if text is None:
+        return None
+    value = html.unescape(text).strip()
+    value = _PAGE_TITLE_PREFIX.sub("", value, count=1).strip()
+    # "Ulule Connect | Ulule Connect" -> "Ulule Connect".
+    parts = [p.strip() for p in value.split("|")]
+    if len(parts) == 2 and parts[0].lower() == parts[1].lower():
+        value = parts[0]
+    return value or None
 
 
 def _is_boilerplate(text: str | None) -> bool:
@@ -764,7 +814,7 @@ def fetch_community_metadata(
     meta = CommunityMetadata()
 
     if want_name:
-        name = PublicReader(host, session=http).community_name()
+        name = _clean_name(PublicReader(host, session=http).community_name())
         if name:
             if _is_boilerplate(name):
                 meta.rejected.append("name")
@@ -779,12 +829,13 @@ def fetch_community_metadata(
                 meta.rejected.append("description")
             else:
                 meta.description = check.description
-        if want_name and meta.name is None and check.name:
-            if _is_boilerplate(check.name):
+        page_name = _clean_name(check.name)
+        if want_name and meta.name is None and page_name:
+            if _is_boilerplate(page_name):
                 if "name" not in meta.rejected:
                     meta.rejected.append("name")
             else:
-                meta.name = check.name
+                meta.name = page_name
         if meta.name is None and meta.description is None and not meta.rejected:
             meta.note = check.note or f"HTTP {check.http_status}"
 
