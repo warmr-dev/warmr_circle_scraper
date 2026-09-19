@@ -98,6 +98,27 @@ def _price_label_fallback(price_label: str | None) -> JoinClassification | None:
     return JoinClassification(JoinType.PAID, f"price_label fallback: '{label}'")
 
 
+def with_price_label_fallback(
+    classification: JoinClassification, price_label: str | None
+) -> JoinClassification:
+    """Refine an inconclusive live check with the listing's price, if any.
+
+    Every writer of ``join_type`` goes through this. The scheduled harvest
+    used to store the bare live result on each read, which turned rows the
+    listing had priced (free or paid) back into ``locked_unknown`` and left
+    ``join_type_detail`` still describing the fallback.
+    """
+    if classification.join_type not in (JoinType.UNKNOWN, JoinType.LOCKED_UNKNOWN):
+        return classification
+    fallback = _price_label_fallback(price_label)
+    if fallback is None:
+        return classification
+    return JoinClassification(
+        fallback.join_type,
+        f"{fallback.detail} (live check inconclusive: {classification.detail})",
+    )
+
+
 def _classify_payload(data: dict) -> JoinClassification:
     """Pure classification from an already-fetched communities/current payload.
 
@@ -242,14 +263,9 @@ def classify_join_type_pending(
             host = urlparse(community.url).hostname or (
                 community.url.replace("https://", "").replace("http://", "").strip("/")
             )
-            classification = fetch_join_classification(host, session=session)
-            if classification.join_type in (JoinType.UNKNOWN, JoinType.LOCKED_UNKNOWN):
-                fallback = _price_label_fallback(community.price_label)
-                if fallback is not None:
-                    classification = JoinClassification(
-                        fallback.join_type,
-                        f"{fallback.detail} (live check inconclusive: {classification.detail})",
-                    )
+            classification = with_price_label_fallback(
+                fetch_join_classification(host, session=session), community.price_label
+            )
             community.join_type = classification.join_type
             community.join_type_detail = classification.detail[:2000]
             community.join_type_checked_at = utcnow()

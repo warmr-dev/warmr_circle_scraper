@@ -205,6 +205,34 @@ def test_recheck_resolves_a_stuck_discover_row(monkeypatch):
         assert row.join_type == JoinType.FREE_JOIN
 
 
+def test_recheck_keeps_the_listing_price_when_the_host_is_private(monkeypatch):
+    db = _db()
+    with db.session() as s:
+        c = get_or_create_community(
+            s, slug="skl-club", url="https://discover.circle.so/products/skl-club",
+        )
+        c.platform = PLATFORM_DISCOVER
+        c.price_label = "Free"
+
+    monkeypatch.setattr(circle_directory, "_require_playwright", lambda: _FakePlaywrightCM)
+    monkeypatch.setattr(circle_directory, "resolve_join_url", lambda page, slug, **kw: "https://members.skl.club/")
+    monkeypatch.setattr(
+        "circle_leads.discovery.discover_communities.detect_platform",
+        lambda url, **kw: "circle",
+    )
+    monkeypatch.setattr(
+        "circle_leads.discovery.join_type.fetch_join_classification",
+        lambda host, **kw: JoinClassification(JoinType.LOCKED_UNKNOWN, "HTTP 401 on communities/current"),
+    )
+
+    recheck_unresolved_join_urls(db, request_pause=0)
+
+    with db.session() as s:
+        row = s.scalar(select(Community).where(Community.slug == "skl-club"))
+        assert row.join_type == JoinType.FREE_JOIN
+        assert row.join_type_detail.startswith("price_label fallback: 'Free'")
+
+
 def test_recheck_leaves_a_row_alone_when_still_unresolved(monkeypatch):
     db = _db()
     with db.session() as s:

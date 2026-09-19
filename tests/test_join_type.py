@@ -15,8 +15,10 @@ from circle_leads.discovery.join_type import (
     JoinType,
     _classify_payload,
     _price_label_fallback,
+    JoinClassification,
     classify_join_type_pending,
     fetch_join_classification,
+    with_price_label_fallback,
 )
 from circle_leads.storage.database import Database, get_or_create_community
 from circle_leads.storage.models import Community
@@ -260,6 +262,24 @@ def test_price_label_fallback_recognizes_paid(label):
 @pytest.mark.parametrize("label", [None, "", "   "])
 def test_price_label_fallback_is_none_without_a_real_label(label):
     assert _price_label_fallback(label) is None
+
+
+@pytest.mark.parametrize("live", [JoinType.LOCKED_UNKNOWN, JoinType.UNKNOWN])
+def test_an_inconclusive_live_check_takes_the_listing_price(live):
+    c = with_price_label_fallback(JoinClassification(live, "HTTP 401 on communities/current"), "Free")
+    assert c.join_type == JoinType.FREE_JOIN
+    assert c.detail == "price_label fallback: 'Free' (live check inconclusive: HTTP 401 on communities/current)"
+
+
+def test_a_conclusive_live_check_beats_the_listing_price():
+    live = JoinClassification(JoinType.INVITE_ONLY, "is_private=true")
+    assert with_price_label_fallback(live, "$99/month") is live
+
+
+def test_no_listing_price_leaves_the_live_check_as_it_is():
+    live = JoinClassification(JoinType.LOCKED_UNKNOWN, "HTTP 401 on communities/current")
+    assert with_price_label_fallback(live, None) is live
+    assert with_price_label_fallback(live, "  ") is live
 
 
 # --- classify_join_type_pending: the never-checked backlog -------------------
