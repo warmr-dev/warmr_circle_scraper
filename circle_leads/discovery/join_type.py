@@ -37,7 +37,8 @@ class JoinType:
     # Checked by hand 2026-09-18 on 4 ICP-fit rows: all were private,
     # members-only communities showing only a sign-in page. Free vs paid can't
     # be told without an account. A paid Discover price_label still refines
-    # it; a "Free" one does not (see refine_join_classification).
+    # it; a "Free" one only when the answer was not a 401 (see
+    # refine_join_classification).
     LOCKED_UNKNOWN = "locked_unknown"
     UNKNOWN = "unknown"                # not a reachable/recognizable Circle host
     SUBSCRIPTION_EXPIRED = "subscription_expired"  # operator's own Circle plan
@@ -116,10 +117,10 @@ def refine_join_classification(live: JoinClassification, community) -> JoinClass
     1. A conclusive live answer (the community's own settings) wins.
     2. Otherwise a person's manual verdict stays.
     3. Otherwise the directory price refines it. A paid label means paid.
-       A "Free" label counts only when the check got no answer at all
-       (``unknown``). When Circle refuses the call (``locked_unknown``) the
-       community is private: the 2026-09-19 hand check found 3 of 10 such
-       "Free" listings open to join, against 10 of 10 paid ones paid.
+       A "Free" label counts too, except when Circle answered HTTP 401: that
+       is its members-only answer, and in the 2026-09-19 hand check only 1 of
+       5 such "Free" listings was open to join (all 10 paid ones were paid).
+       A 403 is often a firewall on a custom domain; the one checked was free.
 
     ``community`` needs ``join_type``, ``join_type_detail`` and
     ``price_label``.
@@ -132,7 +133,8 @@ def refine_join_classification(live: JoinClassification, community) -> JoinClass
     fallback = _price_label_fallback(community.price_label)
     if fallback is None:
         return live
-    if live.join_type == JoinType.LOCKED_UNKNOWN and fallback.join_type == JoinType.FREE_JOIN:
+    members_only = live.join_type == JoinType.LOCKED_UNKNOWN and "HTTP 401" in live.detail
+    if members_only and fallback.join_type == JoinType.FREE_JOIN:
         return JoinClassification(
             live.join_type,
             f"{live.detail}; directory says '{community.price_label.strip()}', "

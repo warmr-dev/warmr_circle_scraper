@@ -285,12 +285,18 @@ def test_a_free_label_refines_a_check_that_got_no_answer():
     assert c.join_type == JoinType.FREE_JOIN
 
 
-def test_a_free_label_does_not_open_a_private_community():
-    """Hand check 2026-09-19: 3 of 10 locked "Free" listings were joinable."""
+def test_a_free_label_does_not_open_a_members_only_community():
+    """Hand check 2026-09-19: 1 of 5 "Free" listings answering 401 was joinable."""
     c = refine_join_classification(LOCKED, _row(price_label="Free"))
     assert c.join_type == JoinType.LOCKED_UNKNOWN
     assert c.detail == ("HTTP 401 on communities/current; directory says 'Free', "
                         "not trusted for a private community")
+
+
+def test_a_free_label_still_refines_a_403():
+    """A 403 is often a custom domain's firewall, not Circle's members-only answer."""
+    live = JoinClassification(JoinType.LOCKED_UNKNOWN, "private (members only): HTTP 403 on communities/current")
+    assert refine_join_classification(live, _row(price_label="Free")).join_type == JoinType.FREE_JOIN
 
 
 def test_a_conclusive_live_check_beats_the_listing_price_and_a_manual_verdict():
