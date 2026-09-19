@@ -94,6 +94,60 @@ def test_harvest_classifies_join_type(db, reqs, monkeypatch):
         assert c.join_type_checked_at is not None
 
 
+def _harvest_private_community(db, reqs, monkeypatch, *, price_label, live):
+    """Run the harvest over the one fixture community, fully private, with
+    ``live`` as the join check's answer; return (join_type, detail)."""
+    import circle_leads.harvest as h
+    from sqlalchemy import select
+    from circle_leads.storage.models import Community
+
+    class Reader:
+        def __init__(self, host, **kw):
+            self.community_host = host
+            self.base = f"https://{host}"
+            self.session = object()
+
+        def list_spaces(self):
+            return []
+
+        def read_space(self, sid, **kw):
+            return False, []
+
+    with db.session() as s:
+        s.scalar(select(Community).where(Community.slug == "pub")).price_label = price_label
+    monkeypatch.setattr(h, "PublicReader", Reader)
+    monkeypatch.setattr(h, "fetch_join_classification", lambda host, session=None: live)
+    harvest(db, reqs, search=False)
+    with db.session() as s:
+        c = s.scalar(select(Community).where(Community.slug == "pub"))
+        return c.join_type, c.join_type_detail
+
+
+@pytest.mark.parametrize("label, expected", [("Free", "free_join"), ("$99/month", "paid")])
+def test_harvest_keeps_the_listing_price_of_a_private_community(db, reqs, monkeypatch, label, expected):
+    """A private community answers 401 on every read. The harvest used to
+    store that bare answer, turning a priced row back into locked_unknown."""
+    from circle_leads.discovery.join_type import JoinClassification, JoinType
+
+    join_type, detail = _harvest_private_community(
+        db, reqs, monkeypatch, price_label=label,
+        live=JoinClassification(JoinType.LOCKED_UNKNOWN, "private (members only): HTTP 401"),
+    )
+    assert join_type == expected
+    assert detail == f"price_label fallback: '{label}' (live check inconclusive: private (members only): HTTP 401)"
+
+
+def test_harvest_stores_a_conclusive_live_answer_over_the_listing_price(db, reqs, monkeypatch):
+    from circle_leads.discovery.join_type import JoinClassification, JoinType
+
+    join_type, detail = _harvest_private_community(
+        db, reqs, monkeypatch, price_label="$99/month",
+        live=JoinClassification(JoinType.FREE_JOIN, "allow_signups_to_public_community=true"),
+    )
+    assert join_type == JoinType.FREE_JOIN
+    assert detail == "allow_signups_to_public_community=true"
+
+
 def test_harvest_join_classification_failure_does_not_break_the_read(db, reqs, monkeypatch):
     """A classifier exception must not abort the read (matches real readers
     with no .session attribute -- the AttributeError itself is one example)."""

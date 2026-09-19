@@ -22,7 +22,10 @@ from urllib.parse import urlparse
 from sqlalchemy import nullsfirst, or_, select
 
 from circle_leads.config.settings import Requirements
-from circle_leads.discovery.join_type import fetch_join_classification
+from circle_leads.discovery.join_type import (
+    fetch_join_classification,
+    with_price_label_fallback,
+)
 from circle_leads.discovery.persist import persist_finds
 from circle_leads.discovery.validate_finds import (
     is_interstitial_title,
@@ -329,7 +332,12 @@ def harvest(
             with db.session() as s:
                 c = s.scalar(select(Community).where(Community.slug == slug))
                 if c is not None:
+                    # A private community answers 401 here on every read;
+                    # the listing's price must survive that, as it does in
+                    # classify-join-types.
+                    join = with_price_label_fallback(join, c.price_label)
                     c.join_type = join.join_type
+                    c.join_type_detail = join.detail[:2000]
                     c.join_type_checked_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
         if not spaces:
