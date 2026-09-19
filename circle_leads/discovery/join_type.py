@@ -36,7 +36,8 @@ class JoinType:
     # community (a dead host redirects to circle.so and is UNKNOWN instead).
     # Checked by hand 2026-09-18 on 4 ICP-fit rows: all were private,
     # members-only communities showing only a sign-in page. Free vs paid can't
-    # be told without an account, so a Discover price_label still refines it.
+    # be told without an account. A paid Discover price_label still refines
+    # it; a "Free" one does not (see refine_join_classification).
     LOCKED_UNKNOWN = "locked_unknown"
     UNKNOWN = "unknown"                # not a reachable/recognizable Circle host
     SUBSCRIPTION_EXPIRED = "subscription_expired"  # operator's own Circle plan
@@ -98,24 +99,48 @@ def _price_label_fallback(price_label: str | None) -> JoinClassification | None:
     return JoinClassification(JoinType.PAID, f"price_label fallback: '{label}'")
 
 
-def with_price_label_fallback(
-    classification: JoinClassification, price_label: str | None
-) -> JoinClassification:
-    """Refine an inconclusive live check with the listing's price, if any.
+# A person's verdict from opening the community page, stored in
+# join_type_detail with this prefix (no migration needed). First used for the
+# hand check of the "Login screen only" group on 2026-09-19.
+MANUAL_CHECK_PREFIX = "manual check"
+
+
+def refine_join_classification(live: JoinClassification, community) -> JoinClassification:
+    """What to store for a live check, given what the row already knows.
 
     Every writer of ``join_type`` goes through this. The scheduled harvest
-    used to store the bare live result on each read, which turned rows the
-    listing had priced (free or paid) back into ``locked_unknown`` and left
+    used to store the bare live answer on each read, which turned rows the
+    directory had priced back into ``locked_unknown`` and left
     ``join_type_detail`` still describing the fallback.
+
+    1. A conclusive live answer (the community's own settings) wins.
+    2. Otherwise a person's manual verdict stays.
+    3. Otherwise the directory price refines it. A paid label means paid.
+       A "Free" label counts only when the check got no answer at all
+       (``unknown``). When Circle refuses the call (``locked_unknown``) the
+       community is private: the 2026-09-19 hand check found 3 of 10 such
+       "Free" listings open to join, against 10 of 10 paid ones paid.
+
+    ``community`` needs ``join_type``, ``join_type_detail`` and
+    ``price_label``.
     """
-    if classification.join_type not in (JoinType.UNKNOWN, JoinType.LOCKED_UNKNOWN):
-        return classification
-    fallback = _price_label_fallback(price_label)
+    if live.join_type not in (JoinType.UNKNOWN, JoinType.LOCKED_UNKNOWN):
+        return live
+    detail = community.join_type_detail or ""
+    if community.join_type and detail.startswith(MANUAL_CHECK_PREFIX):
+        return JoinClassification(community.join_type, detail)
+    fallback = _price_label_fallback(community.price_label)
     if fallback is None:
-        return classification
+        return live
+    if live.join_type == JoinType.LOCKED_UNKNOWN and fallback.join_type == JoinType.FREE_JOIN:
+        return JoinClassification(
+            live.join_type,
+            f"{live.detail}; directory says '{community.price_label.strip()}', "
+            "not trusted for a private community",
+        )
     return JoinClassification(
         fallback.join_type,
-        f"{fallback.detail} (live check inconclusive: {classification.detail})",
+        f"{fallback.detail} (live check inconclusive: {live.detail})",
     )
 
 
@@ -263,8 +288,8 @@ def classify_join_type_pending(
             host = urlparse(community.url).hostname or (
                 community.url.replace("https://", "").replace("http://", "").strip("/")
             )
-            classification = with_price_label_fallback(
-                fetch_join_classification(host, session=session), community.price_label
+            classification = refine_join_classification(
+                fetch_join_classification(host, session=session), community
             )
             community.join_type = classification.join_type
             community.join_type_detail = classification.detail[:2000]
