@@ -8,6 +8,7 @@ posture is closed.
 from __future__ import annotations
 
 import os
+import time
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -37,6 +38,13 @@ from circle_leads.web.auth import (
 
 STATIC_DIR = Path(__file__).parent / "static"
 REVIEW_STATUSES = {"pending_review", "contacted", "replied", "rejected", "won"}
+
+
+# How long one computed /api/overview is served before it is recomputed. The
+# funnel moves at the pace of the worker's slowest stage (hourly at best), and
+# the page is the first thing a client opens: 11 aggregate queries per view
+# bought nothing between two views a minute apart.
+OVERVIEW_TTL_SECONDS = 120
 
 
 def _parse_day(value: str | None, name: str) -> datetime | None:
@@ -1102,13 +1110,24 @@ def create_app(
 
     # --- Stats and activity ----------------------------------------------
 
+    # One computed overview per warm instance, see OVERVIEW_TTL_SECONDS. Two
+    # requests racing past an expired entry both compute it; that costs one
+    # extra query batch and nothing else, so there is no lock.
+    overview_cache: dict[str, Any] = {"at": 0.0, "value": None}
+
     @app.get("/api/overview")
     def api_overview(_: None = Depends(require_auth)) -> dict[str, Any]:
         """The client-facing funnel -- see web/overview.py for definitions."""
         from circle_leads.web.overview import build_overview
 
+        started = time.monotonic()
+        if (overview_cache["value"] is not None
+                and started - overview_cache["at"] < OVERVIEW_TTL_SECONDS):
+            return overview_cache["value"]
         with db.session() as s:
-            return build_overview(s, datetime.now(timezone.utc).replace(tzinfo=None))
+            value = build_overview(s, datetime.now(timezone.utc).replace(tzinfo=None))
+        overview_cache.update(at=started, value=value)
+        return value
 
     @app.get("/api/stats")
     def api_stats(_: None = Depends(require_auth)) -> dict[str, Any]:
