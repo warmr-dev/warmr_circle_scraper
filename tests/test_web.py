@@ -130,6 +130,48 @@ def test_leads_can_be_filtered_by_skill(auth_client):
     assert all("Flutter" in lead["skills"] for lead in data["leads"])
 
 
+def test_leads_search_matches_post_text_and_author(auth_client):
+    assert auth_client.get("/api/leads").json()["leads"]
+
+    by_text = auth_client.get("/api/leads?q=ios AND").json()["leads"]
+    assert by_text and all("ios and" in lead["content"].lower() for lead in by_text)
+
+    by_author = auth_client.get("/api/leads?q=dana").json()["leads"]
+    assert by_author and all(lead["author"] == "Dana Ops" for lead in by_author)
+
+    assert auth_client.get("/api/leads?q=nothing-like-this").json()["count"] == 0
+    # "%" and "_" are literal, not wildcards.
+    assert auth_client.get("/api/leads?q=%25").json()["count"] == 0
+
+
+def test_leads_time_window(auth_client):
+    lead = auth_client.get("/api/leads").json()["leads"][0]
+    assert lead["found_at"]
+
+    # Found just now: inside "last day", outside a window that ended long ago.
+    assert auth_client.get("/api/leads?days=1&date_field=found").json()["count"] >= 1
+    old = auth_client.get("/api/leads?until=2000-01-01&date_field=found").json()
+    assert old["count"] == 0
+    today = lead["found_at"][:10]
+    same_day = auth_client.get(
+        f"/api/leads?since={today}&until={today}&date_field=found"
+    ).json()
+    assert any(x["id"] == lead["id"] for x in same_day["leads"])
+
+
+def test_leads_rejects_bad_filters(auth_client):
+    assert auth_client.get("/api/leads?since=yesterday").status_code == 400
+    assert auth_client.get("/api/leads?days=0").status_code == 400
+    assert auth_client.get("/api/leads?date_field=edited").status_code == 400
+    assert auth_client.get("/api/leads?sort=random").status_code == 400
+
+
+def test_leads_sort_newest_found_first(auth_client):
+    leads = auth_client.get("/api/leads?sort=found").json()["leads"]
+    found = [x["found_at"] for x in leads]
+    assert found == sorted(found, reverse=True)
+
+
 def test_review_status_persists(auth_client):
     lead_id = auth_client.get("/api/leads").json()["leads"][0]["id"]
     response = auth_client.post(f"/api/leads/{lead_id}/status", json={"status": "contacted"})
