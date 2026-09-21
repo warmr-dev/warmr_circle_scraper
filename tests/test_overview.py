@@ -170,3 +170,25 @@ def test_empty_queue_is_never_stale(tmp_path):
     with db.session() as s:
         queues = build_overview(s, utcnow().replace(tzinfo=None))["queues"]
     assert all(x["waiting"] == 0 and not x["stale"] for x in queues)
+
+
+def test_overview_is_served_from_a_short_cache(client, monkeypatch):
+    import circle_leads.web.app as web_app
+    import circle_leads.web.overview as overview
+
+    real = overview.build_overview
+    calls = []
+
+    def counting(s, now):
+        calls.append(now)
+        return real(s, now)
+
+    monkeypatch.setattr(overview, "build_overview", counting)
+    first = client.get("/api/overview").json()
+    second = client.get("/api/overview").json()
+    assert second == first
+    assert len(calls) == 1
+
+    monkeypatch.setattr(web_app, "OVERVIEW_TTL_SECONDS", 0)
+    client.get("/api/overview")
+    assert len(calls) == 2
