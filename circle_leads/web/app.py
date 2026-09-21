@@ -47,6 +47,17 @@ REVIEW_STATUSES = {"pending_review", "contacted", "replied", "rejected", "won"}
 OVERVIEW_TTL_SECONDS = 120
 
 
+def _parse_day(value: str | None, name: str) -> datetime | None:
+    """A ``YYYY-MM-DD`` query param as midnight UTC; 400 on anything else."""
+    if not value:
+        return None
+    try:
+        day = datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(400, f"{name} must be a date like 2026-09-21") from None
+    return day.replace(tzinfo=timezone.utc)
+
+
 def create_app(
     db_url: str | None = None,
     config_path: str | None = None,
@@ -187,17 +198,41 @@ def create_app(
         community: str | None = None,
         priority: str | None = None,
         status: str | None = None,
+        q: str | None = None,
+        days: int | None = None,
+        since: str | None = None,
+        until: str | None = None,
+        date_field: str = "published",
+        sort: str = "score",
         min_score: int = 0,
         limit: int = 200,
         _: None = Depends(require_auth),
     ) -> dict[str, Any]:
+        """Leads for the dashboard.
+
+        Time window: ``days`` (the last N days) or ``since``/``until`` as
+        inclusive ``YYYY-MM-DD`` dates; ``date_field`` picks the post date
+        (``published``) or the date the lead was found (``found``).
+        """
         skill_list = [s.strip() for s in skills.split(",")] if skills else None
-        with db.session() as s:
-            rows = query_leads(
-                s, role=role, skills=skill_list, community=community,
-                priority=priority, min_score=min_score, review_status=status,
-                limit=limit,
-            )
+        start = _parse_day(since, "since")
+        end = _parse_day(until, "until")
+        if end is not None:
+            end += timedelta(days=1)  # inclusive: the whole "until" day
+        if days is not None:
+            if days < 1:
+                raise HTTPException(400, "days must be at least 1")
+            start = datetime.now(timezone.utc) - timedelta(days=days)
+        try:
+            with db.session() as s:
+                rows = query_leads(
+                    s, role=role, skills=skill_list, community=community,
+                    priority=priority, min_score=min_score, review_status=status,
+                    search=q, since=start, until=end, date_field=date_field,
+                    sort=sort, limit=limit,
+                )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
         return {"leads": rows, "count": len(rows)}
 
     @app.post("/api/leads/{lead_id}/status")

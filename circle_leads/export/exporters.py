@@ -5,14 +5,14 @@ from __future__ import annotations
 import csv
 import json
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, joinedload
 
-from circle_leads.storage.models import Community, Lead, Post, Space
+from circle_leads.storage.models import Author, Community, Lead, Post, Space
 
 CSV_COLUMNS = [
     "community",
@@ -62,9 +62,26 @@ def query_leads(
     priority: str | None = None,
     exclude_duplicates: bool = True,
     review_status: str | None = None,
+    search: str | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    date_field: str = "published",
+    sort: str = "score",
     limit: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Search stored leads with the filters the CLI exposes."""
+    """Search stored leads with the filters the CLI and dashboard expose.
+
+    ``search`` is a case-insensitive substring match over the post, author,
+    community, space and extracted lead fields. ``since``/``until`` bound
+    ``date_field``: ``"published"`` (when the post was written) or ``"found"``
+    (when we filed the lead). ``sort`` is ``"score"``, ``"newest"`` (post date)
+    or ``"found"``.
+    """
+    if date_field not in LEAD_DATE_FIELDS:
+        raise ValueError(f"date_field must be one of {sorted(LEAD_DATE_FIELDS)}")
+    if sort not in LEAD_SORTS:
+        raise ValueError(f"sort must be one of {sorted(LEAD_SORTS)}")
+
     stmt = (
         select(Lead, Post, Community, Space)
         # Load the author in the same query: post.author is otherwise a lazy
@@ -75,8 +92,32 @@ def query_leads(
         .outerjoin(Space, Post.space_id == Space.id)
         .where(Lead.classification == "LEAD")
         .where(Lead.lead_score >= min_score)
-        .order_by(Lead.lead_score.desc(), Post.published_at.desc())
     )
+    if sort == "newest":
+        stmt = stmt.order_by(Post.published_at.desc().nulls_last(), Lead.id.desc())
+    elif sort == "found":
+        stmt = stmt.order_by(Lead.created_at.desc(), Lead.id.desc())
+    else:
+        stmt = stmt.order_by(Lead.lead_score.desc(), Post.published_at.desc())
+
+    date_column = Post.published_at if date_field == "published" else Lead.created_at
+    if since:
+        stmt = stmt.where(date_column >= _naive_utc(since))
+    if until:
+        stmt = stmt.where(date_column < _naive_utc(until))
+    if search and search.strip():
+        pattern = "%" + _escape_like(search.strip()) + "%"
+        stmt = stmt.where(or_(
+            *(column.ilike(pattern, escape="\\") for column in (
+                Post.content, Post.title, Lead.job_title, Lead.company,
+                Lead.location, Lead.budget, Community.slug, Community.name, Space.name,
+            )),
+            Post.author.has(Author.display_name.ilike(pattern, escape="\\")),
+        ))
+    if role and role.strip():
+        stmt = stmt.where(
+            Lead.job_title.ilike("%" + _escape_like(role.strip()) + "%", escape="\\")
+        )
     if community:
         stmt = stmt.where(Community.slug == community)
     if priority:
@@ -85,26 +126,27 @@ def query_leads(
         stmt = stmt.where(Lead.duplicate_of_id.is_(None))
     if review_status:
         stmt = stmt.where(Lead.review_status == review_status)
-    if limit:
+
+    wanted_skills = [s.strip().lower() for s in (skills or []) if s.strip()]
+    # Skills live in a JSON list and are matched here in Python, so the SQL
+    # limit would cut rows before that filter; cap after it instead.
+    if limit and not wanted_skills:
         stmt = stmt.limit(limit)
 
     rows: list[dict[str, Any]] = []
-    wanted_skills = [s.strip().lower() for s in (skills or []) if s.strip()]
-
     for lead, post, comm, space in session.execute(stmt).all():
+        if limit and len(rows) >= limit:
+            break
         lead_skills = [s.lower() for s in (lead.skills or [])]
         if wanted_skills and not any(s in lead_skills for s in wanted_skills):
             continue
-        if role:
-            title = (lead.job_title or "").lower()
-            if role.strip().lower() not in title:
-                continue
 
         rows.append(
             {
                 "id": lead.id,
                 "review_status": lead.review_status or "pending_review",
                 "community": comm.slug,
+                "community_name": comm.name,
                 "community_url": comm.url,
                 "space": space.name if space else None,
                 "author": post.author.display_name if post.author else None,
@@ -131,10 +173,28 @@ def query_leads(
                 "is_duplicate": lead.duplicate_of_id is not None,
                 "published_at": post.published_at.isoformat() if post.published_at else None,
                 "scraped_at": post.scraped_at.isoformat() if post.scraped_at else None,
+                "found_at": lead.created_at.isoformat() if lead.created_at else None,
+                "title": post.title,
                 "url": post.url,
             }
         )
     return rows
+
+
+LEAD_DATE_FIELDS = {"published", "found"}
+LEAD_SORTS = {"score", "newest", "found"}
+
+
+def _naive_utc(value: datetime) -> datetime:
+    """Timestamps are stored as naive UTC; compare against the same."""
+    if value.tzinfo is not None:
+        value = value.astimezone(timezone.utc).replace(tzinfo=None)
+    return value
+
+
+def _escape_like(text: str) -> str:
+    """Match ``%`` and ``_`` typed into a search box literally."""
+    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 # Excel and Sheets execute a cell beginning with any of these. Author names and

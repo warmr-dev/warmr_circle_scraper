@@ -109,6 +109,73 @@
   .tag { font-size: 11.5px; padding: 2px 7px; border-radius: 5px; background: var(--soft); color: var(--muted); }
   .draft { margin-top: 9px; padding: 10px 11px; border: 1px dashed var(--line); border-radius: 7px; font-size: 13px; white-space: pre-wrap; }
 
+  /* --- Leads: filters + one card layout for every lead ------------------ */
+  .lf-search { position: relative; flex: 1 1 280px; min-width: 0; }
+  .lf-search svg { position: absolute; left: 11px; top: 50%; transform: translateY(-50%); color: var(--muted); pointer-events: none; }
+  .lf-search input { width: 100%; padding-left: 34px; background: var(--panel); }
+  .lf-seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--panel); flex-wrap: wrap; }
+  .lf-seg button {
+    font: inherit; font-size: 13px; padding: 7px 11px; border: 0; background: transparent;
+    color: var(--muted); cursor: pointer; border-right: 1px solid var(--line);
+  }
+  .lf-seg button:last-child { border-right: 0; }
+  .lf-seg button:hover { background: var(--soft); color: var(--ink); }
+  .lf-seg button[aria-pressed="true"] { background: var(--soft2); color: var(--accent-ink); font-weight: 600; }
+  .lf-label { font-size: 12px; color: var(--muted); display: inline-flex; align-items: center; gap: 6px; }
+  .lf-rows { display: grid; gap: 10px; }
+
+  .lc-grid > .empty { grid-column: 1 / -1; }
+  .lc-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(400px, 100%), 1fr)); gap: 14px; }
+  .lc {
+    --lc: var(--low);
+    display: flex; flex-direction: column; gap: 10px; min-width: 0;
+    background: var(--panel); border: 1px solid var(--line); border-left: 4px solid var(--lc);
+    border-radius: 14px; padding: 16px 18px 14px; box-shadow: var(--shadow);
+  }
+  .lc.HIGH { --lc: var(--high); } .lc.MEDIUM { --lc: var(--medium); } .lc.LOW { --lc: #98a2b3; }
+  .lc-head { display: flex; align-items: center; gap: 12px; min-width: 0; }
+  .lc-avatar {
+    flex: none; width: 44px; height: 44px; border-radius: 99px; display: grid; place-items: center;
+    font-weight: 600; font-size: 15px; color: var(--av);
+    background: color-mix(in srgb, var(--av) 12%, var(--panel));
+    border: 1px solid color-mix(in srgb, var(--av) 25%, var(--panel));
+  }
+  .lc-name { flex: 1; min-width: 0; font-size: 17px; font-weight: 700; letter-spacing: -.01em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .lc-badge {
+    flex: none; display: inline-flex; align-items: center; gap: 6px; padding: 5px 11px; border-radius: 99px;
+    font-size: 12.5px; font-weight: 600; color: var(--lc);
+    background: color-mix(in srgb, var(--lc) 10%, var(--panel));
+    border: 1px solid color-mix(in srgb, var(--lc) 35%, var(--panel));
+  }
+  .lc-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; border-radius: 99px;
+    font-size: 12.5px; font-weight: 500; color: var(--c, var(--muted));
+    background: color-mix(in srgb, var(--c, var(--muted)) 9%, var(--panel));
+    border: 1px solid color-mix(in srgb, var(--c, var(--muted)) 22%, var(--panel));
+    max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .chip.ai { --c: var(--violet); } .chip.rules { --c: #0e7490; } .chip.score { --c: var(--info); }
+  .chip.urgent { --c: var(--medium); } .chip.money { --c: var(--high); }
+  .lc-title { margin: 2px 0 0; font-size: 15.5px; font-weight: 600; line-height: 1.35; overflow-wrap: anywhere; }
+  .lc-title a { color: inherit; text-decoration: none; }
+  .lc-title a:hover { text-decoration: underline; }
+  .lc-title svg { vertical-align: -2px; color: var(--muted); margin-left: 4px; }
+  .lc-text {
+    margin: 0; color: var(--muted); font-size: 13.5px; line-height: 1.6; overflow-wrap: anywhere;
+    display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  .lc-text.open { -webkit-line-clamp: unset; display: block; white-space: pre-line; }
+  .lc-more { align-self: flex-start; margin-top: -4px; padding: 0; border: 0; background: none; font: inherit; font-size: 12.5px; color: var(--accent-ink); cursor: pointer; }
+  .lc-source { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; font-size: 13px; color: var(--muted); margin-top: auto; }
+  .lc-source .src { display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px; border-radius: 7px; background: var(--soft); color: var(--ink); font-weight: 500; text-decoration: none; max-width: min(100%, 300px); }
+  .lc-source .src:hover { background: var(--line); }
+  .lc-source svg { flex: none; }
+  .lc-source .src b { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .lc-source span { display: inline-flex; align-items: center; gap: 5px; min-width: 0; }
+  .lc-foot { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding-top: 11px; border-top: 1px solid var(--line); font-size: 12.5px; color: var(--muted); flex-wrap: wrap; }
+  .lc-foot span { display: inline-flex; align-items: center; gap: 6px; }
+
   .table-wrap { overflow-x: auto; margin: -4px -4px 0; padding: 4px; }
   table { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 640px; }
   th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: middle; }
@@ -255,7 +322,36 @@
       <h1>Leads</h1>
       <p>Hiring intent found in public community feeds — people looking to hire developers.</p>
     </div>
-    <div class="panel">
+    <div class="panel lf-rows">
+      <div class="row">
+        <label class="lf-search">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+          <input id="f-q" type="search" placeholder="Search posts, authors, communities, companies…" aria-label="Search leads">
+        </label>
+        <select id="f-sort" aria-label="Sort">
+          <option value="newest">Newest post first</option>
+          <option value="found">Newest found first</option>
+          <option value="score">Highest score first</option>
+        </select>
+      </div>
+      <div class="row">
+        <div class="lf-seg" id="f-period" role="group" aria-label="Time period">
+          <button data-days="" aria-pressed="true">Any time</button>
+          <button data-days="1" aria-pressed="false">24 h</button>
+          <button data-days="7" aria-pressed="false">7 days</button>
+          <button data-days="30" aria-pressed="false">30 days</button>
+          <button data-days="90" aria-pressed="false">90 days</button>
+          <button data-days="custom" aria-pressed="false">Custom…</button>
+        </div>
+        <select id="f-date-field" aria-label="Which date the period applies to">
+          <option value="published">by post date</option>
+          <option value="found">by date found</option>
+        </select>
+        <span id="f-range" class="row" hidden>
+          <label class="lf-label">From <input id="f-since" type="date"></label>
+          <label class="lf-label">To <input id="f-until" type="date"></label>
+        </span>
+      </div>
       <div class="row">
         <input id="f-role" placeholder="Role, e.g. Flutter Developer" style="flex:1;min-width:180px">
         <input id="f-skills" placeholder="Skills, comma separated" style="flex:1;min-width:160px">
@@ -271,11 +367,11 @@
           <option value="won">Won</option>
           <option value="rejected">Rejected</option>
         </select>
-        <button class="action" id="f-apply">Filter</button>
+        <button class="ghost" id="f-reset">Reset</button>
       </div>
     </div>
     <div id="leads-count" class="meta" style="margin:8px 2px"></div>
-    <div id="leads-list"><div class="empty">Loading…</div></div>
+    <div id="leads-list" class="lc-grid"><div class="empty">Loading…</div></div>
   </section>
 
   <!-- ACTIVITY -->
@@ -718,71 +814,189 @@ $('logout').addEventListener('click', async () => {
 });
 
 // --- Leads ------------------------------------------------------------
+// Lucide icons (MIT), inlined so the page stays one file.
+const ICON_PATHS = {
+  bot: '<path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/>',
+  rules: '<path d="m3 17 2 2 4-4"/><path d="m3 7 2 2 4-4"/><path d="M13 6h8"/><path d="M13 12h8"/><path d="M13 18h8"/>',
+  flame: '<path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z"/>',
+  gauge: '<path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/>',
+  briefcase: '<rect width="20" height="14" x="2" y="7" rx="2" ry="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/>',
+  money: '<rect width="20" height="12" x="2" y="6" rx="2"/><circle cx="12" cy="12" r="2"/><path d="M6 12h.01M18 12h.01"/>',
+  users: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
+  hash: '<line x1="4" x2="20" y1="9" y2="9"/><line x1="4" x2="20" y1="15" y2="15"/><line x1="10" x2="8" y1="3" y2="21"/><line x1="16" x2="14" y1="3" y2="21"/>',
+  pin: '<path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z"/><circle cx="12" cy="10" r="3"/>',
+  building: '<rect width="16" height="20" x="4" y="2" rx="2" ry="2"/><path d="M9 22v-4h6v4"/><path d="M8 6h.01M16 6h.01M12 6h.01M12 10h.01M12 14h.01M16 10h.01M16 14h.01M8 10h.01M8 14h.01"/>',
+  found: '<path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/><circle cx="12" cy="12" r="3"/><path d="m16 16-1.9-1.9"/>',
+  clock: '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
+  ext: '<path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>',
+};
+const icon = (name, size = 14) =>
+  `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICON_PATHS[name]}</svg>`;
+
+// Timestamps come back as naive UTC ISO strings.
+function parseUtc(iso) {
+  if (!iso) return null;
+  const d = new Date(/[zZ]|[+-]\d\d:?\d\d$/.test(iso) ? iso : iso + 'Z');
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+const fmtDateTime = (d) => d.toLocaleString('en-US',
+  { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' });
+const fmtDate = (d) => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+
+const AVATAR_COLORS = ['#c026d3', '#0891b2', '#7a5af8', '#b54708', '#067647', '#2970ff', '#e11d48'];
+function initials(name) {
+  const words = String(name || '').trim().split(/\s+/).filter(Boolean);
+  if (!words.length) return '?';
+  const first = (w) => Array.from(w)[0] || '';
+  return ((first(words[0]) + (words.length > 1 ? first(words[words.length - 1]) : '')).toUpperCase()) || '?';
+}
+function avatarColor(name) {
+  let h = 0;
+  for (const ch of String(name || '')) h = (h * 31 + ch.codePointAt(0)) >>> 0;
+  return AVATAR_COLORS[h % AVATAR_COLORS.length];
+}
+
+const PRIORITY_LABEL = { HIGH: 'High priority', MEDIUM: 'Medium priority', LOW: 'Low priority' };
+const LEAD_TEXT_CLAMP = 240;  // longer posts get a "Show more" toggle
+
+// One layout for every lead, like the reference card: the same rows in the
+// same order, missing values shown as "—", footer pinned to the bottom.
 function leadCard(lead) {
-  const tags = [
-    lead.job_title && `<span class="tag">${esc(lead.job_title)}</span>`,
-    ...(lead.skills || []).map(s => `<span class="tag">${esc(s)}</span>`),
-    lead.budget && `<span class="tag">${esc(lead.budget)}</span>`,
-    lead.urgency && `<span class="tag">${esc(lead.urgency)} urgency</span>`,
-    lead.hire_target && `<span class="tag">${esc(lead.hire_target)}</span>`,
+  let content = String(lead.content ?? '').trim();
+  const firstLine = (content.split('\n').find(l => l.trim()) || '').trim();
+  const rawTitle = lead.job_title || lead.title || firstLine;
+  // The title came from the post's first line: don't repeat it in the text.
+  if (rawTitle === firstLine && content.length > firstLine.length) {
+    content = content.slice(content.indexOf(firstLine) + firstLine.length).trim();
+  }
+  const title = rawTitle.length > 110 ? rawTitle.slice(0, 110) + '…' : rawTitle;
+  const titleText = title ? esc(title.charAt(0).toUpperCase() + title.slice(1)) : '—';
+  const author = lead.author || 'Unknown author';
+  const priority = ['HIGH', 'MEDIUM', 'LOW'].includes(lead.priority) ? lead.priority : 'LOW';
+  const isLlm = lead.decided_by === 'llm';
+
+  const skills = (lead.skills || []).slice(0, 3);
+  const extraSkills = (lead.skills || []).length - skills.length;
+  const employment = lead.employment_type && lead.employment_type !== 'Unknown' ? lead.employment_type : '';
+  const chips = [
+    `<span class="chip ${isLlm ? 'ai' : 'rules'}" title="${esc(lead.reason || '')}">${icon(isLlm ? 'bot' : 'rules')} ${isLlm ? 'AI' : 'Rules'}</span>`,
+    `<span class="chip score" title="Confidence ${esc(lead.confidence)}">${icon('gauge')} Score ${esc(lead.lead_score)}</span>`,
+    employment && `<span class="chip">${icon('briefcase')} ${esc(employment)}</span>`,
+    lead.hire_target && `<span class="chip">${esc(lead.hire_target)}</span>`,
+    lead.budget && `<span class="chip money">${icon('money')} ${esc(lead.budget)}</span>`,
+    lead.urgency === 'High' && `<span class="chip urgent">Urgent</span>`,
+    ...skills.map(s => `<span class="chip">${esc(s)}</span>`),
+    extraSkills > 0 && `<span class="chip">+${extraSkills}</span>`,
   ].filter(Boolean).join('');
 
-  // Full post content can run long; collapse behind "show more" instead of
-  // always dumping it verbatim -- the one spot a raw field was rendered in full.
-  const content = String(lead.content ?? '');
-  const CONTENT_PREVIEW_LEN = 420;
-  const isLongContent = content.length > CONTENT_PREVIEW_LEN;
-  const shortContent = isLongContent ? content.slice(0, CONTENT_PREVIEW_LEN) + '…' : content;
-  const postHtml = `<div class="post"><span class="post-text">${esc(shortContent)}</span></div>` +
-    (isLongContent
-      ? `<button class="ghost show-more-btn" data-expanded="false"
-           data-full="${esc(content)}" data-short="${esc(shortContent)}"
-           style="margin-top:-4px;margin-bottom:9px">Show more</button>`
-      : '');
+  const community = lead.community_name || lead.community;
+  const source = [
+    `<a class="src" href="${esc(lead.community_url || '#')}" target="_blank" rel="noopener" title="${esc(community)} · ${esc(lead.community)}">${icon('users')}<b>${esc(community)}</b></a>`,
+    lead.space && `<span>${icon('hash', 13)}${esc(lead.space)}</span>`,
+    lead.company && `<span>${icon('building', 13)}${esc(lead.company)}</span>`,
+    lead.location && `<span>${icon('pin', 13)}${esc(lead.location)}</span>`,
+  ].filter(Boolean).join('');
 
-  return `<div class="lead">
-    <div class="lead-head">
-      <span class="score">${lead.lead_score}</span>
-      <span class="pill ${esc(lead.priority)}">${esc(lead.priority)}</span>
-      <span class="meta">${esc(lead.community)}${lead.author ? ' · ' + esc(lead.author) : ''}
-        ${lead.published_at ? ' · ' + esc(lead.published_at.slice(0, 10)) : ''}
-        · ${esc(lead.decided_by)} · confidence ${lead.confidence}</span>
+  const posted = parseUtc(lead.published_at);
+  const found = parseUtc(lead.found_at);
+  const titleHtml = lead.url
+    ? `<a href="${esc(lead.url)}" target="_blank" rel="noopener">${titleText}${icon('ext', 13)}</a>`
+    : titleText;
+
+  return `<article class="lc ${priority}">
+    <div class="lc-head">
+      <span class="lc-avatar" style="--av:${avatarColor(author)}">${esc(initials(lead.author))}</span>
+      <div class="lc-name" title="${esc(author)}">${esc(author)}</div>
+      <span class="lc-badge">${icon('flame')} ${PRIORITY_LABEL[priority]}</span>
     </div>
-    <div class="tags">${tags}</div>
-    ${postHtml}
-    ${lead.url ? `<div class="meta"><a href="${esc(lead.url)}" target="_blank" rel="noopener">Open thread ↗</a></div>` : ''}
-  </div>`;
+    <div class="lc-chips">${chips}</div>
+    <h3 class="lc-title">${titleHtml}</h3>
+    <p class="lc-text">${esc(content) || '—'}</p>
+    ${content.length > LEAD_TEXT_CLAMP ? '<button class="lc-more" aria-expanded="false">Show more</button>' : ''}
+    <div class="lc-source">${source}</div>
+    <div class="lc-foot">
+      <span title="When we found this lead">${icon('found')} Found ${found ? esc(fmtDate(found)) : '—'}</span>
+      <span title="When the post was published">${icon('clock')} ${posted ? esc(fmtDateTime(posted)) : '—'}</span>
+    </div>
+  </article>`;
 }
+
+const leadFilters = { days: '' };
+let leadsRequest = 0;
 
 async function loadLeads() {
   const params = new URLSearchParams();
-  if ($('f-role').value) params.set('role', $('f-role').value);
-  if ($('f-skills').value) params.set('skills', $('f-skills').value);
+  const q = $('f-q').value.trim();
+  if (q) params.set('q', q);
+  params.set('sort', $('f-sort').value);
+  if (leadFilters.days === 'custom') {
+    if ($('f-since').value) params.set('since', $('f-since').value);
+    if ($('f-until').value) params.set('until', $('f-until').value);
+  } else if (leadFilters.days) {
+    params.set('days', leadFilters.days);
+  }
+  if (params.has('days') || params.has('since') || params.has('until')) {
+    params.set('date_field', $('f-date-field').value);
+  }
+  if ($('f-role').value.trim()) params.set('role', $('f-role').value.trim());
+  if ($('f-skills').value.trim()) params.set('skills', $('f-skills').value.trim());
   if ($('f-priority').value) params.set('priority', $('f-priority').value);
   if ($('f-status').value) params.set('status', $('f-status').value);
 
-  const [data, stats] = await Promise.all([api('/api/leads?' + params), api('/api/stats')]);
-  if (!data) return;
+  // Typing fires several requests; only the newest one may paint.
+  const mine = ++leadsRequest;
+  let data, stats;
+  try {
+    [data, stats] = await Promise.all([api('/api/leads?' + params), api('/api/stats')]);
+  } catch (err) {
+    if (mine !== leadsRequest) return;
+    $('leads-list').innerHTML = `<div class="empty">Could not load leads: ${esc(err.message)}</div>`;
+    return;
+  }
+  if (mine !== leadsRequest || !data) return;
   $('leads-list').innerHTML = data.leads.length
     ? data.leads.map(leadCard).join('')
-    : '<div class="empty">No leads match those filters yet.</div>';
+    : '<div class="empty">No leads match those filters.</div>';
   $('leads-count').textContent = stats
     ? `Показано ${data.count} из ${stats.leads}`
     : `Показано ${data.count}`;
 }
 
-$('f-apply').addEventListener('click', loadLeads);
+let leadsTyping;
+const loadLeadsSoon = () => { clearTimeout(leadsTyping); leadsTyping = setTimeout(loadLeads, 300); };
+['f-q', 'f-role', 'f-skills'].forEach(id => $(id).addEventListener('input', loadLeadsSoon));
+['f-sort', 'f-date-field', 'f-priority', 'f-status', 'f-since', 'f-until']
+  .forEach(id => $(id).addEventListener('change', loadLeads));
 
-document.addEventListener('click', async (event) => {
-  const showMore = event.target.closest('.show-more-btn');
-  if (showMore) {
-    const expanded = showMore.dataset.expanded === 'true';
-    const postText = showMore.previousElementSibling?.querySelector('.post-text');
-    if (postText) postText.textContent = expanded ? showMore.dataset.short : showMore.dataset.full;
-    showMore.dataset.expanded = String(!expanded);
-    showMore.textContent = expanded ? 'Show more' : 'Show less';
-    return;
-  }
+function setPeriod(days) {
+  leadFilters.days = days;
+  $('f-period').querySelectorAll('button').forEach(b =>
+    b.setAttribute('aria-pressed', String(b.dataset.days === days)));
+  $('f-range').hidden = days !== 'custom';
+}
+$('f-period').addEventListener('click', (event) => {
+  const btn = event.target.closest('button[data-days]');
+  if (!btn) return;
+  setPeriod(btn.dataset.days);
+  loadLeads();
+});
+
+$('f-reset').addEventListener('click', () => {
+  ['f-q', 'f-role', 'f-skills', 'f-since', 'f-until'].forEach(id => { $(id).value = ''; });
+  ['f-priority', 'f-status'].forEach(id => { $(id).value = ''; });
+  $('f-sort').value = 'newest';
+  $('f-date-field').value = 'published';
+  setPeriod('');
+  loadLeads();
+});
+
+document.addEventListener('click', (event) => {
+  const more = event.target.closest('.lc-more');
+  if (!more) return;
+  const text = more.previousElementSibling;
+  const open = text.classList.toggle('open');
+  more.setAttribute('aria-expanded', String(open));
+  more.textContent = open ? 'Show less' : 'Show more';
 });
 
 // --- Activity ---------------------------------------------------------
