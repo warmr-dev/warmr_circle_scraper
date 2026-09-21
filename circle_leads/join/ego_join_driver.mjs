@@ -35,6 +35,13 @@
 
 const spaceId = __EGO_JOIN_SPACE_ID__;
 const url = __EGO_JOIN_URL__;
+// Credentials go only to Circle: the community's own host (checked as a
+// Circle community by the join-type probe before it was ever queued) or a
+// *.circle.so host. A community's own identity provider is neither, however
+// Circle-branded or Circle-linked its page looks -- confirmed live
+// 2026-09-21: aimarketerhq's "Sign up" led to auth0.aimarketerhq.com, and an
+// asset-based "is this Circle?" check waved the credentials through there.
+const communityHost = new URL(url).hostname.toLowerCase();
 const screenshotDir = __EGO_JOIN_SCREENSHOT_DIR__ || "";
 const loginEmail = __EGO_JOIN_EMAIL__;
 const loginPassword = __EGO_JOIN_PASSWORD__;
@@ -286,6 +293,10 @@ async function attemptLogin(page) {
       { emailSelector: EMAIL_SELECTOR, passwordSelector: PASSWORD_SELECTOR }
     );
 
+    if ((fields.hasPassword || fields.hasEmail) && !(await onCircleHost(page))) {
+      return { ok: false, reason: "the login form is not on the community's host or circle.so -- credentials withheld" };
+    }
+
     if (fields.hasPassword) {
       if (fields.hasEmail) {
         try {
@@ -340,17 +351,11 @@ async function attemptLogin(page) {
  * already exists on Circle, here this host has none yet. */
 const SIGNUP_SUBMIT_TEXTS = ["Sign up", "Create account", "Register", "Join", "Continue", "Submit"];
 
-/** Is this page served by Circle? Credentials only ever go into Circle's own
- * pages -- a community on a custom domain is still Circle's HTML, an
- * unrelated site is not. Decided by the document host, and otherwise by the
- * hosts the page loads its assets from. */
-async function isCirclePage(page) {
-  return evaluateWithRetry(page, () => {
-    if (/(^|\.)circle\.so$/i.test(location.hostname)) return true;
-    return [...document.querySelectorAll("script[src], link[href]")].some((el) =>
-      /\/\/[^/]*circle\.(so|co)\b/i.test(el.getAttribute("src") || el.getAttribute("href") || "")
-    );
-  });
+/** Is this page on the community's own host or on circle.so? The only
+ * places credentials may be typed -- see communityHost. */
+async function onCircleHost(page) {
+  const host = String(await evaluateWithRetry(page, () => location.hostname)).toLowerCase();
+  return host === communityHost || host === "circle.so" || host.endsWith(".circle.so");
 }
 
 /** The shape of the form that appeared after clicking Join.
@@ -401,8 +406,8 @@ async function tryCompleteSignupForm(page, clicked) {
   if (!loginEmail || !loginPassword) return { done: false, reason: "no credentials configured" };
   const shape = await readSignupFormShape(page);
   if (!shape.fillable) return { done: false, reason: shape.reason || "unrecognized form" };
-  if (!(await isCirclePage(page))) {
-    return { done: false, reason: "the page is not served by Circle -- credentials withheld" };
+  if (!(await onCircleHost(page))) {
+    return { done: false, reason: "the form is not on the community's host or circle.so -- credentials withheld" };
   }
   if (shape.hasEmail) {
     try {
