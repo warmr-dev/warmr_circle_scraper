@@ -335,6 +335,117 @@ async function attemptLogin(page) {
   return { ok: false, reason: "no email/password form reached after 4 navigation hops" };
 }
 
+/** Submit controls of a registration form, as opposed to a login form. "Sign
+ * up" is deliberate here and forbidden in attemptLogin: there the account
+ * already exists on Circle, here this host has none yet. */
+const SIGNUP_SUBMIT_TEXTS = ["Sign up", "Create account", "Register", "Join", "Continue", "Submit"];
+
+/** Is this page served by Circle? Credentials only ever go into Circle's own
+ * pages -- a community on a custom domain is still Circle's HTML, an
+ * unrelated site is not. Decided by the document host, and otherwise by the
+ * hosts the page loads its assets from. */
+async function isCirclePage(page) {
+  return evaluateWithRetry(page, () => {
+    if (/(^|\.)circle\.so$/i.test(location.hostname)) return true;
+    return [...document.querySelectorAll("script[src], link[href]")].some((el) =>
+      /\/\/[^/]*circle\.(so|co)\b/i.test(el.getAttribute("src") || el.getAttribute("href") || "")
+    );
+  });
+}
+
+/** The shape of the form that appeared after clicking Join.
+ *
+ * A form asking for nothing but an email and a password is the registration
+ * step of a free community: the answers are the credentials this batch
+ * already holds, and filling them is the same act as filling the login form
+ * above. Anything else -- a name, "why do you want to join?", a dropdown --
+ * is a question for the operator, so the check is deliberately narrow.
+ * Checkboxes (terms) are counted but never ticked: a required one just fails
+ * the submit, which hands off like before. */
+async function readSignupFormShape(page) {
+  return page.evaluate(
+    ({ emailSelector }) => {
+      const form = [...document.querySelectorAll("form")].find((f) =>
+        f.querySelector("input[type=password]")
+      );
+      if (!form) return { fillable: false, reason: "no form holds a password field" };
+      const visible = (el) => {
+        const style = window.getComputedStyle(el);
+        return style.display !== "none" && style.visibility !== "hidden" && el.type !== "hidden";
+      };
+      const kinds = [...form.querySelectorAll("input, textarea, select")]
+        .filter(visible)
+        .filter((el) => !["submit", "button", "image", "reset"].includes(el.type))
+        .map((el) => {
+          if (el.tagName !== "INPUT") return el.tagName.toLowerCase();
+          if (el.type === "password") return "password";
+          if (el.matches(emailSelector)) return "email";
+          return (el.type || "text").toLowerCase();
+        });
+      const asked = [...new Set(kinds.filter((k) => !["email", "password", "checkbox"].includes(k)))];
+      return {
+        fillable: asked.length === 0 && kinds.includes("password"),
+        hasEmail: kinds.includes("email"),
+        reason: asked.length ? `the form also asks for ${asked.join(", ")}` : "",
+      };
+    },
+    { emailSelector: EMAIL_SELECTOR }
+  );
+}
+
+/** Fill and submit that registration form when it is nothing but email and
+ * password. Returns { done: false, reason } for every other shape -- and for
+ * a page Circle doesn't serve -- and the caller hands the browser to the
+ * operator exactly as it did before. */
+async function tryCompleteSignupForm(page, clicked) {
+  if (!loginEmail || !loginPassword) return { done: false, reason: "no credentials configured" };
+  const shape = await readSignupFormShape(page);
+  if (!shape.fillable) return { done: false, reason: shape.reason || "unrecognized form" };
+  if (!(await isCirclePage(page))) {
+    return { done: false, reason: "the page is not served by Circle -- credentials withheld" };
+  }
+  if (shape.hasEmail) {
+    try {
+      await page.fill(EMAIL_SELECTOR, loginEmail);
+    } catch {
+      return { done: false, reason: "could not fill the email field (ambiguous selector?)" };
+    }
+  }
+  try {
+    await page.fill(PASSWORD_SELECTOR, loginPassword);
+  } catch {
+    return { done: false, reason: "could not fill the password field (ambiguous selector?)" };
+  }
+  const submitted = await clickFirstMatch(page, SIGNUP_SUBMIT_TEXTS);
+  if (!submitted) return { done: false, reason: "filled the sign-up form but found no submit control" };
+  await page.waitForTimeout(2500);
+  const after = await readPostClickState(page);
+  const shot = await maybeScreenshot(page, "after-signup-form");
+  if (after.onCheckout) {
+    return {
+      done: true, status: "paid_skip", shot,
+      detail: `Clicked "${clicked}", filled the email+password sign-up form, landed on checkout (${after.url}).`,
+    };
+  }
+  if (after.hasMemberNav || after.newMemberOnboarding) {
+    const cookies = await captureSessionCookies(page);
+    return {
+      done: true, status: "joined", shot, cookies,
+      detail: `Clicked "${clicked}" and filled the email+password sign-up form (${after.url}).`,
+    };
+  }
+  if (after.pending) {
+    return {
+      done: true, status: "pending_approval", shot,
+      detail: `Clicked "${clicked}", filled the sign-up form -- community shows a pending-approval message.`,
+    };
+  }
+  return {
+    done: false,
+    reason: `submitted the sign-up form but the page (${after.url}) didn't match a known pattern`,
+  };
+}
+
 /** Everything that happens once we know the session is authenticated on this
  * host: decide whether membership already exists, or click Join and
  * classify the outcome. */
@@ -396,10 +507,15 @@ async function decideAndAct(page, state) {
       cookies
     );
   } else if (after.formQuestions.length > 0) {
+    const signup = await tryCompleteSignupForm(page, clicked);
+    if (signup.done) {
+      emit(signup.status, signup.detail, signup.shot || shot, signup.cookies);
+      return;
+    }
     await task.handOff();
     emit(
       "application_form_detected",
-      `Clicked "${clicked}"; a custom application form appeared (not auto-filled). Questions: ` +
+      `Clicked "${clicked}"; a form appeared and was not filled (${signup.reason}). Questions: ` +
         JSON.stringify(after.formQuestions.slice(0, 10)),
       shot
     );
