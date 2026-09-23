@@ -58,6 +58,17 @@ RECENT_IDS_KEPT = 200
 
 CHALLENGE_MARKERS = ("__cf_chl_", "cf-chl-", "<title>just a moment", "verifying you are a human")
 
+# Platforms that mean "this is a Circle community". "discover" is one found
+# through Circle's own directory whose platform was never narrowed; it is on
+# Circle just the same. Kept identical to web.overview.CIRCLE_PLATFORMS.
+CIRCLE_PLATFORMS = ("circle", "discover")
+
+# How often the running poller re-reads which communities are worth watching.
+# The list used to be built only by `watch --sync`, which the service does not
+# pass, so every community the discovery and ICP stages found after the last
+# manual sync was invisible to the poller forever.
+RESYNC_EVERY_S = 1800.0
+
 
 @dataclass
 class WatchOutcome:
@@ -135,7 +146,13 @@ def ensure_watch_rows(db: Database, *, quiet_days: int = 14) -> int:
     with db.session() as s:
         rows = s.execute(
             select(Community.id, Community.host, Community.slug)
-            .where(Community.platform == "circle")
+            # "discover" is a community found through Circle's own directory
+            # whose platform was never narrowed to "circle". It is still a
+            # Circle community, and the rest of the codebase says so
+            # (overview.CIRCLE_PLATFORMS). Matching only "circle" here quietly
+            # left out eight ICP-fit communities, three of them with posts
+            # already read and a stored session.
+            .where(Community.platform.in_(CIRCLE_PLATFORMS))
             .where(Community.host.is_not(None))
             .where(
                 or_(
@@ -501,6 +518,10 @@ def run_watch(
 
 def _run_watch_loop(db: Database, session, requirements, reloaded_at, tuning,
                     *, use_llm: bool, once: bool, stop, on_outcome) -> None:
+    # Sync on the first pass, then on a timer. Without this the watch list is
+    # whatever the last `watch --sync` built: the service does not pass that
+    # flag, so discovery and the ICP pass fed a list the poller never re-read.
+    synced_at = 0.0
     while True:
         if stop is not None and stop():
             return
@@ -509,6 +530,15 @@ def _run_watch_loop(db: Database, session, requirements, reloaded_at, tuning,
         if time.monotonic() - reloaded_at > 300:
             requirements = load_effective_requirements(db)
             reloaded_at = time.monotonic()
+
+        if time.monotonic() - synced_at > RESYNC_EVERY_S:
+            synced_at = time.monotonic()
+            try:
+                added = ensure_watch_rows(db, quiet_days=tuning.quiet_days)
+                if added:
+                    logger.info("watch list: %d community(ies) added", added)
+            except Exception:  # noqa: BLE001 - a failed sync must not stop polling
+                logger.exception("could not refresh the watch list")
 
         batch = due_states(db)
         if not batch:

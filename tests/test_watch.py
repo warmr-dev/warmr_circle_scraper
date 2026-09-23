@@ -541,3 +541,49 @@ def test_reporting_failure_does_not_break_the_poller(db, community, monkeypatch)
     from circle_leads.watch.poller import _report_leads
     _report_leads(out)                       # must not raise
     assert read_row(db, community).last_post_id == 31
+
+
+# --- who gets into the watch list at all ----------------------------------
+
+def test_a_directory_community_is_still_a_circle_community(db):
+    """platform="discover" meant "found via Circle's own directory", not "not Circle".
+
+    Matching only platform="circle" here left eight ICP-fit communities out of
+    the watch list, three of them with posts already read and a stored session.
+    """
+    with db.session() as s:
+        s.add(Community(slug="viadirectory", url="https://viadirectory.circle.so",
+                        platform="discover", host="viadirectory.circle.so",
+                        icp_flag=True))
+    assert ensure_watch_rows(db) == 1
+
+
+def test_a_community_on_another_platform_is_not_watched(db):
+    """A marketing site that merely had a Circle directory card has no feed."""
+    with db.session() as s:
+        s.add(Community(slug="notcircle", url="https://example.com",
+                        platform="other", host="example.com", icp_flag=True))
+    assert ensure_watch_rows(db) == 0
+
+
+def test_the_running_poller_picks_up_communities_added_after_it_started(db, monkeypatch):
+    """The list used to be built only by `watch --sync`, which the service never passes.
+
+    Everything discovery and the ICP pass found after the last manual sync was
+    invisible to the poller until someone restarted it with the flag.
+    """
+    from circle_leads.watch import poller
+
+    with db.session() as s:
+        s.add(Community(slug="late", url="https://late.circle.so",
+                        platform="circle", host="late.circle.so", icp_flag=True))
+
+    # No network: the loop should add the row before it looks for work.
+    monkeypatch.setattr(poller, "due_states", lambda _db: [])
+    poller.run_watch(db, once=True)
+
+    from sqlalchemy import select
+
+    with db.session() as s:
+        hosts = set(s.scalars(select(WatchState.host)).all())
+    assert "late.circle.so" in hosts
