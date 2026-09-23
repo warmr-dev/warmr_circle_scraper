@@ -32,7 +32,7 @@ import { egoPing, egoVersion, resolveEgoBin } from './join/ego'
 import { completeJson } from './llm/client'
 import { z } from 'zod'
 import { AbortedError, errorMessage } from './util'
-import { circleGovernor } from './circle/governor'
+import { circleGovernor, withPriority } from './circle/governor'
 import { PROVIDER_LABEL } from '../shared/models'
 import {
   STAGES,
@@ -319,10 +319,12 @@ export class Engine extends EventEmitter {
       let result: StageResult | null = null
       let error: string | null = null
       try {
-        if (stage === 'verify') result = await runVerify(ctx, { communityIds: opts.communityIds })
+        // Verify and discover yield Circle's per-IP budget to reading and
+        // joining, which are what turn into leads.
+        if (stage === 'verify') result = await withPriority('low', () => runVerify(ctx, { communityIds: opts.communityIds }))
         else if (stage === 'join') result = await runJoin(ctx, { communityId: opts.communityId })
         else if (stage === 'scrape') result = await runScrape(ctx, { communityId: opts.communityId })
-        else result = await runDiscover(ctx, { crawl: opts.crawl })
+        else result = await withPriority('low', () => runDiscover(ctx, { crawl: opts.crawl }))
         this.log('success', stage, `Готово: ${result.summary}`)
       } catch (err) {
         if (err instanceof AbortedError || controller.signal.aborted) {

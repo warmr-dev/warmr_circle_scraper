@@ -155,6 +155,13 @@ class Community(Base):
     watching: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
 
     last_synced_at: Mapped[datetime | None] = mapped_column(DateTime)
+    # What the last harvest read actually saw, set with last_synced_at:
+    # "public" (space list answered), "private" (401/403 on the list or on
+    # every space), "gone" (404, or the host no longer maps to a community),
+    # "error" (network failure, 429, 5xx -- says nothing about the community).
+    # Decides how soon the harvest reads it again (harvest._recheck_hours).
+    # NULL on rows last read before this column existed.
+    read_outcome: Mapped[str | None] = mapped_column(String(32))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=utcnow, onupdate=utcnow
     )

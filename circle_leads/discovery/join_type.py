@@ -21,6 +21,7 @@ from urllib.parse import urlparse
 
 import requests
 
+from circle_leads.scraper.governor import LOW, priority
 from circle_leads.scraper.http_client import BROWSER_UA, shared_session
 
 logger = logging.getLogger(__name__)
@@ -69,6 +70,17 @@ def _redirects_to_marketing_site(
 class JoinClassification:
     join_type: str
     detail: str = ""
+    #: The community's display name when the call answered 200 -- the same
+    #: payload carries it, so the harvest doesn't ask a second time.
+    name: str | None = None
+
+
+def payload_name(data: dict) -> str | None:
+    for key in ("name", "community_name", "title"):
+        val = data.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()[:120]
+    return None
 
 
 def _price_label_fallback(price_label: str | None) -> JoinClassification | None:
@@ -158,7 +170,9 @@ def _fetch_join_classification_once(
     if not isinstance(data, dict) or "is_private" not in data:
         return JoinClassification(JoinType.UNKNOWN, "response missing expected fields")
 
-    return _classify_payload(data)
+    classification = _classify_payload(data)
+    classification.name = payload_name(data)
+    return classification
 
 
 def fetch_join_classification(
@@ -195,6 +209,7 @@ def fetch_join_classification(
             return JoinClassification(
                 retry.join_type,
                 f"{retry.detail} (www retry; apex failed: {classification.detail})",
+                name=retry.name,
             )
     return classification
 
@@ -212,13 +227,20 @@ def classify_join_type_pending(
     ``recheck`` re-classifies every community instead of only never-checked
     ones -- e.g. to backfill join_type_detail (P21) onto rows classified
     before that column existed, or after a classification-rule change.
+    Runs at low priority: it shares Circle's per-IP budget with reads that
+    can produce leads, and yields to them.
     """
+    stats: dict[str, int] = {"checked": 0}
+    session = shared_session()
+    with priority(LOW):
+        _classify_rows(db, session, stats, limit=limit, recheck=recheck)
+    return stats
+
+
+def _classify_rows(db, session, stats, *, limit, recheck) -> None:
     from sqlalchemy import select
 
     from circle_leads.storage.models import Community, utcnow
-
-    stats: dict[str, int] = {"checked": 0}
-    session = shared_session()
 
     with db.session() as s:
         query = select(Community.id).order_by(Community.id)
@@ -249,5 +271,3 @@ def classify_join_type_pending(
             community.join_type_checked_at = utcnow()
             stats["checked"] += 1
             stats[classification.join_type] = stats.get(classification.join_type, 0) + 1
-
-    return stats

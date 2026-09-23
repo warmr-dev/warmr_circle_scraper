@@ -51,6 +51,10 @@ class PublicReader:
     #: reused across every community, not rebuilt per reader.
     session: requests.Session = field(default_factory=shared_session)
     _last: float = 0.0
+    #: Status and body of the most recent call (0 = never reached the host),
+    #: so a caller can tell a dead host from a locked one without asking again.
+    last_status: int | None = field(default=None, init=False)
+    last_payload: dict | list | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         # Callers sometimes pass a stored community url rather than a bare
@@ -72,6 +76,11 @@ class PublicReader:
         self._last = time.monotonic()
 
     def _get(self, path: str) -> tuple[int, dict | list | None]:
+        status, payload = self._fetch(path)
+        self.last_status, self.last_payload = status, payload
+        return status, payload
+
+    def _fetch(self, path: str) -> tuple[int, dict | list | None]:
         self._throttle()
         url = self.base + path
         headers = {"User-Agent": BROWSER_UA, "Accept": "application/json"}
@@ -114,14 +123,12 @@ class PublicReader:
         JSON API used to read posts -- so it works where fetching the marketing
         HTML page returns a "Verifying you are a human" bot-check instead.
         """
+        from circle_leads.discovery.join_type import payload_name
+
         status, payload = self._get("/internal_api/communities/current")
         if status != 200 or not isinstance(payload, dict):
             return None
-        for key in ("name", "community_name", "title"):
-            val = payload.get(key)
-            if isinstance(val, str) and val.strip():
-                return val.strip()[:120]
-        return None
+        return payload_name(payload)
 
     def list_spaces(self) -> list[PublicSpace]:
         """List the community's spaces, if its space list is public."""

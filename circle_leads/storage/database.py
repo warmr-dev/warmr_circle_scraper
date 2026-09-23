@@ -185,6 +185,8 @@ class Database:
             # fetch_join_classification always computes this detail, it just
             # wasn't persisted before.
             ("communities", "join_type_detail", "TEXT"),
+            # P24: what the last harvest read saw -- drives its re-check interval.
+            ("communities", "read_outcome", "VARCHAR(32)"),
         ]
         # replay_sessions is a whole new table (Version B experiment); create_all
         # handles it, so no per-column entry is needed here.
