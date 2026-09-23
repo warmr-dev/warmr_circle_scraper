@@ -161,7 +161,24 @@ def main() -> int:
     ap.add_argument("--rpm", type=float, default=8.0, help="requests per minute (default 8)")
     ap.add_argument("--out", type=Path, help="JSONL with one line per request")
     ap.add_argument("--conditional", action="store_true", help="also repeat feed reads with If-None-Match")
+    ap.add_argument(
+        "--only",
+        help="comma-separated check names to run instead of all five "
+        "(" + ",".join(name for name, _, _ in CHECKS) + "). One check per host is "
+        "what the watch-list survey needs: it asks every candidate whether the "
+        "feed answers at all, without spending five requests on each.",
+    )
     args = ap.parse_args()
+
+    checks = CHECKS
+    if args.only:
+        wanted = [n.strip() for n in args.only.split(",") if n.strip()]
+        known = {name for name, _, _ in CHECKS}
+        unknown = [n for n in wanted if n not in known]
+        if unknown:
+            print(f"unknown check(s): {', '.join(unknown)}", file=sys.stderr)
+            return 2
+        checks = tuple(c for c in CHECKS if c[0] in wanted)
 
     hosts = load_hosts(args.hosts)
     cookie_jar: dict[str, dict] = {}
@@ -186,7 +203,7 @@ def main() -> int:
     try:
         for host, kind in hosts:
             etags: dict[str, str] = {}
-            for name, path, needs_cookie in CHECKS:
+            for name, path, needs_cookie in checks:
                 jar = cookie_jar.get(host, {})
                 if needs_cookie and not jar:
                     continue
