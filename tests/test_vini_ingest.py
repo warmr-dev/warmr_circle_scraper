@@ -220,3 +220,156 @@ def test_triage_pushes_new_leads(db, monkeypatch):
     mock_push.assert_called_once()
     pushed_ids = mock_push.call_args.args[1]
     assert len(pushed_ids) >= 1
+
+
+# --- a 2xx is not delivery -------------------------------------------------
+#
+# The endpoint answers 200 whether it took the lead or threw it away; the real
+# answer is per item, inside the body:
+#
+#   {"ok": true, "received": 1, "inserted": 0, "accepted": 0, "held": 0,
+#    "discarded": 0, "historical_expired": 0,
+#    "results": [{"status": "error", "error": "content is required"}]}
+#
+# The push used to stamp external_synced_at on any 2xx, so a refused lead was
+# recorded as delivered and never retried. The client saw nothing for two
+# weeks while the dashboard showed leads "sent".
+
+def _reply(body, status=200):
+    fake = MagicMock()
+    response = MagicMock(status_code=status, reason="OK")
+    response.json.return_value = body
+    fake.post.return_value = response
+    return fake
+
+
+def _cfg():
+    return ViniIngestConfig(url="https://example.test/ingest",
+                            anon_key="anon", api_secret="sekrit")
+
+
+def test_the_per_item_results_are_returned():
+    fake = _reply({"ok": True, "received": 1, "inserted": 1,
+                   "results": [{"status": "inserted", "id": 7}]})
+    out = post_leads_to_vini([{"url": "https://x", "content": "y"}],
+                             config=_cfg(), session=fake)
+    assert out == [{"status": "inserted", "id": 7}]
+
+
+def test_a_body_without_results_returns_nothing():
+    fake = _reply({"ok": True})
+    assert post_leads_to_vini([{"url": "https://x", "content": "y"}],
+                              config=_cfg(), session=fake) == []
+
+
+def test_a_non_json_body_is_not_a_failure():
+    fake = MagicMock()
+    response = MagicMock(status_code=200, reason="OK")
+    response.json.side_effect = ValueError("not json")
+    fake.post.return_value = response
+    assert post_leads_to_vini([{"url": "https://x", "content": "y"}],
+                              config=_cfg(), session=fake) == []
+
+
+def _push_with(db, monkeypatch, results, lead_ids=None):
+    monkeypatch.setenv("SUPABASE_ANON_KEY", "anon")
+    monkeypatch.setenv("VINI_API_SECRET", "secret")
+    ids = lead_ids or [_seed_lead(db)]
+    with patch("circle_leads.export.vini_ingest.post_leads_to_vini") as mock_post:
+        mock_post.return_value = results
+        with db.session() as s:
+            return ids, push_leads_by_ids(s, ids)
+
+
+def test_a_refused_lead_is_not_marked_delivered(db, monkeypatch):
+    ids, result = _push_with(
+        db, monkeypatch,
+        [{"status": "error", "error": "post_content (or content) is required"}])
+    assert result.sent == 0
+    assert result.rejected and result.rejected[0][1] == "error"
+    with db.session() as s:
+        assert s.get(Lead, ids[0]).external_synced_at is None
+
+
+def test_a_refused_lead_is_tried_again(db, monkeypatch):
+    """Leaving external_synced_at NULL is what makes the retry possible."""
+    from circle_leads.export.vini_ingest import push_unsynced_leads
+
+    ids, _ = _push_with(db, monkeypatch, [{"status": "discarded"}])
+    with patch("circle_leads.export.vini_ingest.post_leads_to_vini") as mock_post:
+        mock_post.return_value = [{"status": "inserted"}]
+        with db.session() as s:
+            again = push_unsynced_leads(s)
+    assert again.sent == 1
+    with db.session() as s:
+        assert s.get(Lead, ids[0]).external_synced_at is not None
+
+
+@pytest.mark.parametrize("status", ["inserted", "accepted", "held", "skipped"])
+def test_the_statuses_that_count_as_delivered(db, monkeypatch, status):
+    ids, result = _push_with(db, monkeypatch, [{"status": status}])
+    assert result.sent == 1, status
+    with db.session() as s:
+        assert s.get(Lead, ids[0]).external_synced_at is not None
+
+
+@pytest.mark.parametrize("status", ["error", "discarded", "historical_expired"])
+def test_the_statuses_that_do_not(db, monkeypatch, status):
+    ids, result = _push_with(db, monkeypatch, [{"status": status}])
+    assert result.sent == 0, status
+    with db.session() as s:
+        assert s.get(Lead, ids[0]).external_synced_at is None
+
+
+def _seed_sibling_leads(db, first_lead_id, count):
+    """More leads in the community _seed_lead already made (slug is unique)."""
+    with db.session() as s:
+        post = s.get(Post, s.get(Lead, first_lead_id).post_id)
+        community_id, author_id = post.community_id, post.author_id
+        made = []
+        for n in range(count):
+            extra = Post(community_id=community_id, author_id=author_id,
+                         source_content_id=f"post-extra-{n}", content_type="post",
+                         content="We need a contractor for a rebuild.",
+                         url=f"https://acme.circle.so/c/jobs/extra-{n}",
+                         published_at=datetime(2026, 9, 8, 10, 0, 0),
+                         dedup_hash=f"extra-{n}", classified=True)
+            s.add(extra)
+            s.flush()
+            lead = Lead(post_id=extra.id, classification="LEAD", confidence=0.9,
+                        lead_score=80, priority="HIGH")
+            s.add(lead)
+            s.flush()
+            made.append(lead.id)
+        return made
+
+
+def test_a_mixed_batch_splits_correctly(db, monkeypatch):
+    first = _seed_lead(db)
+    ids = [first] + _seed_sibling_leads(db, first, 2)
+    ids, result = _push_with(
+        db, monkeypatch,
+        [{"status": "inserted"}, {"status": "historical_expired"}, {"status": "inserted"}],
+        lead_ids=ids)
+    assert result.sent == 2
+    assert len(result.rejected) == 1
+    assert result.outcomes == {"inserted": 2, "historical_expired": 1}
+    with db.session() as s:
+        synced = [s.get(Lead, i).external_synced_at is not None for i in ids]
+    assert synced == [True, False, True]
+
+
+def test_an_endpoint_that_says_nothing_per_item_still_marks_delivered(db, monkeypatch):
+    """Older endpoint, or a shorter list than we sent: keep the old behaviour."""
+    ids, result = _push_with(db, monkeypatch, [])
+    assert result.sent == 1
+    with db.session() as s:
+        assert s.get(Lead, ids[0]).external_synced_at is not None
+
+
+def test_a_refusal_reaches_a_human(db, monkeypatch):
+    sent = []
+    monkeypatch.setattr("circle_leads.notify.notify",
+                        lambda *a, **k: sent.append((a, k)) or True)
+    _push_with(db, monkeypatch, [{"status": "error", "error": "boom"}])
+    assert sent, "a lead the client never sees must not be silent"

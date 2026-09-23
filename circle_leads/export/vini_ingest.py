@@ -51,6 +51,19 @@ class PushResult:
     sent: int = 0
     skipped: int = 0
     errors: list[str] = field(default_factory=list)
+    # What the endpoint said about each item, e.g. {"inserted": 3, "error": 1}.
+    # Empty when the response carried no per-item breakdown.
+    outcomes: dict[str, int] = field(default_factory=dict)
+    # (lead id, status, message) for every item the endpoint did not take.
+    rejected: list[tuple[int, str, str]] = field(default_factory=list)
+
+
+# Per-item statuses that mean the lead is now on the far side. "skipped" is
+# the endpoint's word for "already hold this external_id", which is a success
+# from here -- re-sending it forever would not help.
+LANDED_STATUSES = frozenset(
+    {"inserted", "accepted", "held", "skipped", "ok", "duplicate", "success"}
+)
 
 
 def load_vini_ingest_config() -> ViniIngestConfig:
@@ -118,10 +131,25 @@ def post_leads_to_vini(
     config: ViniIngestConfig | None = None,
     session: requests.Session | None = None,
     timeout: float = 30.0,
-) -> None:
-    """POST a non-empty lead array. Raises on HTTP / network failure."""
+) -> list[dict[str, Any]]:
+    """POST a non-empty lead array. Raises on HTTP / network failure.
+
+    Returns the endpoint's per-item results, in the order the items were sent,
+    or an empty list if the response carried none.
+
+    A 2xx does NOT mean the leads arrived. The endpoint answers 200 with a
+    body like::
+
+        {"ok": true, "received": 1, "inserted": 0, "accepted": 0, "held": 0,
+         "discarded": 0, "historical_expired": 0,
+         "results": [{"status": "error", "error": "content is required"}]}
+
+    This function used to return None and the caller stamped every lead as
+    synced on any 2xx, so a rejected lead was recorded as delivered and never
+    retried.
+    """
     if not items:
-        return
+        return []
     cfg = config or load_vini_ingest_config()
     if not cfg.enabled:
         raise RuntimeError(
@@ -142,6 +170,21 @@ def post_leads_to_vini(
         raise RuntimeError(
             f"Vini ingest HTTP {response.status_code}: {body or response.reason}"
         )
+
+    try:
+        body = response.json()
+    except ValueError:
+        # A 2xx with an unreadable body: treat it as no per-item information
+        # rather than as a failure, so behaviour matches the older endpoint.
+        logger.warning("Vini ingest returned %s with a non-JSON body",
+                       response.status_code)
+        return []
+    if not isinstance(body, dict):
+        return []
+    results = body.get("results")
+    if not isinstance(results, list):
+        return []
+    return [r if isinstance(r, dict) else {"status": str(r)} for r in results]
 
 
 def _load_lead_bundle(
@@ -204,17 +247,64 @@ def push_leads_by_ids(
         return result
 
     try:
-        post_leads_to_vini(payloads, config=cfg)
+        results = post_leads_to_vini(payloads, config=cfg)
     except Exception as exc:  # noqa: BLE001 - caller should keep local leads
         result.errors.append(str(exc))
         logger.exception("Failed to push %d lead(s) to Vini ingest", len(payloads))
         return result
 
     synced_at = utcnow()
-    for lead in ready_leads:
-        lead.external_synced_at = synced_at
-    result.sent = len(ready_leads)
+    for index, lead in enumerate(ready_leads):
+        item = results[index] if index < len(results) else None
+        if item is None:
+            # No per-item answer (older endpoint, or a shorter list than we
+            # sent). Keep the old behaviour: a 2xx counts as delivered.
+            lead.external_synced_at = synced_at
+            result.sent += 1
+            continue
+
+        status = str(item.get("status") or "").strip().lower()
+        result.outcomes[status or "(no status)"] = (
+            result.outcomes.get(status or "(no status)", 0) + 1
+        )
+        if status in LANDED_STATUSES:
+            lead.external_synced_at = synced_at
+            result.sent += 1
+        else:
+            # Leave external_synced_at NULL so push_unsynced_leads picks it up
+            # again. Stamping it was how leads that never arrived came to be
+            # recorded as delivered.
+            message = str(item.get("error") or item.get("reason") or "")[:300]
+            result.rejected.append((lead.id, status or "(no status)", message))
+
+    if result.rejected:
+        logger.error(
+            "Vini ingest refused %d of %d lead(s): %s",
+            len(result.rejected), len(ready_leads), result.outcomes,
+        )
+        _alert_rejected(result)
     return result
+
+
+def _alert_rejected(result: PushResult) -> None:
+    """Tell a human. A lead the client never sees is the one failure that
+    makes the whole pipeline pointless, and it was silent for two weeks."""
+    try:
+        from circle_leads.notify import notify
+
+        lines = [f"{status}: {count}" for status, count in sorted(result.outcomes.items())]
+        sample = "\n".join(
+            f"#{lead_id} {status} {message}"[:200]
+            for lead_id, status, message in result.rejected[:5]
+        )
+        notify(
+            f"Vini не принял {len(result.rejected)} лид(ов)",
+            "\n".join(lines) + ("\n\n" + sample if sample else ""),
+            level="error",
+            dedup_key="vini-rejected",
+        )
+    except Exception:  # noqa: BLE001 - an alert must never break the push
+        logger.warning("could not send the Vini rejection alert", exc_info=True)
 
 
 def push_unsynced_leads(
