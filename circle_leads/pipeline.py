@@ -40,10 +40,12 @@ from circle_leads.classifier.icp_relevance import classify_icp_fit
 from circle_leads.classifier.lead_classifier import classify, meets_requirements
 from circle_leads.config.settings import CommunityPermission, Requirements
 from circle_leads.discovery.discover_communities import DiscoveredCommunity
+from circle_leads.discovery.join_type import _classify_payload
 from circle_leads.discovery.validate_community import assess_relevance, check_public_access
 from circle_leads.export.vini_ingest import push_leads_by_ids
 from circle_leads.scoring.lead_scoring import score_lead
 from circle_leads.scraper import chat_scraper, comments_scraper, community_scraper, posts_scraper
+from circle_leads.scraper.governor import LOW, priority
 from circle_leads.scraper.http_client import shared_session
 from circle_leads.scraper.pagination import AccessDeniedError, ApiError, CircleClient, QuotaTracker
 from circle_leads.scraper.public_reader import PublicReader
@@ -791,6 +793,10 @@ class CommunityMetadata:
     #: in the stats afterwards.
     rejected: list[str] = field(default_factory=list)
     note: str | None = None
+    #: How the community can be joined, when communities/current answered 200
+    #: -- the name request already carries it, so no separate probe is needed.
+    join_type: str | None = None
+    join_detail: str | None = None
 
 
 def fetch_community_metadata(
@@ -814,12 +820,22 @@ def fetch_community_metadata(
     meta = CommunityMetadata()
 
     if want_name:
-        name = _clean_name(PublicReader(host, session=http).community_name())
+        reader = PublicReader(host, session=http)
+        name = _clean_name(reader.community_name())
         if name:
             if _is_boilerplate(name):
                 meta.rejected.append("name")
             else:
                 meta.name = name
+        payload = getattr(reader, "last_payload", None)
+        if getattr(reader, "last_status", None) == 200 and isinstance(payload, dict) and "is_private" in payload:
+            join = _classify_payload(payload)
+            meta.join_type, meta.join_detail = join.join_type, join.detail
+        if getattr(reader, "last_status", None) == 0:
+            # The host didn't answer at all (DNS, TLS handshake, timeout): its
+            # landing page lives on the same host and would fail the same way.
+            meta.note = "host unreachable"
+            return meta
 
     # Only pay for the landing page when it can still tell us something.
     if want_description or (want_name and meta.name is None):
@@ -937,6 +953,10 @@ def enrich_pending(
         http = shared_session()
 
         def _one(target):
+            with priority(LOW):  # yields Circle's per-IP budget to lead reads
+                return _fetch_one(target)
+
+        def _fetch_one(target):
             community_pk, host, url, want_name, want_description = target
             try:
                 return community_pk, fetch(
@@ -971,6 +991,11 @@ def enrich_pending(
             if meta.description and not (community.description or "").strip():
                 community.description = meta.description[:4000]
                 stats["described"] += 1
+            if meta.join_type and community.join_type_checked_at is None:
+                community.join_type = meta.join_type
+                community.join_type_detail = (meta.join_detail or "")[:2000]
+                community.join_type_checked_at = utcnow()
+                stats["join_typed"] = stats.get("join_typed", 0) + 1
             stats["boilerplate_rejected"] += len(meta.rejected)
             if not meta.name and not meta.description:
                 stats["nothing_found"] += 1

@@ -17,6 +17,7 @@ from typing import Any, Callable, Iterator
 
 import requests
 
+from circle_leads.scraper.http_client import governed_session
 from circle_leads.authentication.browser_session import redact
 
 logger = logging.getLogger(__name__)
@@ -93,7 +94,7 @@ class CircleClient:
         self.max_backoff = max_backoff
         self.timeout = timeout
         self.quota = quota or QuotaTracker()
-        self.session = session or requests.Session()
+        self.session = session or governed_session()
 
     def get(self, path: str, params: dict | None = None) -> dict[str, Any]:
         return self._request("GET", path, params=params)

@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { setFetcher } from '@engine/circle/http'
-import { circleGovernor, RateLimitedError } from '@engine/circle/governor'
+import { CircleGovernor, circleGovernor, RateLimitedError, withPriority } from '@engine/circle/governor'
+import { mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { probeHost, fetchPublicSpaces } from '@engine/circle/probe'
 import { CircleReader, SessionInvalidError, BudgetExhaustedError, sessionCookies } from '@engine/circle/reader'
 import { hostFromInput, hostsFromText, platformFromHost } from '@engine/discovery/hosts'
@@ -388,6 +391,40 @@ describe('Circle governor (per-IP rate limit)', () => {
   it('a managed challenge page (403 + Just a moment) is a challenge', async () => {
     fake(() => html(403, '<html><head><title>Just a moment...</title></head></html>'))
     await expect(probeHost('c.circle.so')).rejects.toBeInstanceOf(RateLimitedError)
+  })
+
+  it('two processes on one state file share the pace', async () => {
+    const file = join(mkdtempSync(join(tmpdir(), 'gov-')), 'gov.json')
+    writeFileSync(file, JSON.stringify({ limits: { requestsPerMinute: 600, maxPerHour: 0, cooldownMinutes: 60 } }))
+    const a = new CircleGovernor()
+    const b = new CircleGovernor()
+    a.usePath(file)
+    b.usePath(file)
+    const started = Date.now()
+    for (const g of [a, b, a, b]) await g.acquire()
+    expect(Date.now() - started).toBeGreaterThanOrEqual(290)
+  })
+
+  it('a trip by one process pauses the others', async () => {
+    const file = join(mkdtempSync(join(tmpdir(), 'gov-')), 'gov.json')
+    const a = new CircleGovernor()
+    const b = new CircleGovernor()
+    a.usePath(file)
+    b.usePath(file)
+    a.trip('HTTP 429 on python side')
+    await expect(b.acquire()).rejects.toBeInstanceOf(RateLimitedError)
+  })
+
+  it('low priority takes every other slot while a read is active', async () => {
+    circleGovernor.configure({ requestsPerMinute: 1200 }) // 50 ms apart
+    await circleGovernor.acquire() // a high-priority read just ran
+    const started = Date.now()
+    await withPriority('low', async () => {
+      await circleGovernor.acquire()
+      await circleGovernor.acquire()
+    })
+    // high at t0, low at t0+50, next low no sooner than t0+150 (2 intervals)
+    expect(Date.now() - started).toBeGreaterThanOrEqual(140)
   })
 
   it('restores a cool-down saved before a restart', () => {
