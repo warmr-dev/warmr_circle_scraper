@@ -43,9 +43,13 @@ DIRECTORY_HOSTS = {"discover.circle.so", "circle.so", "www.circle.so"}
 # collide with a row the keeper already owns.
 PLAIN_CHILD_TABLES = (
     ("public", "scrape_runs"),
-    ("warmr_app", "tasks"),
-    ("public", "join_attempts"),
     ("public", "join_form_fills"),
+    ("warmr_app", "join_attempts"),
+    # No foreign key points at communities from these two, so they are easy to
+    # miss: without moving them a merge leaves rows pointing at an id that no
+    # longer exists.
+    ("warmr_app", "llm_calls"),
+    ("warmr_app", "post_meta"),
 )
 
 
@@ -207,6 +211,15 @@ def merge_group(conn: Connection, host: str, rows: list[dict], backup: list) -> 
                 AND k.source_space_id = l.source_space_id)"""), ids)
         conn.execute(text("UPDATE warmr_app.space_sync SET community_id=:keeper WHERE community_id=:loser"), ids)
 
+        # An open task is unique per (kind, community, host), so the loser's
+        # copy has to go before the rest of its tasks move across.
+        conn.execute(text("""
+            DELETE FROM warmr_app.tasks l WHERE l.community_id = :loser AND l.state = 'open'
+              AND EXISTS (SELECT 1 FROM warmr_app.tasks k WHERE k.community_id = :keeper
+                            AND k.state = 'open' AND k.kind = l.kind
+                            AND coalesce(k.host, '') = coalesce(l.host, ''))"""), ids)
+        conn.execute(text("UPDATE warmr_app.tasks SET community_id=:keeper WHERE community_id=:loser"), ids)
+
         for schema, table in PLAIN_CHILD_TABLES:
             conn.execute(text(f"UPDATE {schema}.{table} SET community_id=:keeper WHERE community_id=:loser"), ids)
 
@@ -297,6 +310,11 @@ def main() -> int:
         if not args.apply:
             print("\ndry run -- nothing was written. Re-run with --apply --backup <path>.")
             return 0
+
+        # Reading the plan already opened an implicit transaction (SQLAlchemy
+        # autobegin). Close it before the first explicit one, or begin() raises
+        # and no host is merged at all.
+        conn.rollback()
 
         backup: list = []
         merged = 0
