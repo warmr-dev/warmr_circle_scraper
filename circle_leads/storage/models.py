@@ -81,6 +81,11 @@ class Community(Base):
     slug: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     name: Mapped[str | None] = mapped_column(String(512))
     url: Mapped[str] = mapped_column(String(1024), unique=True, index=True)
+    # The host from ``url``, kept as its own column because ``url`` alone does
+    # not identify a community: the same place arrives once as a directory link
+    # (``/join?invitation_token=...``) and once bare, and the two spellings used
+    # to become two rows that both collected the same posts.
+    host: Mapped[str | None] = mapped_column(String(255), index=True)
 
     discovered_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     discovery_source: Mapped[str | None] = mapped_column(String(255))

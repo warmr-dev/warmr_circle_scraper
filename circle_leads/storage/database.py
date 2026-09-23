@@ -10,6 +10,7 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterator
+from urllib.parse import urlsplit
 
 from sqlalchemy import create_engine, make_url, select
 from sqlalchemy.exc import IntegrityError
@@ -187,6 +188,9 @@ class Database:
             ("communities", "join_type_detail", "TEXT"),
             # P24: what the last harvest read saw -- drives its re-check interval.
             ("communities", "read_outcome", "VARCHAR(32)"),
+            # P25: one host = one community. Backfilled by the manual migration
+            # on Postgres; here it only has to exist so writes do not fail.
+            ("communities", "host", "VARCHAR(255)"),
         ]
         # replay_sessions is a whole new table (Version B experiment); create_all
         # handles it, so no per-column entry is needed here.
@@ -295,18 +299,37 @@ def hamming_distance(a: str, b: str) -> int:
     return bin(int(a, 16) ^ int(b, 16)).count("1")
 
 
+# Circle's own directory pages: many unrelated communities are listed under
+# `discover.circle.so/products/<slug>`, so the host there says nothing about
+# which community a row is.
+DIRECTORY_HOSTS = frozenset({"discover.circle.so", "circle.so", "www.circle.so"})
+
+
+def community_host(url: str) -> str | None:
+    """The host that identifies a community, or None when the host cannot."""
+    host = urlsplit(url).netloc.lower()
+    if not host or host in DIRECTORY_HOSTS:
+        return None
+    return host
+
+
 def get_or_create_community(session: Session, *, slug: str, url: str, **kw) -> Community:
-    # Match on slug OR url: the same community can be referenced by different
-    # slugs (a search find vs. a manual read), but its url is unique.
-    c = session.scalar(
-        select(Community).where(
-            (Community.slug == slug) | (Community.url == url)
-        )
-    )
+    # Match on slug OR url OR host: the same community can be referenced by
+    # different slugs (a search find vs. a manual read) and by different urls
+    # (a directory link with an invitation token vs. the bare address), but one
+    # host is one community.
+    host = community_host(url)
+    conditions = (Community.slug == slug) | (Community.url == url)
+    if host:
+        conditions = conditions | (Community.host == host)
+    c = session.scalar(select(Community).where(conditions))
     if c is None:
-        c = Community(slug=slug, url=url, **kw)
+        c = Community(slug=slug, url=url, host=host, **kw)
         session.add(c)
         session.flush()
+    elif host and not c.host:
+        # Row written before the column existed.
+        c.host = host
     return c
 
 
