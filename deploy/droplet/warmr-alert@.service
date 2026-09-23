@@ -1,18 +1,14 @@
 [Unit]
 Description=Tell a human that %i stopped
 # Started by OnFailure= on the warmr services. systemd is the only thing that
-# still works when the service it was watching has crashed, so the alert comes
-# from here rather than from inside the failing process.
+# still works once the service it was watching has crashed, so the alert is
+# sent from here rather than from inside the failing process.
+Documentation=https://github.com/warmr-dev/warmr_circle_scraper
 
 [Service]
 Type=oneshot
 EnvironmentFile=/etc/warmr/warmr.env
-ExecStart=/opt/warmr/current/venv/bin/python -c "\
-import os, subprocess, sys; \
-from circle_leads.notify import notify; \
-unit = sys.argv[1]; \
-log = subprocess.run(['journalctl', '-u', unit, '-n', '15', '--no-pager', '-o', 'cat'], \
-                     capture_output=True, text=True).stdout[-1500:]; \
-notify(f'Warmr: служба {unit} упала', \
-       'Последние строки журнала:\n<pre>' + log.replace('&','&amp;').replace('<','&lt;') + '</pre>', \
-       level='error', dedup_key='unit-failed:' + unit)" %i
+# The body of this lives in a file on purpose: a multi-line `python -c` inside
+# a unit is joined with its own indentation and fails to parse.
+ExecStart=/opt/warmr/current/venv/bin/python /opt/warmr/current/deploy/droplet/alert_unit_failed.py %i
+TimeoutStartSec=60
