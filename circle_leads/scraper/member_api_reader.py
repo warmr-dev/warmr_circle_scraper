@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 
 import requests
 
+from circle_leads.scraper.http_client import governed_session
 from circle_leads.scraper.normalize import parse_timestamp, redact_pii, strip_html
 from circle_leads.scraper.tiptap import tiptap_plain, tiptap_text
 
@@ -66,7 +67,7 @@ class MemberApiReader:
     def __post_init__(self):
         self.host = self.host.replace("https://", "").replace("http://", "").strip("/")
         self.base = f"https://{self.host}"
-        self._http = requests.Session()
+        self._http = governed_session()
         self._http.headers.update({"User-Agent": _UA, "Accept": "application/json"})
         # Only pass known session cookies; ignore analytics/cf junk.
         for name in SESSION_COOKIE_NAMES:

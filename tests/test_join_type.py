@@ -18,7 +18,7 @@ from circle_leads.discovery.join_type import (
     JoinClassification,
     classify_join_type_pending,
     fetch_join_classification,
-    with_price_label_fallback,
+    refine_join_classification,
 )
 from circle_leads.storage.database import Database, get_or_create_community
 from circle_leads.storage.models import Community
@@ -264,22 +264,57 @@ def test_price_label_fallback_is_none_without_a_real_label(label):
     assert _price_label_fallback(label) is None
 
 
-@pytest.mark.parametrize("live", [JoinType.LOCKED_UNKNOWN, JoinType.UNKNOWN])
-def test_an_inconclusive_live_check_takes_the_listing_price(live):
-    c = with_price_label_fallback(JoinClassification(live, "HTTP 401 on communities/current"), "Free")
+def _row(join_type=None, detail=None, price_label=None):
+    from types import SimpleNamespace
+    return SimpleNamespace(join_type=join_type, join_type_detail=detail, price_label=price_label)
+
+
+LOCKED = JoinClassification(JoinType.LOCKED_UNKNOWN, "HTTP 401 on communities/current")
+NO_ANSWER = JoinClassification(JoinType.UNKNOWN, "HTTP 404")
+
+
+@pytest.mark.parametrize("live", [LOCKED, NO_ANSWER])
+def test_a_paid_label_refines_any_inconclusive_check(live):
+    c = refine_join_classification(live, _row(price_label="$99/month"))
+    assert c.join_type == JoinType.PAID
+    assert c.detail == f"price_label fallback: '$99/month' (live check inconclusive: {live.detail})"
+
+
+def test_a_free_label_refines_a_check_that_got_no_answer():
+    c = refine_join_classification(NO_ANSWER, _row(price_label="Free"))
     assert c.join_type == JoinType.FREE_JOIN
-    assert c.detail == "price_label fallback: 'Free' (live check inconclusive: HTTP 401 on communities/current)"
 
 
-def test_a_conclusive_live_check_beats_the_listing_price():
+def test_a_free_label_does_not_open_a_members_only_community():
+    """Hand check 2026-09-19: 1 of 5 "Free" listings answering 401 was joinable."""
+    c = refine_join_classification(LOCKED, _row(price_label="Free"))
+    assert c.join_type == JoinType.LOCKED_UNKNOWN
+    assert c.detail == ("HTTP 401 on communities/current; directory says 'Free', "
+                        "not trusted for a private community")
+
+
+def test_a_free_label_still_refines_a_403():
+    """A 403 is often a custom domain's firewall, not Circle's members-only answer."""
+    live = JoinClassification(JoinType.LOCKED_UNKNOWN, "private (members only): HTTP 403 on communities/current")
+    assert refine_join_classification(live, _row(price_label="Free")).join_type == JoinType.FREE_JOIN
+
+
+def test_a_conclusive_live_check_beats_the_listing_price_and_a_manual_verdict():
     live = JoinClassification(JoinType.INVITE_ONLY, "is_private=true")
-    assert with_price_label_fallback(live, "$99/month") is live
+    row = _row(JoinType.PAID, "manual check 2026-09-19: paid", "$99/month")
+    assert refine_join_classification(live, row) is live
+
+
+@pytest.mark.parametrize("live", [LOCKED, NO_ANSWER])
+def test_a_manual_verdict_survives_an_inconclusive_check(live):
+    row = _row(JoinType.INVITE_ONLY, "manual check 2026-09-19: invite only", "Free")
+    c = refine_join_classification(live, row)
+    assert (c.join_type, c.detail) == (JoinType.INVITE_ONLY, "manual check 2026-09-19: invite only")
 
 
 def test_no_listing_price_leaves_the_live_check_as_it_is():
-    live = JoinClassification(JoinType.LOCKED_UNKNOWN, "HTTP 401 on communities/current")
-    assert with_price_label_fallback(live, None) is live
-    assert with_price_label_fallback(live, "  ") is live
+    assert refine_join_classification(LOCKED, _row()) is LOCKED
+    assert refine_join_classification(LOCKED, _row(price_label="  ")) is LOCKED
 
 
 # --- classify_join_type_pending: the never-checked backlog -------------------
@@ -368,11 +403,10 @@ def test_classify_join_type_pending_saves_the_reason_not_just_the_bucket(monkeyp
         assert row.join_type_detail == "HTTP 404"
 
 
-def test_classify_join_type_pending_falls_back_to_price_label_when_api_is_locked(monkeypatch):
-    """A custom domain from circle_directory: the live API is blocked (401),
-    but Discover's own listing already said "Free" at crawl time -- that
-    shouldn't stay stuck at locked_unknown when the price tag is sitting
-    right there in the row."""
+def test_classify_join_type_pending_does_not_trust_a_free_label_on_a_locked_api(monkeypatch):
+    """The live API is blocked (401), so the community is private. Discover's
+    "Free" label proved wrong for 7 of 10 such rows in the 2026-09-19 hand
+    check, so the row stays locked_unknown and the detail keeps the label."""
     db = _db()
     with db.session() as s:
         get_or_create_community(
@@ -386,9 +420,8 @@ def test_classify_join_type_pending_falls_back_to_price_label_when_api_is_locked
 
     with db.session() as s:
         row = s.scalar(select(Community).where(Community.slug == "priced-free"))
-        assert row.join_type == JoinType.FREE_JOIN
-        assert "price_label fallback: 'Free'" in row.join_type_detail
-        assert "live check inconclusive" in row.join_type_detail
+        assert row.join_type == JoinType.LOCKED_UNKNOWN
+        assert "directory says 'Free', not trusted" in row.join_type_detail
 
 
 def test_classify_join_type_pending_price_label_fallback_handles_paid(monkeypatch):

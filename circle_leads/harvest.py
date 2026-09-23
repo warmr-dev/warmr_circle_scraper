@@ -19,12 +19,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 
-from sqlalchemy import nullsfirst, or_, select
+from sqlalchemy import func, nullsfirst, or_, select
 
 from circle_leads.config.settings import Requirements
 from circle_leads.discovery.join_type import (
     fetch_join_classification,
-    with_price_label_fallback,
+    refine_join_classification,
 )
 from circle_leads.discovery.persist import persist_finds
 from circle_leads.discovery.validate_finds import (
@@ -35,7 +35,7 @@ from circle_leads.discovery.web_search import discover_by_search
 from circle_leads.scraper.public_reader import PublicReader, discover_and_read_public
 from circle_leads.storage.activity import log_activity
 from circle_leads.storage.database import Database
-from circle_leads.storage.models import Community
+from circle_leads.storage.models import Community, Post
 from circle_leads.triage.pipeline import triage_records
 
 logger = logging.getLogger(__name__)
@@ -48,6 +48,81 @@ DEFAULT_NICHES = [
     "indie hacker",
     "SaaS founder",
 ]
+
+
+# Circle budgets requests per IP, so re-reading a community that never has
+# anything new is paid for by the ones that do. The re-check interval follows
+# what the last read actually saw (Community.read_outcome), never the post
+# count alone -- "no posts" also covers empty hiring spaces, posts past the age
+# cap, and a read that simply failed:
+#   private / gone      -> CLOSED_RECHECK_HOURS
+#   public, a post in the last ACTIVE_DAYS -> the caller's min_recheck_hours
+#   public, nothing that recent            -> QUIET_RECHECK_HOURS
+#   error, or not recorded yet             -> min_recheck_hours (as before)
+ACTIVE_DAYS = 30
+QUIET_RECHECK_HOURS = 72.0
+CLOSED_RECHECK_HOURS = 168.0
+
+OUTCOME_PUBLIC = "public"
+OUTCOME_PRIVATE = "private"
+OUTCOME_GONE = "gone"
+OUTCOME_ERROR = "error"
+# join_type and the display name change rarely; one communities/current call
+# a week per community is enough, unless the name is still missing.
+JOIN_RECHECK_DAYS = 7
+
+
+@dataclass
+class _ReadState:
+    join_type: str | None = None
+    join_checked_at: datetime | None = None
+    name: str | None = None
+    newest_post_at: datetime | None = None
+    read_outcome: str | None = None
+
+
+def _read_state(db: Database, slug: str) -> _ReadState:
+    with db.session() as s:
+        c = s.scalar(select(Community).where(Community.slug == slug))
+        if c is None:
+            return _ReadState()
+        newest = s.scalar(
+            select(func.max(Post.published_at)).where(Post.community_id == c.id)
+        )
+        return _ReadState(
+            c.join_type, c.join_type_checked_at, c.name, newest, c.read_outcome
+        )
+
+
+def _recheck_hours(base_hours: float, watching: bool, state: _ReadState, now: datetime) -> float:
+    """How long to leave a community alone after reading it."""
+    if watching:
+        return base_hours
+    if state.read_outcome in (OUTCOME_PRIVATE, OUTCOME_GONE):
+        return max(base_hours, CLOSED_RECHECK_HOURS)
+    if state.read_outcome == OUTCOME_PUBLIC:
+        recent = state.newest_post_at is not None and now - state.newest_post_at <= timedelta(days=ACTIVE_DAYS)
+        return base_hours if recent else max(base_hours, QUIET_RECHECK_HOURS)
+    return base_hours  # error, or read before read_outcome existed
+
+
+def _list_outcome(status: int | None, has_spaces: bool, join) -> str:
+    """Classify the space-list response of one read."""
+    if join is not None and (join.detail or "").startswith("host no longer maps"):
+        return OUTCOME_GONE
+    if has_spaces or status == 200:
+        return OUTCOME_PUBLIC
+    if status in (401, 403):
+        return OUTCOME_PRIVATE
+    if status == 404:
+        return OUTCOME_GONE
+    if status is None:
+        return OUTCOME_PRIVATE  # a reader that doesn't report status (stubs)
+    return OUTCOME_ERROR  # 0 (network), 429, 5xx, anything odd
+
+
+def _needs_name(name: str | None, slug: str) -> bool:
+    return not name or name == slug or is_interstitial_title(name)
 
 
 @dataclass
@@ -260,24 +335,31 @@ def harvest(
     for host, slug, last_synced, watching in hosts:
         if only_new and last_synced is not None:
             continue  # caller asked to read only never-seen communities
-        # Skip a community we re-checked very recently: re-reading it again this
-        # soon would just re-open a connection to fetch nothing new. force_recheck
+        # A discover.circle.so row is a directory listing, not a community:
+        # its "spaces" are Circle's own marketplace, never this community's.
+        if host.lower().endswith("discover.circle.so"):
+            continue
+        state = _read_state(db, slug)
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        # Skip a community we re-checked recently: re-reading it this soon
+        # would spend Circle's per-IP budget to fetch nothing new. Quiet and
+        # silent communities wait longer (see _recheck_hours). force_recheck
         # (the dashboard "re-check" box) overrides this.
+        wait_hours = _recheck_hours(min_recheck_hours, watching, state, now)
         if (
             not force_recheck
             and last_synced is not None
-            and (datetime.now(timezone.utc).replace(tzinfo=None) - last_synced)
-            < timedelta(hours=min_recheck_hours)
+            and (now - last_synced) < timedelta(hours=wait_hours)
         ):
             with db.session() as s:
                 log_activity(
                     s, kind="read", level="info", community=slug,
                     summary=(
                         f"{host}: checked {_ago(last_synced)} ago — skipping "
-                        f"(re-check interval {min_recheck_hours:g}h)"
+                        f"(re-check interval {wait_hours:g}h)"
                     ),
                     detail={"last_synced": last_synced.isoformat(),
-                            "min_recheck_hours": min_recheck_hours},
+                            "min_recheck_hours": wait_hours},
                 )
             continue
         # First read of a community: pull its whole backlog (bounded by
@@ -321,43 +403,61 @@ def harvest(
         # Classify how this community can be joined (free/paid/invite-only),
         # independent of whether its space list is public -- a fully private
         # community (empty space list, below) is exactly the case join_type
-        # most needs to explain. One extra public JSON call, no cookie; cheap
-        # next to the reads below, and reused every run so pricing changes
-        # over time get picked up rather than frozen at discovery.
-        try:
-            join = fetch_join_classification(host, session=reader.session)
-        except Exception:  # noqa: BLE001 - classification must never fail the read
-            join = None
+        # most needs to explain. One public JSON call, no cookie, which also
+        # carries the display name; repeated weekly (pricing does change), or
+        # sooner while the name is still missing.
+        join = None
+        join_due = (
+            force_recheck
+            or state.join_checked_at is None
+            or now - state.join_checked_at > timedelta(days=JOIN_RECHECK_DAYS)
+            or _needs_name(state.name, slug)
+        )
+        if join_due:
+            try:
+                join = fetch_join_classification(host, session=reader.session)
+            except Exception:  # noqa: BLE001 - classification must never fail the read
+                join = None
         if join is not None:
             with db.session() as s:
                 c = s.scalar(select(Community).where(Community.slug == slug))
                 if c is not None:
                     # A private community answers 401 here on every read;
-                    # the listing's price must survive that, as it does in
-                    # classify-join-types.
-                    join = with_price_label_fallback(join, c.price_label)
+                    # a manual verdict or the listing's price must survive
+                    # that, as they do in classify-join-types.
+                    join = refine_join_classification(join, c)
                     c.join_type = join.join_type
                     c.join_type_detail = join.detail[:2000]
                     c.join_type_checked_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
+        outcome = _list_outcome(getattr(reader, "last_status", None), bool(spaces), join)
         if not spaces:
+            what = {
+                OUTCOME_PRIVATE: "no public space list (fully private)",
+                OUTCOME_GONE: "community not found",
+                OUTCOME_PUBLIC: "space list is empty",
+            }.get(outcome, f"space list failed (HTTP {getattr(reader, 'last_status', '?')}) — will retry")
             with db.session() as s:
                 log_activity(
                     s, kind="read", community=slug,
-                    summary=(f"{host}: no public space list (fully private) "
-                             f"[join: {join.join_type if join else 'unknown'}]"),
+                    summary=(f"{host}: {what} "
+                             f"[join: {join.join_type if join else state.join_type or 'unknown'}]"),
                 )
-            _mark_synced(db, slug)
+            _mark_synced(db, slug, outcome)
             continue
 
         # Set/repair the community's real display name from the JSON API. This
         # avoids the marketing HTML page, which a datacenter IP gets served as a
         # "Verifying you are a human" bot-check -- so the name never gets that
         # junk. Only fills a missing/interstitial name; a good name is left be.
-        try:
-            real_name = reader.community_name()
-        except Exception:  # noqa: BLE001 - name is cosmetic; never fail the read
-            real_name = None
+        # The join-type call above already fetched it; ask again only if that
+        # call didn't run or failed.
+        real_name = join.name if join is not None else None
+        if real_name is None and join is None and _needs_name(state.name, slug):
+            try:
+                real_name = reader.community_name()
+            except Exception:  # noqa: BLE001 - name is cosmetic; never fail the read
+                real_name = None
         if real_name:
             with db.session() as s:
                 c = s.scalar(select(Community).where(Community.slug == slug))
@@ -439,7 +539,8 @@ def harvest(
                 continue
 
         if not public_count:
-            _mark_synced(db, slug)
+            # The list answered, but every space refused us: closed in practice.
+            _mark_synced(db, slug, OUTCOME_PRIVATE)
             continue
 
         result.communities_read += 1
@@ -475,7 +576,7 @@ def harvest(
                 items_seen=len(records),
                 leads_found=community_leads,
             )
-        _mark_synced(db, slug)
+        _mark_synced(db, slug, OUTCOME_PUBLIC)
 
     with db.session() as s:
         log_activity(
@@ -537,11 +638,12 @@ def _ago(when: datetime) -> str:
     return f"{hours // 24}d"
 
 
-def _mark_synced(db: Database, slug: str) -> None:
+def _mark_synced(db: Database, slug: str, outcome: str) -> None:
     with db.session() as s:
         c = s.scalar(select(Community).where(Community.slug == slug))
         if c is not None:
             c.last_synced_at = datetime.now(timezone.utc).replace(tzinfo=None)
+            c.read_outcome = outcome
 
 
 def _lead_spaces(spaces):

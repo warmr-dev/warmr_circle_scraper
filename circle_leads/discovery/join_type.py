@@ -21,6 +21,7 @@ from urllib.parse import urlparse
 
 import requests
 
+from circle_leads.scraper.governor import LOW, priority
 from circle_leads.scraper.http_client import BROWSER_UA, shared_session
 
 logger = logging.getLogger(__name__)
@@ -36,7 +37,9 @@ class JoinType:
     # community (a dead host redirects to circle.so and is UNKNOWN instead).
     # Checked by hand 2026-09-18 on 4 ICP-fit rows: all were private,
     # members-only communities showing only a sign-in page. Free vs paid can't
-    # be told without an account, so a Discover price_label still refines it.
+    # be told without an account. A paid Discover price_label still refines
+    # it; a "Free" one only when the answer was not a 401 (see
+    # refine_join_classification).
     LOCKED_UNKNOWN = "locked_unknown"
     UNKNOWN = "unknown"                # not a reachable/recognizable Circle host
     SUBSCRIPTION_EXPIRED = "subscription_expired"  # operator's own Circle plan
@@ -74,6 +77,17 @@ def _redirects_to_marketing_site(
 class JoinClassification:
     join_type: str
     detail: str = ""
+    #: The community's display name when the call answered 200 -- the same
+    #: payload carries it, so the harvest doesn't ask a second time.
+    name: str | None = None
+
+
+def payload_name(data: dict) -> str | None:
+    for key in ("name", "community_name", "title"):
+        val = data.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()[:120]
+    return None
 
 
 def _price_label_fallback(price_label: str | None) -> JoinClassification | None:
@@ -98,24 +112,49 @@ def _price_label_fallback(price_label: str | None) -> JoinClassification | None:
     return JoinClassification(JoinType.PAID, f"price_label fallback: '{label}'")
 
 
-def with_price_label_fallback(
-    classification: JoinClassification, price_label: str | None
-) -> JoinClassification:
-    """Refine an inconclusive live check with the listing's price, if any.
+# A person's verdict from opening the community page, stored in
+# join_type_detail with this prefix (no migration needed). First used for the
+# hand check of the "Login screen only" group on 2026-09-19.
+MANUAL_CHECK_PREFIX = "manual check"
+
+
+def refine_join_classification(live: JoinClassification, community) -> JoinClassification:
+    """What to store for a live check, given what the row already knows.
 
     Every writer of ``join_type`` goes through this. The scheduled harvest
-    used to store the bare live result on each read, which turned rows the
-    listing had priced (free or paid) back into ``locked_unknown`` and left
+    used to store the bare live answer on each read, which turned rows the
+    directory had priced back into ``locked_unknown`` and left
     ``join_type_detail`` still describing the fallback.
+
+    1. A conclusive live answer (the community's own settings) wins.
+    2. Otherwise a person's manual verdict stays.
+    3. Otherwise the directory price refines it. A paid label means paid.
+       A "Free" label counts too, except when Circle answered HTTP 401: that
+       is its members-only answer, and in the 2026-09-19 hand check only 1 of
+       5 such "Free" listings was open to join (all 10 paid ones were paid).
+       A 403 is often a firewall on a custom domain; the one checked was free.
+
+    ``community`` needs ``join_type``, ``join_type_detail`` and
+    ``price_label``.
     """
-    if classification.join_type not in (JoinType.UNKNOWN, JoinType.LOCKED_UNKNOWN):
-        return classification
-    fallback = _price_label_fallback(price_label)
+    if live.join_type not in (JoinType.UNKNOWN, JoinType.LOCKED_UNKNOWN):
+        return live
+    detail = community.join_type_detail or ""
+    if community.join_type and detail.startswith(MANUAL_CHECK_PREFIX):
+        return JoinClassification(community.join_type, detail)
+    fallback = _price_label_fallback(community.price_label)
     if fallback is None:
-        return classification
+        return live
+    members_only = live.join_type == JoinType.LOCKED_UNKNOWN and "HTTP 401" in live.detail
+    if members_only and fallback.join_type == JoinType.FREE_JOIN:
+        return JoinClassification(
+            live.join_type,
+            f"{live.detail}; directory says '{community.price_label.strip()}', "
+            "not trusted for a private community",
+        )
     return JoinClassification(
         fallback.join_type,
-        f"{fallback.detail} (live check inconclusive: {classification.detail})",
+        f"{fallback.detail} (live check inconclusive: {live.detail})",
     )
 
 
@@ -185,7 +224,9 @@ def _fetch_join_classification_once(
     if not isinstance(data, dict) or "is_private" not in data:
         return JoinClassification(JoinType.UNKNOWN, "response missing expected fields")
 
-    return _classify_payload(data)
+    classification = _classify_payload(data)
+    classification.name = payload_name(data)
+    return classification
 
 
 def fetch_join_classification(
@@ -222,6 +263,7 @@ def fetch_join_classification(
             return JoinClassification(
                 retry.join_type,
                 f"{retry.detail} (www retry; apex failed: {classification.detail})",
+                name=retry.name,
             )
     return classification
 
@@ -239,13 +281,20 @@ def classify_join_type_pending(
     ``recheck`` re-classifies every community instead of only never-checked
     ones -- e.g. to backfill join_type_detail (P21) onto rows classified
     before that column existed, or after a classification-rule change.
+    Runs at low priority: it shares Circle's per-IP budget with reads that
+    can produce leads, and yields to them.
     """
+    stats: dict[str, int] = {"checked": 0}
+    session = shared_session()
+    with priority(LOW):
+        _classify_rows(db, session, stats, limit=limit, recheck=recheck)
+    return stats
+
+
+def _classify_rows(db, session, stats, *, limit, recheck) -> None:
     from sqlalchemy import select
 
     from circle_leads.storage.models import Community, utcnow
-
-    stats: dict[str, int] = {"checked": 0}
-    session = shared_session()
 
     with db.session() as s:
         query = select(Community.id).order_by(Community.id)
@@ -263,13 +312,11 @@ def classify_join_type_pending(
             host = urlparse(community.url).hostname or (
                 community.url.replace("https://", "").replace("http://", "").strip("/")
             )
-            classification = with_price_label_fallback(
-                fetch_join_classification(host, session=session), community.price_label
+            classification = refine_join_classification(
+                fetch_join_classification(host, session=session), community
             )
             community.join_type = classification.join_type
             community.join_type_detail = classification.detail[:2000]
             community.join_type_checked_at = utcnow()
             stats["checked"] += 1
             stats[classification.join_type] = stats.get(classification.join_type, 0) + 1
-
-    return stats

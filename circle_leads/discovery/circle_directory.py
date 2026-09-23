@@ -223,7 +223,7 @@ def recheck_unresolved_join_urls(db, *, limit: int | None = None,
     )
     from circle_leads.discovery.join_type import (
         fetch_join_classification,
-        with_price_label_fallback,
+        refine_join_classification,
     )
     from circle_leads.storage.models import Community, utcnow
 
@@ -264,7 +264,7 @@ def recheck_unresolved_join_urls(db, *, limit: int | None = None,
                         c.url = href
                         c.platform = new_platform
                         if classification is not None:
-                            classification = with_price_label_fallback(classification, c.price_label)
+                            classification = refine_join_classification(classification, c)
                             c.join_type = classification.join_type
                             c.join_type_detail = classification.detail[:2000]
                             c.join_type_checked_at = utcnow()
