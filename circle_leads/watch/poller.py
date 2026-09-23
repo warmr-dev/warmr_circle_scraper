@@ -33,6 +33,7 @@ import requests
 from sqlalchemy import or_, select
 
 from circle_leads.storage.database import Database
+from circle_leads.storage.heartbeat import start_heartbeat
 from circle_leads.storage.models import (
     Community,
     JoinStatus,
@@ -366,29 +367,6 @@ def check_community(
                    seen_ids=[r.get("id") for r in fresh], etag=etag_value)
 
 
-_last_beat = 0.0
-
-
-def _beat(db: Database) -> None:
-    """Record that this loop is alive, at most once a minute.
-
-    Nothing on this machine can report that the machine itself has stopped, so
-    the liveness signal has to land somewhere the outside can read -- here, the
-    same database the dashboard already talks to.
-    """
-    global _last_beat
-    now = time.monotonic()
-    if now - _last_beat < 60:
-        return
-    _last_beat = now
-    try:
-        from circle_leads.storage.settings_store import set_setting
-
-        set_setting(db, "watcher_heartbeat", _now().isoformat())
-    except Exception:  # noqa: BLE001 - a missed heartbeat is not worth a crash
-        logger.warning("could not write the watcher heartbeat", exc_info=True)
-
-
 def _community_slug(db: Database, community_id: int) -> str:
     """The slug the harvest would use, so both paths name one community."""
     with db.session() as s:
@@ -510,6 +488,19 @@ def run_watch(
     requirements = load_effective_requirements(db)
     reloaded_at = time.monotonic()
 
+    # Beside the work, not inside it: a batch of overdue communities can take
+    # longer than the watchdog's patience, and a busy poller that looks dead
+    # trains the person to ignore the alert channel.
+    cancel_beat = start_heartbeat(db, "watcher_heartbeat")
+    try:
+        _run_watch_loop(db, session, requirements, reloaded_at, tuning,
+                        use_llm=use_llm, once=once, stop=stop, on_outcome=on_outcome)
+    finally:
+        cancel_beat()
+
+
+def _run_watch_loop(db: Database, session, requirements, reloaded_at, tuning,
+                    *, use_llm: bool, once: bool, stop, on_outcome) -> None:
     while True:
         if stop is not None and stop():
             return
@@ -519,7 +510,6 @@ def run_watch(
             requirements = load_effective_requirements(db)
             reloaded_at = time.monotonic()
 
-        _beat(db)
         batch = due_states(db)
         if not batch:
             if once:
