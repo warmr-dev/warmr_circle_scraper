@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     DateTime,
     Float,
@@ -577,3 +578,61 @@ class ScanJob(Base):
     claimed_at: Mapped[datetime | None] = mapped_column(DateTime)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime)
     attempts: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class WatchMode(str, enum.Enum):
+    """How a community's feed is read, or why it is not read at all."""
+
+    ANON = "anon"        # the feed answers without a session
+    COOKIE = "cookie"    # needs the stored session
+    OFF = "off"          # closed, dead, or moved: checked once a day at most
+
+
+class WatchState(Base):
+    """Where the fast poller has got to in one community's feed.
+
+    The harvest reads everything every few hours; this reads one page of
+    ``/internal_api/home_page_posts?sort=latest`` every couple of minutes and
+    passes anything new to the same triage the harvest uses. It keeps a
+    watermark rather than a timestamp: a post is new when its id is one we have
+    not seen, which survives clock skew, a slow write, and a post edited after
+    publication. ``recent_ids`` exists because ``last_post_id`` alone is not
+    enough -- Circle can publish an id below the newest one when a draft is
+    released or a post is restored.
+    """
+
+    __tablename__ = "watch_state"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    community_id: Mapped[int] = mapped_column(
+        ForeignKey("communities.id"), unique=True, index=True
+    )
+    host: Mapped[str] = mapped_column(String(255), index=True)
+
+    mode: Mapped[str] = mapped_column(String(16), default=WatchMode.ANON.value, index=True)
+    # The busy communities are polled at the fast interval; one that has been
+    # silent for weeks is polled slowly until it posts again, which is what
+    # keeps the whole watch list inside one IP's request budget.
+    tier: Mapped[str] = mapped_column(String(16), default="fast", index=True)
+
+    last_post_id: Mapped[int | None] = mapped_column(BigInteger)
+    recent_ids: Mapped[list | None] = mapped_column(JSON, default=list)
+    etag: Mapped[str | None] = mapped_column(String(255))
+
+    next_check_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime)
+    last_new_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+    # "ok" | "not_modified" | "unauthorized" | "ratelimited" | "challenge" |
+    # "notfound" | "error" -- the same words the egress probe uses.
+    last_status: Mapped[str | None] = mapped_column(String(32), index=True)
+    last_detail: Mapped[str | None] = mapped_column(Text)
+    consecutive_errors: Mapped[int] = mapped_column(Integer, default=0)
+
+    posts_seen: Mapped[int] = mapped_column(Integer, default=0)
+    leads_found: Mapped[int] = mapped_column(Integer, default=0)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, onupdate=utcnow
+    )
