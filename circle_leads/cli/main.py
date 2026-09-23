@@ -1580,6 +1580,69 @@ def worker_cmd(ctx, poll_seconds, use_llm):
         _t.sleep(max(1, poll_seconds))
 
 
+@cli.command("watch")
+@click.option("--fast-interval", type=int, default=120, show_default=True,
+              help="Seconds between checks of a community that posts.")
+@click.option("--slow-interval", type=int, default=900, show_default=True,
+              help="Seconds between checks of one that has gone quiet.")
+@click.option("--quiet-days", type=int, default=14, show_default=True,
+              help="Days without a post before a community drops to the slow tier.")
+@click.option("--per-page", type=int, default=5, show_default=True,
+              help="Feed records per request.")
+@click.option("--use-llm/--no-llm", default=None,
+              help="Escalate ambiguous posts to the LLM (default: on if a key is set).")
+@click.option("--once", is_flag=True, help="One pass over everything due, then exit.")
+@click.option("--sync/--no-sync", default=True, show_default=True,
+              help="Create watch rows for communities that have none yet.")
+@click.pass_context
+def watch_cmd(ctx, fast_interval, slow_interval, quiet_days, per_page, use_llm, once, sync):
+    """Poll community feeds and triage new posts within a couple of minutes.
+
+    The harvest walks every space and takes hours, so a post published just
+    after it passed waits for the next run. This asks each community's
+    newest-first feed for one page, with If-None-Match, and hands anything new
+    to the same triage the harvest uses -- so one post makes one lead, whichever
+    of the two finds it first.
+
+    Run it as its own service: a harvest that takes three hours must not hold
+    up a poll that is supposed to take two minutes.
+    """
+    import signal
+
+    from circle_leads.watch import ensure_watch_rows, run_watch
+    from circle_leads.watch.poller import WatchTuning
+
+    db = ctx.obj["db"]
+    if use_llm is None:
+        use_llm = bool(os.environ.get("OPENAI_API_KEY"))
+
+    if sync:
+        created = ensure_watch_rows(db)
+        click.echo(f"Watch list: {created} community(ies) added.")
+
+    stopping = {"now": False}
+
+    def _stop(signum, _frame):
+        # Finish the community in flight, then leave: a watermark written
+        # halfway through a triage would skip the posts it had not reached.
+        click.echo(f"Signal {signum}: finishing the current community, then stopping.")
+        stopping["now"] = True
+
+    signal.signal(signal.SIGTERM, _stop)
+    signal.signal(signal.SIGINT, _stop)
+
+    tuning = WatchTuning(
+        fast_interval=fast_interval, slow_interval=slow_interval,
+        quiet_days=quiet_days, per_page=per_page,
+    )
+    click.echo(
+        f"Watching: fast every {fast_interval}s, quiet ones every {slow_interval}s, "
+        f"LLM {'on' if use_llm else 'off'}."
+    )
+    run_watch(db, tuning=tuning, use_llm=use_llm, once=once, stop=lambda: stopping["now"])
+    click.echo("Watcher stopped.")
+
+
 def main() -> None:
     cli(obj={})
 
