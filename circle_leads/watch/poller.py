@@ -283,6 +283,13 @@ def check_community(
             if not seeding:
                 fresh.append(rec)
 
+        # Seeding only needs to know where the feed is now, and every record on
+        # page one counts as new when there is no watermark yet -- so without
+        # this it walks max_pages on every community and spends five times the
+        # requests to learn one number.
+        if seeding:
+            break
+
         # A pinned post sits at the top of the feed forever, so a first page
         # that is entirely pinned says nothing about what is below it. That is
         # the only reason to look further when nothing new was found.

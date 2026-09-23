@@ -162,6 +162,29 @@ def test_first_pass_only_sets_the_watermark(db, community, monkeypatch):
 
 # --- finding new posts ----------------------------------------------------
 
+def test_the_first_pass_reads_one_page_only(db, community, monkeypatch):
+    """Seeding wants one number, not the archive.
+
+    Every record on page one counts as new when there is no watermark yet, so
+    without a guard the loop pages to max_pages on every community -- five
+    times the requests, on every community in the list, to learn where each
+    feed currently is.
+    """
+    ensure_watch_rows(db)
+    monkeypatch.setattr("circle_leads.triage.pipeline.triage_records", triage_spy([]))
+
+    pages = [
+        feed([make_record(30), make_record(29)], has_next=True),
+        feed([make_record(28), make_record(27)], has_next=True),
+    ]
+    session = FakeSession(pages)
+    check_community(db, state_for(db, community), Requirements(),
+                    session=session, tuning=WatchTuning(per_page=2))
+
+    assert len(session.calls) == 1
+    assert read_row(db, community).last_post_id == 30
+
+
 def test_a_new_post_is_triaged_once_and_moves_the_watermark(db, community, monkeypatch):
     ensure_watch_rows(db)
     calls = []
