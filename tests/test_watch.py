@@ -134,6 +134,35 @@ def test_ensure_watch_rows_picks_watched_communities(db, community):
     assert ensure_watch_rows(db) == 0
 
 
+def test_a_new_row_starts_on_the_tier_its_history_earns(db, community):
+    """Everything on the fast tier is 86 requests a minute for 173 communities.
+
+    The poller would not go faster; it would fall behind on all of them,
+    including the ones that actually post.
+    """
+    from datetime import datetime, timedelta
+
+    from circle_leads.storage.database import get_or_create_community, upsert_post
+    from circle_leads.storage.models import WatchState
+    from sqlalchemy import select
+
+    with db.session() as s:
+        quiet = get_or_create_community(s, slug="quiet", url="https://quiet.circle.so",
+                                        platform="circle", watching=True)
+        s.flush()
+        quiet_id = quiet.id
+        upsert_post(s, community_id=community, record={
+            "source_content_id": "1", "content": "We are hiring",
+            "published_at": datetime.utcnow() - timedelta(days=1)})
+
+    ensure_watch_rows(db, quiet_days=14)
+
+    with db.session() as s:
+        tiers = {r.community_id: r.tier for r in s.scalars(select(WatchState))}
+    assert tiers[community] == "fast"      # posted yesterday
+    assert tiers[quiet_id] == "slow"       # never posted
+
+
 def test_a_community_without_a_host_is_not_watched(db):
     with db.session() as s:
         s.add(Community(slug="nohost", url="https://discover.circle.so/products/x",
@@ -161,6 +190,29 @@ def test_first_pass_only_sets_the_watermark(db, community, monkeypatch):
 
 
 # --- finding new posts ----------------------------------------------------
+
+def test_the_first_pass_reads_one_page_only(db, community, monkeypatch):
+    """Seeding wants one number, not the archive.
+
+    Every record on page one counts as new when there is no watermark yet, so
+    without a guard the loop pages to max_pages on every community -- five
+    times the requests, on every community in the list, to learn where each
+    feed currently is.
+    """
+    ensure_watch_rows(db)
+    monkeypatch.setattr("circle_leads.triage.pipeline.triage_records", triage_spy([]))
+
+    pages = [
+        feed([make_record(30), make_record(29)], has_next=True),
+        feed([make_record(28), make_record(27)], has_next=True),
+    ]
+    session = FakeSession(pages)
+    check_community(db, state_for(db, community), Requirements(),
+                    session=session, tuning=WatchTuning(per_page=2))
+
+    assert len(session.calls) == 1
+    assert read_row(db, community).last_post_id == 30
+
 
 def test_a_new_post_is_triaged_once_and_moves_the_watermark(db, community, monkeypatch):
     ensure_watch_rows(db)
@@ -387,8 +439,14 @@ def test_the_fast_tier_is_checked_sooner_than_the_slow_one(db, community, monkey
     monkeypatch.setattr("circle_leads.triage.pipeline.triage_records", triage_spy([]))
     tuning = WatchTuning(fast_interval=120, slow_interval=900, jitter=0.0)
 
+    # Seed, then find a post: that promotion is what puts a community on the
+    # fast tier in the first place.
     check_community(db, state_for(db, community), Requirements(),
                     session=FakeSession([feed([make_record(30)])]), tuning=tuning)
+    check_community(db, state_for(db, community), Requirements(),
+                    session=FakeSession([feed([make_record(31), make_record(30)])]),
+                    tuning=tuning)
+    assert read_row(db, community).tier == "fast"
     fast_gap = (read_row(db, community).next_check_at
                 - read_row(db, community).last_checked_at)
 

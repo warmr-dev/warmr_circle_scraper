@@ -111,14 +111,23 @@ def _classify(resp: requests.Response) -> str:
     return f"http_{resp.status_code}"
 
 
-def ensure_watch_rows(db: Database, *, include_silent: bool = True) -> int:
+def ensure_watch_rows(db: Database, *, quiet_days: int = 14) -> int:
     """Create a watch row for every community worth polling. Returns how many.
 
     Worth polling means: a Circle community with a host, that we either watch,
     have joined, or judged a fit. A row is never deleted here -- a community
     that stops answering is switched to ``off`` so the reason stays visible.
+
+    A new row starts on the tier its own history earns. Starting everything on
+    the fast tier looks harmless and is not: 173 communities every two minutes
+    is 86 requests a minute, well past any budget we are willing to spend on
+    one address, and the poller would simply fall behind on all of them
+    instead of being on time for the ones that actually post.
     """
+    from circle_leads.storage.models import Post
+
     created = 0
+    cutoff = _now() - timedelta(days=quiet_days)
     with db.session() as s:
         rows = s.execute(
             select(Community.id, Community.host, Community.slug)
@@ -135,6 +144,14 @@ def ensure_watch_rows(db: Database, *, include_silent: bool = True) -> int:
         ).all()
         known = set(s.scalars(select(WatchState.community_id)).all())
         has_session = set(s.scalars(select(ReplaySession.host)).all())
+        recently_posted = set(
+            s.scalars(
+                select(Post.community_id)
+                .where(Post.content_type == "post")
+                .where(Post.published_at > cutoff)
+                .distinct()
+            ).all()
+        )
         for community_id, host, _slug in rows:
             if community_id in known:
                 continue
@@ -143,7 +160,7 @@ def ensure_watch_rows(db: Database, *, include_silent: bool = True) -> int:
                     community_id=community_id,
                     host=host,
                     mode=WatchMode.ANON.value,
-                    tier="fast" if include_silent else "slow",
+                    tier="fast" if community_id in recently_posted else "slow",
                     next_check_at=_now(),
                     recent_ids=[],
                 )
@@ -282,6 +299,13 @@ def check_community(
             page_new += 1
             if not seeding:
                 fresh.append(rec)
+
+        # Seeding only needs to know where the feed is now, and every record on
+        # page one counts as new when there is no watermark yet -- so without
+        # this it walks max_pages on every community and spends five times the
+        # requests to learn one number.
+        if seeding:
+            break
 
         # A pinned post sits at the top of the feed forever, so a first page
         # that is entirely pinned says nothing about what is below it. That is
