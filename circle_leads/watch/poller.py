@@ -67,6 +67,9 @@ class WatchOutcome:
     detail: str = ""
     # Seconds between the newest post's publication and this check finding it.
     lag_s: float | None = None
+    # The leads themselves, so the loop can report them without re-reading the
+    # database. Only ones that are not duplicates of a lead we already have.
+    lead_payloads: list = field(default_factory=list)
 
 
 @dataclass
@@ -343,6 +346,7 @@ def check_community(
                     newest_published = published
 
     leads = 0
+    lead_payloads: list = []
     if normalized:
         slug = _community_slug(db, state["community_id"])
         res = triage_records(
@@ -350,14 +354,39 @@ def check_community(
             community=slug, source_url=community_url, use_llm=use_llm,
         )
         leads = len(res.leads)
+        lead_payloads = [dict(p, community=slug) for p in res.new_leads]
 
     lag = None
     if newest_published is not None:
         lag = (_now() - newest_published).total_seconds()
 
-    outcome = WatchOutcome(host, "ok", new_posts=len(normalized), leads=leads, lag_s=lag)
+    outcome = WatchOutcome(host, "ok", new_posts=len(normalized), leads=leads, lag_s=lag,
+                           lead_payloads=lead_payloads)
     return _finish(db, state, outcome, tuning,
                    seen_ids=[r.get("id") for r in fresh], etag=etag_value)
+
+
+_last_beat = 0.0
+
+
+def _beat(db: Database) -> None:
+    """Record that this loop is alive, at most once a minute.
+
+    Nothing on this machine can report that the machine itself has stopped, so
+    the liveness signal has to land somewhere the outside can read -- here, the
+    same database the dashboard already talks to.
+    """
+    global _last_beat
+    now = time.monotonic()
+    if now - _last_beat < 60:
+        return
+    _last_beat = now
+    try:
+        from circle_leads.storage.settings_store import set_setting
+
+        set_setting(db, "watcher_heartbeat", _now().isoformat())
+    except Exception:  # noqa: BLE001 - a missed heartbeat is not worth a crash
+        logger.warning("could not write the watcher heartbeat", exc_info=True)
 
 
 def _community_slug(db: Database, community_id: int) -> str:
@@ -421,6 +450,39 @@ def _finish(db: Database, state: dict, outcome: WatchOutcome, tuning: WatchTunin
     return outcome
 
 
+def _report_leads(outcome: WatchOutcome) -> None:
+    """Send each new lead to Telegram. Never raises: a lead is already saved
+    and already on its way to Vini by the time we get here, so a messaging
+    failure must not look like a pipeline failure."""
+    from circle_leads.notify import escape, send
+
+    for lead in outcome.lead_payloads:
+        role = lead.get("job_title") or lead.get("hire_target") or "роль не указана"
+        parts = [f"\U0001f4e5 <b>{escape(str(role))}</b>"]
+        line = " · ".join(
+            str(x) for x in (
+                lead.get("community"),
+                lead.get("budget"),
+                lead.get("location"),
+                f"score {lead['lead_score']}" if lead.get("lead_score") is not None else None,
+            ) if x
+        )
+        if line:
+            parts.append(escape(line))
+        quote = (lead.get("evidence_quote") or "").strip()
+        if quote:
+            parts.append(f"<blockquote>{escape(quote[:300])}</blockquote>")
+        url = lead.get("url")
+        if url:
+            parts.append(f'<a href="{escape(str(url))}">открыть пост</a>')
+        if outcome.lag_s:
+            parts.append(escape(f"найдено через {outcome.lag_s:.0f} с после публикации"))
+        try:
+            send("\n".join(parts), dedup_key=f"lead:{url or role}:{lead.get('community')}")
+        except Exception:  # noqa: BLE001 - reporting must not break the loop
+            logger.exception("telegram: reporting a lead failed")
+
+
 def run_watch(
     db: Database,
     *,
@@ -457,6 +519,7 @@ def run_watch(
             requirements = load_effective_requirements(db)
             reloaded_at = time.monotonic()
 
+        _beat(db)
         batch = due_states(db)
         if not batch:
             if once:
@@ -477,6 +540,8 @@ def run_watch(
                 outcome = _finish(db, state,
                                   WatchOutcome(state["host"], "error", detail=str(exc)[:200]),
                                   tuning)
+            if outcome.lead_payloads:
+                _report_leads(outcome)
             if on_outcome is not None:
                 on_outcome(outcome)
             elif outcome.status != "not_modified":

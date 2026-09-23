@@ -1435,6 +1435,66 @@ def create_app(
         return {"by_status": by_status, "attempted_today": attempted_today,
                 "attempted_week": attempted_week, "recent": recent}
 
+    @app.get("/api/watchdog")
+    def api_watchdog(request: Request) -> dict[str, Any]:
+        """Is the server still alive? Nothing on it can answer that itself.
+
+        The worker and the watcher each stamp a heartbeat into the database.
+        This runs on Vercel, on a schedule, and shouts on Telegram when a stamp
+        goes stale -- which is the only way we hear about a droplet that has
+        stopped, run out of disk, or lost its network.
+
+        Open by design: it takes no input, returns no secrets, and Vercel's own
+        cron cannot send an Authorization header. The worst a stranger can do
+        is learn whether two timestamps are recent.
+        """
+        from datetime import datetime as _dtm
+
+        from circle_leads.notify import notify
+        from circle_leads.storage.settings_store import get_setting
+
+        # How long a stamp may be missing before it is a problem. The watcher
+        # writes one a minute and the worker once a cycle, but a harvest pass
+        # is long, so the worker gets a much wider window.
+        LIMITS = {"watcher_heartbeat": 900, "worker_heartbeat": 5400}
+
+        now = _dtm.utcnow()
+        report: dict[str, Any] = {"checked_at": now.isoformat(), "services": {}}
+        stale: list[str] = []
+        for key, limit in LIMITS.items():
+            raw = get_setting(db, key)
+            name = key.replace("_heartbeat", "")
+            if not raw:
+                report["services"][name] = {"state": "never", "age_s": None}
+                stale.append(f"{name}: никогда не отчитывался")
+                continue
+            try:
+                age = (now - _dtm.fromisoformat(raw)).total_seconds()
+            except ValueError:
+                report["services"][name] = {"state": "unreadable", "age_s": None}
+                stale.append(f"{name}: непонятная отметка времени")
+                continue
+            ok = age <= limit
+            report["services"][name] = {
+                "state": "ok" if ok else "stale",
+                "age_s": round(age),
+                "limit_s": limit,
+            }
+            if not ok:
+                stale.append(f"{name}: молчит {age / 60:.0f} мин (порог {limit // 60})")
+
+        report["ok"] = not stale
+        if stale:
+            notify(
+                "Warmr: служба молчит",
+                "\n".join(stale) + "\n\nПроверить: <code>systemctl status warmr-worker "
+                "warmr-watcher</code> на 168.144.131.38",
+                level="error",
+                # One message per hour per distinct problem, not one per cron tick.
+                dedup_key="watchdog:" + "|".join(sorted(stale)),
+            )
+        return report
+
     @app.post("/api/tick")
     @app.get("/api/tick")
     def api_tick(request: Request) -> dict[str, Any]:

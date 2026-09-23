@@ -114,13 +114,23 @@ class Requirements:
     max_post_age_days = 0
 
 
-def triage_spy(calls):
+def triage_spy(calls, leads=None):
+    """Stand in for triage_records, with the same shape the caller reads.
+
+    ``new_leads`` is a property on the real TriageResult, and the poller uses
+    it to decide what to report -- a spy without it hides that.
+    """
     def _triage(db, records, requirements, **kw):
         calls.append({"records": records, "community": kw.get("community")})
 
         class R:
-            leads = []
-            already_seen = 0
+            def __init__(self):
+                self.leads = list(leads or [])
+                self.already_seen = 0
+
+            @property
+            def new_leads(self):
+                return [x for x in self.leads if not x.get("is_duplicate")]
         return R()
     return _triage
 
@@ -464,3 +474,70 @@ def test_the_fast_tier_is_checked_sooner_than_the_slow_one(db, community, monkey
                 - read_row(db, community).last_checked_at)
 
     assert fast_gap < slow_gap
+
+
+# --- reporting ------------------------------------------------------------
+
+def test_a_new_lead_is_reported_once(db, community, monkeypatch):
+    """The lead is already saved and already on its way to Vini by then."""
+    ensure_watch_rows(db)
+    sent = []
+    monkeypatch.setattr("circle_leads.notify.send",
+                        lambda text, **kw: sent.append((text, kw.get("dedup_key"))) or True)
+    lead = {"job_title": "Flutter developer", "lead_score": 71,
+            "budget": "8k", "url": "https://example.circle.so/c/jobs/post-31",
+            "evidence_quote": "We need someone for three months",
+            "is_duplicate": False}
+    monkeypatch.setattr("circle_leads.triage.pipeline.triage_records",
+                        triage_spy([], leads=[lead]))
+    tuning = WatchTuning()
+
+    from circle_leads.watch.poller import run_watch  # noqa: F401  (import path check)
+
+    check_community(db, state_for(db, community), Requirements(),
+                    session=FakeSession([feed([make_record(30)])]), tuning=tuning)
+    out = check_community(db, state_for(db, community), Requirements(),
+                          session=FakeSession([feed([make_record(31), make_record(30)])]),
+                          tuning=tuning)
+
+    assert len(out.lead_payloads) == 1
+    from circle_leads.watch.poller import _report_leads
+    _report_leads(out)
+    assert len(sent) == 1
+    text, key = sent[0]
+    assert "Flutter developer" in text
+    assert key == "lead:https://example.circle.so/c/jobs/post-31:example"
+
+
+def test_a_duplicate_lead_is_not_reported(db, community, monkeypatch):
+    ensure_watch_rows(db)
+    lead = {"job_title": "Flutter developer", "is_duplicate": True}
+    monkeypatch.setattr("circle_leads.triage.pipeline.triage_records",
+                        triage_spy([], leads=[lead]))
+    tuning = WatchTuning()
+
+    check_community(db, state_for(db, community), Requirements(),
+                    session=FakeSession([feed([make_record(30)])]), tuning=tuning)
+    out = check_community(db, state_for(db, community), Requirements(),
+                          session=FakeSession([feed([make_record(31), make_record(30)])]),
+                          tuning=tuning)
+    assert out.lead_payloads == []
+
+
+def test_reporting_failure_does_not_break_the_poller(db, community, monkeypatch):
+    ensure_watch_rows(db)
+    lead = {"job_title": "Flutter developer", "is_duplicate": False}
+    monkeypatch.setattr("circle_leads.triage.pipeline.triage_records",
+                        triage_spy([], leads=[lead]))
+    monkeypatch.setattr("circle_leads.notify.send",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("telegram down")))
+    tuning = WatchTuning()
+
+    check_community(db, state_for(db, community), Requirements(),
+                    session=FakeSession([feed([make_record(30)])]), tuning=tuning)
+    out = check_community(db, state_for(db, community), Requirements(),
+                          session=FakeSession([feed([make_record(31), make_record(30)])]),
+                          tuning=tuning)
+    from circle_leads.watch.poller import _report_leads
+    _report_leads(out)                       # must not raise
+    assert read_row(db, community).last_post_id == 31
