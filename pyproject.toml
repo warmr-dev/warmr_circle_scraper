@@ -45,7 +45,10 @@ build-backend = "setuptools.build_meta"
 include = ["circle_leads*"]
 
 [tool.setuptools.package-data]
-circle_leads = ["web/static/**/*", "config/*.yaml"]
+# ego_join_driver.mjs is the auto-join browser script: ego_bridge reads it
+# from the installed package, so a non-editable install without it fails
+# with FileNotFoundError on the first join (hit on the worker, 2026-09-21).
+circle_leads = ["web/static/**/*", "config/*.yaml", "join/*.mjs"]
 
 # Vercel auto-detects FastAPI from pyproject.toml, then looks for a top-level
 # `app` in main.py (the CLI). Point it at the dashboard ASGI export instead.

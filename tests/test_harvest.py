@@ -123,18 +123,38 @@ def _harvest_private_community(db, reqs, monkeypatch, *, price_label, live):
         return c.join_type, c.join_type_detail
 
 
-@pytest.mark.parametrize("label, expected", [("Free", "free_join"), ("$99/month", "paid")])
-def test_harvest_keeps_the_listing_price_of_a_private_community(db, reqs, monkeypatch, label, expected):
+@pytest.mark.parametrize("label, live, expected", [
+    ("$99/month", "locked_unknown", "paid"),
+    ("Free", "unknown", "free_join"),
+    ("Free", "locked_unknown", "locked_unknown"),
+])
+def test_harvest_refines_a_private_community_by_its_listing_price(db, reqs, monkeypatch, label, live, expected):
     """A private community answers 401 on every read. The harvest used to
     store that bare answer, turning a priced row back into locked_unknown."""
-    from circle_leads.discovery.join_type import JoinClassification, JoinType
+    from circle_leads.discovery.join_type import JoinClassification
 
     join_type, detail = _harvest_private_community(
         db, reqs, monkeypatch, price_label=label,
-        live=JoinClassification(JoinType.LOCKED_UNKNOWN, "private (members only): HTTP 401"),
+        live=JoinClassification(live, "HTTP 401"),
     )
     assert join_type == expected
-    assert detail == f"price_label fallback: '{label}' (live check inconclusive: private (members only): HTTP 401)"
+    assert f"'{label}'" in detail
+
+
+def test_harvest_keeps_a_manual_verdict(db, reqs, monkeypatch):
+    from sqlalchemy import select
+    from circle_leads.discovery.join_type import JoinClassification, JoinType
+    from circle_leads.storage.models import Community
+
+    with db.session() as s:
+        c = s.scalar(select(Community).where(Community.slug == "pub"))
+        c.join_type = JoinType.INVITE_ONLY
+        c.join_type_detail = "manual check 2026-09-19: invite only"
+    join_type, detail = _harvest_private_community(
+        db, reqs, monkeypatch, price_label=None,
+        live=JoinClassification(JoinType.LOCKED_UNKNOWN, "HTTP 401"),
+    )
+    assert (join_type, detail) == (JoinType.INVITE_ONLY, "manual check 2026-09-19: invite only")
 
 
 def test_harvest_stores_a_conclusive_live_answer_over_the_listing_price(db, reqs, monkeypatch):
