@@ -127,23 +127,45 @@ def build_queues(s: Session, now: datetime, *, named) -> list[dict[str, Any]]:
     c, jt = Community, Community.join_type
     fit = c.icp_flag.is_(True)
     dead = func.coalesce(cast(c.icp_reasons, String), "").like(f"%{DEAD_HOST_MARKER}%")
+    # The same reachability filter section 2 applies, and for the same reason:
+    # a row that is not on Circle cannot be joined, read or join-type checked,
+    # so counting it as "waiting" describes work that will never happen. The
+    # join queue said 87 while section 2 said 21 for the same step -- 66 of
+    # those were marketing sites that merely had a Circle directory card, and
+    # they are what painted the queue red with "no movement for over a day".
+    on_circle = or_(c.platform.is_(None), c.platform.in_(CIRCLE_PLATFORMS))
+    # Section 2 counts all three of these as waiting to be joined; the queue
+    # counted only NOT_ATTEMPTED, so a row that had been queued or was awaiting
+    # approval vanished from the queue without having moved anywhere.
+    awaiting_join = (JoinStatus.NOT_ATTEMPTED.value, JoinStatus.QUEUED.value,
+                     JoinStatus.PENDING_APPROVAL.value)
     specs = [
         # No "name found at" column. The harvest and the join bot touch named
         # rows every few minutes, which would make a stalled name lookup look
         # busy, so their rows are left out of the proxy.
         ("name", and_(~named, ~dead), c.updated_at,
          and_(named, c.last_synced_at.is_(None), c.join_attempted_at.is_(None))),
-        ("join_type_recheck", and_(named, jt == "unknown"),
-         c.join_type_checked_at, named),
-        ("read", and_(fit, c.platform == "circle", c.last_synced_at.is_(None)),
-         c.last_synced_at, and_(fit, c.platform == "circle")),
-        ("join", and_(fit, jt == "free_join",
-                      c.join_status == JoinStatus.NOT_ATTEMPTED.value),
-         c.join_attempted_at, and_(fit, jt == "free_join")),
+        ("join_type_recheck", and_(named, on_circle, jt == "unknown"),
+         c.join_type_checked_at, and_(named, on_circle)),
+        # platform "discover" is a community found through Circle's own
+        # directory whose platform was never narrowed. It is still on Circle.
+        #
+        # A known host is required, and that is the whole point of the row: 276
+        # of these are directory cards whose real address was never worked out.
+        # They are not waiting to be read -- nothing can read an address it does
+        # not have -- they are waiting at the step above, and counting them here
+        # would both paint this queue red forever and count them twice, since
+        # almost all of them are paid cards already sitting in paid_decision.
+        ("read", and_(fit, on_circle, c.host.is_not(None),
+                      c.last_synced_at.is_(None)),
+         c.last_synced_at, and_(fit, on_circle, c.host.is_not(None))),
+        ("join", and_(fit, on_circle, jt == "free_join",
+                      c.join_status.in_(awaiting_join)),
+         c.join_attempted_at, and_(fit, on_circle, jt == "free_join")),
         # Nothing automatic decides these; the bot's paywall skip is the only
         # recorded decision.
-        ("paid_decision", and_(fit, jt == "paid"),
-         c.join_attempted_at, and_(fit, jt == "paid")),
+        ("paid_decision", and_(fit, on_circle, jt == "paid"),
+         c.join_attempted_at, and_(fit, on_circle, jt == "paid")),
     ]
     # One round trip, as elsewhere on this page.
     values = s.execute(select(*[

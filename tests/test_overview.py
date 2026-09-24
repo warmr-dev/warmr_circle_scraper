@@ -155,7 +155,12 @@ def test_named_split_and_queues(tmp_path):
     assert q["join_type_recheck"]["waiting"] == 1
     assert q["join_type_recheck"]["field"] == "join_type_checked_at"
     assert not q["join_type_recheck"]["stale"]
-    assert q["read"]["waiting"] == 2 and not q["read"]["stale"]
+    # The read queue needs a known host: nothing can read an address we do not
+    # have. _row gives every fixture community a URL, so all three ICP-fit
+    # unread rows count -- including the "paid" one, which is platform
+    # "discover" (found via Circle's own directory), not off Circle. The queue
+    # used to match platform == "circle" exactly and left those out silently.
+    assert q["read"]["waiting"] == 3 and not q["read"]["stale"]
     # One free community waits and the last join attempt was 3 days ago.
     assert q["join"]["waiting"] == 1 and q["join"]["stale"]
     # A paid community waits and no decision was ever recorded.
@@ -192,3 +197,68 @@ def test_overview_is_served_from_a_short_cache(client, monkeypatch):
     monkeypatch.setattr(web_app, "OVERVIEW_TTL_SECONDS", 0)
     client.get("/api/overview")
     assert len(calls) == 2
+
+
+# --- one page, one number --------------------------------------------------
+#
+# The queue table said 87 were "waiting to be joined" while the panel below it
+# said 21, for the same step. 66 of the difference were communities not hosted
+# on Circle at all -- marketing sites that merely had a directory card. They
+# can never be joined, so they sat in the queue forever and painted it red
+# with "no movement for over a day". The fixture's "dir-landing" row is
+# exactly that case.
+
+def _queue(payload, key):
+    return next(q for q in payload["queues"] if q["key"] == key)
+
+
+def test_the_join_queue_matches_the_panel_beside_it(client):
+    data = client.get("/api/overview").json()
+    assert _queue(data, "join")["waiting"] == data["icp_groups"]["free"]["waiting"]
+
+
+def test_the_paid_queue_matches_its_panel(client):
+    data = client.get("/api/overview").json()
+    assert _queue(data, "paid_decision")["waiting"] == data["icp_groups"]["paid"]["total"]
+
+
+def test_a_community_that_is_not_on_circle_is_in_no_queue(client):
+    """Nothing can join, read or join-type check a site that is not on Circle."""
+    data = client.get("/api/overview").json()
+    # dir-landing is ICP-fit, free_join, never attempted -- and platform
+    # "other". It must not be counted as work that is waiting.
+    assert _queue(data, "join")["waiting"] == data["icp_groups"]["free"]["waiting"]
+    assert data["icp_groups"]["excluded"]["not_on_circle"] >= 1
+
+
+def test_a_directory_community_counts_as_being_on_circle(client):
+    """platform "discover" means "found via Circle's directory", not "not Circle"."""
+    data = client.get("/api/overview").json()
+    # dir-card is platform "discover", ICP-fit, paid: it belongs to the paid
+    # group and to the paid queue, not to the excluded pile.
+    assert data["icp_groups"]["paid"]["directory_cards"] >= 1
+    assert _queue(data, "paid_decision")["waiting"] >= 1
+
+
+def test_a_community_whose_address_we_do_not_know_is_not_waiting_to_be_read(tmp_path):
+    """276 of prod's ICP-fit rows are directory cards with no host resolved.
+
+    Counting them as a read backlog painted the queue red forever and counted
+    them twice, since nearly all are paid cards already in paid_decision.
+    """
+    from circle_leads.web.overview import build_overview
+
+    db = Database(f"sqlite:///{tmp_path / 'nohost.db'}")
+    now = utcnow().replace(tzinfo=None)
+    with db.session() as s:
+        carded = _row(s, "card", source="circle_directory", name="C",
+                      platform="discover", join_type="paid", icp=True)
+        carded.host = None
+        carded.url = "https://discover.circle.so/products/card"
+        reachable = _row(s, "reach", source="circle_directory", name="R",
+                         join_type="free_join", icp=True)
+        reachable.host = "reach.circle.so"
+
+    with db.session() as s:
+        q = {x["key"]: x for x in build_overview(s, now)["queues"]}
+    assert q["read"]["waiting"] == 1
