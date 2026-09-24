@@ -238,6 +238,28 @@ def _match_host(candidates: list[dict], host: str) -> list[dict]:
     return exact if exact else [c for c in candidates if host in (c["url"] or "")]
 
 
+def join_queue_conditions() -> tuple:
+    """SQL conditions for a community the bot should try to join.
+
+    Free communities only. A paid community is never joined -- the bot does not
+    pay -- so it stays out of the queue instead of spending a visit to land on
+    a checkout page; it is read only when a member session for it already
+    exists. On Circle includes "discover" (found through Circle's own directory,
+    platform never narrowed) and NULL (added before the platform column), but
+    only with a real address: a directory card whose host was never resolved
+    points at discover.circle.so/products/..., which is Circle's storefront and
+    not the community, and every visit there ended "unclear" on 2026-09-21.
+    """
+    return (
+        Community.icp_flag.is_(True),
+        or_(Community.platform.is_(None), Community.platform.in_(("circle", "discover"))),
+        Community.host.is_not(None),
+        Community.host != "discover.circle.so",
+        Community.join_type == "free_join",
+        Community.join_status.in_(_QUEUE_STATUSES),
+    )
+
+
 def select_join_candidates(
     db: Database,
     *,
@@ -268,12 +290,7 @@ def select_join_candidates(
                 Community.id, Community.slug, Community.url, Community.name,
                 Community.join_type, Community.icp_score, Community.join_status,
             )
-            .where(
-                Community.icp_flag.is_(True),
-                Community.platform == "circle",
-                Community.join_type.in_(["free_join", "paid"]),
-                Community.join_status.in_(_QUEUE_STATUSES),
-            )
+            .where(*join_queue_conditions())
             .order_by(Community.icp_score.desc())
         )
         if host:

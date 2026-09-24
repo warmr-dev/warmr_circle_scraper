@@ -102,10 +102,23 @@ def test_orders_by_icp_score_descending_and_respects_limit():
     assert [c["slug"] for c in joiner.select_join_candidates(db, limit=1)] == ["high"]
 
 
-def test_paid_join_type_is_included():
+def test_paid_communities_are_never_queued():
+    # The bot does not pay, so a paid community's only visit ever ended on a
+    # checkout page. It is read only if a member session for it exists.
     db = _db()
-    _seed(db, "paid-one", join_type="paid", icp_score=5)
-    assert [c["slug"] for c in joiner.select_join_candidates(db)] == ["paid-one"]
+    _seed(db, "paid-one", join_type="paid", icp_score=50)
+    _seed(db, "free-one", join_type="free_join", icp_score=5)
+    assert [c["slug"] for c in joiner.select_join_candidates(db)] == ["free-one"]
+
+
+def test_a_directory_card_without_a_real_address_is_not_queued():
+    # discover.circle.so/products/... is Circle's storefront, not the
+    # community: every such visit on 2026-09-21 ended "unclear".
+    db = _db()
+    _seed(db, "card", url="https://discover.circle.so/products/card", icp_score=50)
+    _seed(db, "listed", platform="discover", url="https://www.listed.com/?utm_source=circle_discover")
+    _seed(db, "legacy", platform=None, url="https://community.legacy.com")
+    assert sorted(c["slug"] for c in joiner.select_join_candidates(db)) == ["legacy", "listed"]
 
 
 # --- pacing --------------------------------------------------------------------
@@ -191,7 +204,8 @@ def test_joined_with_cookies_wires_the_host_into_replay_store(monkeypatch):
     # scanning.py), which is exactly the gap that left 24 real joins from
     # this project's own sessions producing zero scraped leads.
     db = _db()
-    _seed(db, "a", icp_score=20, url="https://discover.circle.so/products/a", name="A Community")
+    _seed(db, "a", icp_score=20, url="https://www.a-community.com/join?invitation_token=t",
+          name="A Community")
 
     cookies = [{"name": "_circle_session", "value": "s3cr3t", "domain": "a-real-host.circle.so"}]
     monkeypatch.setattr(joiner, "open_join_space", lambda name, **kw: 1)
@@ -209,9 +223,9 @@ def test_joined_with_cookies_wires_the_host_into_replay_store(monkeypatch):
 
     joiner.run_auto_join(db)
 
-    # The candidate's stored url is a discover.circle.so listing page -- the
-    # cookie's own domain (the page's actual final host after any redirect)
-    # is what gets connected, not that listing URL's host.
+    # The candidate's stored url is the community's own join link, which
+    # redirects -- the cookie's own domain (the page's actual final host after
+    # any redirect) is what gets connected, not the stored URL's host.
     assert seen["host"] == "a-real-host.circle.so"
     assert seen["cookies"] == cookies
     # member_label is "who you're signed in as" (models.CircleConnection) --
