@@ -587,3 +587,32 @@ def test_the_running_poller_picks_up_communities_added_after_it_started(db, monk
     with db.session() as s:
         hosts = set(s.scalars(select(WatchState.host)).all())
     assert "late.circle.so" in hosts
+
+
+def test_the_loop_survives_its_own_five_minute_reload(db, monkeypatch):
+    """The branch that only runs after 300s crashed with a NameError.
+
+    run_watch was one function with its imports local to it. Splitting the
+    loop into _run_watch_loop left the reload call site looking at a name that
+    did not exist in its own scope -- so the service started cleanly, ran for
+    five minutes, and died. Every five minutes. The tests all passed because
+    `once=True` returned before the timer ever expired.
+    """
+    from circle_leads.watch import poller
+
+    # Every reading of the clock jumps a long way, so the first pass through
+    # the loop is already past both the 300s config reload and the resync.
+    ticks = iter([10_000 + 1_000 * n for n in range(50)])
+    monkeypatch.setattr(poller.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(poller, "due_states", lambda _db: [])
+
+    reloads = []
+    import circle_leads.storage.settings_store as store
+
+    real = store.load_effective_requirements
+    monkeypatch.setattr(
+        store, "load_effective_requirements",
+        lambda d: (reloads.append(1), real(d))[1])
+
+    poller.run_watch(db, once=True)          # must not raise
+    assert reloads, "the reload branch never ran, so this test proves nothing"
