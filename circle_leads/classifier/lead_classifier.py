@@ -1,9 +1,12 @@
 """Orchestrates the classification layers.
 
 Flow:
-  rules -> confident? use it.
-         -> uncertain and an LLM is available? escalate.
-         -> otherwise fall back to the rule verdict and mark it for review.
+  rules -> a confident NOT_LEAD (negation, job seeker, low score)? use it.
+         -> anything else and an LLM is available? the model describes the
+            post and ai_classifier.LEAD_RULE decides.
+         -> no model, or no usable answer from it: the rule verdict, which
+            files a lead only when the post names software work. Callers
+            hold it for review when a model was asked and stayed silent.
 """
 
 from __future__ import annotations
@@ -24,7 +27,7 @@ from circle_leads.config.settings import Requirements
 
 logger = logging.getLogger(__name__)
 
-RULES_VERSION = "rules-v1"
+RULES_VERSION = "rules-v2"
 
 # Rule scores at or beyond these bounds are decisive on their own.
 RULE_CONFIDENT_LEAD = 35
@@ -45,6 +48,9 @@ class ClassificationResult:
     seeker_matches: list[str] = field(default_factory=list)
     disqualifiers: list[str] = field(default_factory=list)
     extracted: dict[str, Any] = field(default_factory=dict)
+    # The model's description the lead rule decided on (author_role, wants,
+    # work_type, work_mode, summary). Empty when the rules decided.
+    described: dict[str, str] = field(default_factory=dict)
     # Set when a model was asked and gave no usable verdict (an outage, spent
     # credits, a quote it could not back up), so the rules decided instead.
     # Callers hold such a verdict for review rather than act on it.
@@ -140,8 +146,13 @@ def classify(
         result.llm_error = (verdict.error or verdict.reason or "no verdict")[:200]
         logger.debug("LLM inconclusive; falling back to rules")
 
-    # Rule-only verdict.
-    result.classification = "LEAD" if rules.score >= lead_cutoff else "NOT_LEAD"
+    # Rule-only verdict. It answers to the same lead rule as the model, as
+    # far as patterns can see it: hiring language is not enough, the post
+    # must also name software work. Without that, "we are hiring" filed an
+    # office manager, a Google Ads expert and a venture-studio CEO.
+    hiring = rules.score >= lead_cutoff
+    software = keyword_rules.requests_software_work(text)
+    result.classification = "LEAD" if hiring and software else "NOT_LEAD"
     result.confidence = _rule_confidence(rules.score)
     result.decided_by = "rules"
     result.classifier_version = RULES_VERSION
@@ -149,6 +160,11 @@ def classify(
         result.reason = f"Hiring intent detected: {', '.join(rules.hiring_matches[:3])}."
         result.evidence_quote = _first_sentence_with_intent(text, rules.hiring_matches)
         result.extracted = extract_all(text, requirements.target_skills)
+    elif hiring:
+        result.reason = (
+            f"Hiring intent ({', '.join(rules.hiring_matches[:3])}), "
+            "but no software work named."
+        )
     else:
         result.reason = (
             f"No sufficient hiring intent (rule score {rules.score})."
@@ -171,6 +187,7 @@ def _from_ai(
     result.decided_by = "llm"
     result.classifier_version = CLASSIFIER_VERSION
     result.evidence_quote = verdict.evidence_quote
+    result.described = dict(verdict.described)
     if verdict.disqualifiers:
         result.disqualifiers = list(
             dict.fromkeys(result.disqualifiers + verdict.disqualifiers)
@@ -211,6 +228,14 @@ def meets_requirements(
         return False
     if result.confidence < requirements.minimum_confidence:
         return False
+    # A lead the model described has passed the lead rule, and the rule has
+    # already asked for software work while leaving the kind of hire open.
+    # The configured roles and skills name buyer personas and every service
+    # category, and are matched exactly: checked again here they would only
+    # drop software hires whose title or stack is not on the list -- a
+    # full-time "Senior Go Engineer" with skills ["Go", "gRPC"].
+    if result.described:
+        return True
     if not requirements.target_roles and not requirements.target_skills:
         return True
 

@@ -30,6 +30,12 @@ class StubBackend:
 POST = "We are a startup and are looking for a senior backend engineer to build the API."
 
 
+def described(author_role="buyer", wants="employee", work_type="software", **extra):
+    """A model reply in the describe-only format; the rule decides from it."""
+    return {"author_role": author_role, "wants": wants, "work_type": work_type,
+            "work_mode": "remote", "confidence": 0.9, **extra}
+
+
 def test_verify_evidence_accepts_verbatim_span():
     assert verify_evidence("looking for a senior backend engineer", POST)
 
@@ -45,28 +51,24 @@ def test_verify_evidence_rejects_invented_quote():
 
 def test_lead_with_fabricated_evidence_is_downgraded():
     """A LEAD the model cannot ground in real words must not be trusted."""
-    backend = StubBackend({
-        "classification": "LEAD",
-        "confidence": 0.99,
-        "reason": "They are hiring.",
-        "evidence_quote": "we have a budget of $500,000",  # not in the post
-    })
+    backend = StubBackend(described(
+        confidence=0.99,
+        evidence_quote="we have a budget of $500,000",  # not in the post
+    ))
     verdict = classify_with_llm(POST, backend)
     assert verdict.classification == "UNCERTAIN"
     assert "unverified_evidence" in verdict.disqualifiers
 
 
 def test_unsupported_budget_and_company_are_dropped():
-    backend = StubBackend({
-        "classification": "LEAD",
-        "confidence": 0.95,
-        "reason": "Hiring.",
-        "evidence_quote": "looking for a senior backend engineer",
-        "budget": "$250,000",        # never stated in the post
-        "company": "Globex Corp",    # never stated in the post
-        "job_title": "Backend Engineer",
-        "skills": ["Python"],
-    })
+    backend = StubBackend(described(
+        confidence=0.95,
+        evidence_quote="looking for a senior backend engineer",
+        budget="$250,000",        # never stated in the post
+        company="Globex Corp",    # never stated in the post
+        job_title="Backend Engineer",
+        skills=["Python"],
+    ))
     verdict = classify_with_llm(POST, backend)
     assert verdict.classification == "LEAD"
     assert verdict.budget is None
@@ -87,15 +89,14 @@ def test_backend_exception_is_contained():
 
 
 def test_json_in_code_fence_is_parsed():
-    raw = '```json\n{"classification": "NOT_LEAD", "confidence": 0.9, "reason": "seeker"}\n```'
+    raw = ('```json\n{"author_role": "job_seeker", "wants": "employee", '
+           '"work_type": "software", "confidence": 0.9}\n```')
     verdict = classify_with_llm(POST, StubBackend(raw))
     assert verdict.classification == "NOT_LEAD"
 
 
 def test_confidence_is_clamped():
-    backend = StubBackend({
-        "classification": "NOT_LEAD", "confidence": 5.0, "reason": "x",
-    })
+    backend = StubBackend(described(author_role="seller", confidence=5.0))
     assert classify_with_llm(POST, backend).confidence == 1.0
 
 
@@ -114,8 +115,8 @@ def test_llm_can_overrule_a_confident_rules_lead():
     # 2026-09-19: the LLM confirmed only 15 of 46 leads the rules filed on
     # their own; the rest (articles, intros, job seekers) went to Vini anyway.
     reqs = load_requirements()
-    backend = StubBackend({"classification": "NOT_LEAD", "confidence": 0.9,
-                           "reason": "An article about hiring, not a request."})
+    backend = StubBackend(described(author_role="other", wants="nothing",
+                                    summary="An article about hiring, not a request."))
     result = classify("We are hiring a Flutter developer for our team.", reqs, llm=backend)
     assert result.classification == "NOT_LEAD"
     assert result.decided_by == "llm"
