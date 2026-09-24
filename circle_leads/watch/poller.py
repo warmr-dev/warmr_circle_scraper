@@ -518,6 +518,13 @@ def run_watch(
 
 def _run_watch_loop(db: Database, session, requirements, reloaded_at, tuning,
                     *, use_llm: bool, once: bool, stop, on_outcome) -> None:
+    # Imported here, not inherited from run_watch: this used to be one function
+    # and the import was local to it. Splitting the loop out left this call
+    # site looking at a name that does not exist in its own scope, and because
+    # it only runs once the 300s reload timer expires, the service started
+    # cleanly and died five minutes later, every five minutes.
+    from circle_leads.storage.settings_store import load_effective_requirements
+
     # Sync on the first pass, then on a timer. Without this the watch list is
     # whatever the last `watch --sync` built: the service does not pass that
     # flag, so discovery and the ICP pass fed a list the poller never re-read.

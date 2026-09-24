@@ -38,6 +38,22 @@ logger = logging.getLogger(__name__)
 
 USER_AGENT = "circle-leads/0.1 (community discovery; public pages only)"
 
+
+class BackendUnavailable(Exception):
+    """This backend cannot serve us at all -- move to the next one.
+
+    Distinct from "no results" and from a transient blip. Raised only for the
+    answers that will not change on a retry a minute later: a key that is
+    rejected, or an account with nothing left to spend.
+    """
+
+
+# 401/403: the key is wrong or revoked. 402: out of credits -- which is what
+# Exa returned in prod for two days while discovery quietly found nothing,
+# because choose_backend picks the first *configured* backend and the failure
+# was logged as the exception class name with no status attached.
+DEAD_BACKEND_CODES = frozenset({401, 402, 403})
+
 # Query templates. {q} is the user's niche, e.g. "flutter developer".
 DEFAULT_QUERY_TEMPLATES = [
     "{q} community where members hire developers and freelancers",
@@ -139,7 +155,10 @@ class ExaBackend:
                 json=body,
                 timeout=30,
             )
+            _raise_if_dead("exa", resp)
             resp.raise_for_status()
+        except BackendUnavailable:
+            raise
         except requests.RequestException as exc:
             logger.warning("Exa search failed: %s", exc.__class__.__name__)
             return []
@@ -193,6 +212,7 @@ class BraveBackend:
             params={"q": query, "count": count},
             timeout=20,
         )
+        _raise_if_dead("brave", resp)
         resp.raise_for_status()
         out = []
         for item in resp.json().get("web", {}).get("results", []):
@@ -219,6 +239,7 @@ class SerpApiBackend:
             params={"q": query, "num": count, "api_key": self._key, "engine": "google"},
             timeout=25,
         )
+        _raise_if_dead("serpapi", resp)
         resp.raise_for_status()
         out = []
         for item in resp.json().get("organic_results", []):
@@ -275,16 +296,102 @@ def _unwrap_ddg(href: str) -> str:
     return href
 
 
+def _raise_if_dead(name: str, resp: requests.Response) -> None:
+    """Turn a terminal HTTP answer into BackendUnavailable, with its message."""
+    if resp.status_code not in DEAD_BACKEND_CODES:
+        return
+    detail = (resp.text or "")[:200].replace("\n", " ")
+    raise BackendUnavailable(f"{name}: HTTP {resp.status_code} {detail}")
+
+
+class ChainBackend:
+    """Every configured backend in order, falling through the dead ones.
+
+    choose_backend used to return the first backend that had a key and stop
+    there. When Exa's credits ran out it answered 402 to every query, the
+    error was swallowed into an empty result list, and discovery found
+    nothing for two days with a free keyless backend sitting right behind it.
+
+    A backend that fails terminally is dropped for the life of the process --
+    a key does not un-revoke and credits do not reappear mid-run -- and the
+    first time that happens a human is told, because a search backend going
+    silent is otherwise indistinguishable from the web having no answers.
+    """
+
+    name = "chain"
+
+    def __init__(self, backends: list[SearchBackend]):
+        self._backends = list(backends)
+        self._dead: set[str] = set()
+
+    @property
+    def live(self) -> list[str]:
+        return [getattr(b, "name", "?") for b in self._backends
+                if getattr(b, "name", "?") not in self._dead]
+
+    def search(self, query: str, *, count: int = 10) -> list[SearchResult]:
+        for backend in self._backends:
+            name = getattr(backend, "name", "?")
+            if name in self._dead:
+                continue
+            try:
+                results = backend.search(query, count=count)
+            except BackendUnavailable as exc:
+                self._dead.add(name)
+                logger.error("search backend %s is out: %s", name, exc)
+                _alert_backend_down(name, str(exc), self.live)
+                continue
+            except requests.RequestException as exc:
+                # Transient: keep the backend, but let the next one answer now.
+                logger.warning("search backend %s failed: %s",
+                               name, exc.__class__.__name__)
+                continue
+            if results:
+                return results
+        return []
+
+    def find_similar(self, url: str, *, count: int = 10) -> list[SearchResult]:
+        for backend in self._backends:
+            if getattr(backend, "name", "?") in self._dead:
+                continue
+            similar = getattr(backend, "find_similar", None)
+            if similar is None:
+                continue
+            try:
+                results = similar(url, count=count)
+            except (BackendUnavailable, requests.RequestException):
+                continue
+            if results:
+                return results
+        return []
+
+
+def _alert_backend_down(name: str, detail: str, still_live: list[str]) -> None:
+    try:
+        from circle_leads.notify import notify
+
+        notify(
+            f"Поиск: {name} больше не отвечает",
+            f"{detail}\n\nОсталось: {', '.join(still_live) or 'ничего'}",
+            level="error",
+            dedup_key=f"search-backend-down:{name}",
+        )
+    except Exception:  # noqa: BLE001 - an alert must never break discovery
+        logger.warning("could not send the search-backend alert", exc_info=True)
+
+
 def choose_backend(session: requests.Session | None = None) -> SearchBackend | None:
-    """Pick the first configured backend, or None if only fetching directories."""
+    """Every configured backend, best first, with the keyless one last."""
+    backends: list[SearchBackend] = []
     if key := os.environ.get("EXA_API_KEY"):
-        return ExaBackend(key, session, include_domains=["circle.so"])
+        backends.append(ExaBackend(key, session, include_domains=["circle.so"]))
     if key := os.environ.get("BRAVE_API_KEY"):
-        return BraveBackend(key, session)
+        backends.append(BraveBackend(key, session))
     if key := os.environ.get("SERPAPI_API_KEY"):
-        return SerpApiBackend(key, session)
-    # Keyless fallback -- may be rate-limited, so it is last.
-    return DuckDuckGoBackend(session)
+        backends.append(SerpApiBackend(key, session))
+    # Keyless, may be rate-limited, so it is the last resort rather than absent.
+    backends.append(DuckDuckGoBackend(session))
+    return ChainBackend(backends)
 
 
 def _fetch(url: str, session: requests.Session, timeout: int = 20) -> str:
