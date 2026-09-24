@@ -1,10 +1,12 @@
--- P8a — backfill communities.platform
+-- P8a — add + backfill communities.platform
 -- ============================================================================
--- The `platform` column is added automatically by Database._ensure_columns()
--- on the next worker/dashboard start. This backfills the 138 existing rows so
--- the harvest's platform gate (`platform = 'circle'`) has values to read; until
--- then those rows fall back to the old URL-shape check, so running this is not
--- urgent, only tidy.
+-- Database._ensure_columns() also adds this column on the next worker/dashboard
+-- start, but this migration adds it itself (IF NOT EXISTS) so it can be run
+-- before the deploy. Both are idempotent -- order doesn't matter.
+--
+-- Backfills the 138 existing rows so the harvest's platform gate
+-- (`platform = 'circle'`) has values to read. Until a row has a value the
+-- harvest falls back to the old URL-shape check, so this is tidy, not urgent.
 --
 -- Buckets (verified against the 2026-09-10 snapshot):
 --   circle        98 single-label *.circle.so + 4 custom Circle domains
@@ -14,6 +16,8 @@
 -- ============================================================================
 
 BEGIN;
+
+ALTER TABLE communities ADD COLUMN IF NOT EXISTS platform VARCHAR(32);
 
 -- discover.circle.so/products/* -> a listing, real host not resolved yet
 UPDATE communities SET platform = 'discover'
