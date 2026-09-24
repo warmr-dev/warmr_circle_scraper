@@ -27,6 +27,17 @@ DEFAULT_SCHEDULE = "twice_daily"
 
 KEY_SCHEDULE = "harvest_schedule"
 KEY_LAST_RUN = "harvest_last_run"
+# Written when a harvest reaches the end. Without it, a harvest that is
+# interrupted -- and on a stock Ubuntu box the daily unattended-upgrade
+# restarts our services mid-run -- is indistinguishable from one that
+# finished, because the start was already recorded. Prod spent two days that
+# way: a harvest began, apt restarted the worker seconds later, and the next
+# attempt waited the full six hours.
+KEY_LAST_FINISH = "harvest_last_finish"
+# How soon to try again after an interrupted harvest. Long enough that a
+# harvest which crashes on startup cannot spin, short enough that a restart
+# does not cost a whole schedule interval.
+RETRY_AFTER_INTERRUPT_MINUTES = 10
 
 
 def get_setting(db: Database, key: str, default: str | None = None) -> str | None:
@@ -127,6 +138,11 @@ def is_harvest_due(db: Database, *, now: datetime | None = None) -> bool:
 
     The worker calls this: if the schedule is 'off' -> never; otherwise compares
     the interval against the recorded last-run time.
+
+    A harvest that started but never reached the end is also due again, after
+    ``RETRY_AFTER_INTERRUPT_MINUTES``. The start is recorded before the work so
+    a crash loop cannot hammer the schedule, but treating that stamp as proof
+    of a completed harvest is how an interrupted run cost a full interval.
     """
     schedule = get_schedule(db)
     minutes = _schedule_minutes(schedule)
@@ -136,12 +152,26 @@ def is_harvest_due(db: Database, *, now: datetime | None = None) -> bool:
     last = _parse_ts(get_setting(db, KEY_LAST_RUN))
     if last is None:
         return True  # never run
-    return now - last >= timedelta(minutes=minutes)
+    if now - last >= timedelta(minutes=minutes):
+        return True
+
+    finished = _parse_ts(get_setting(db, KEY_LAST_FINISH))
+    interrupted = finished is None or finished < last
+    if interrupted:
+        return now - last >= timedelta(minutes=RETRY_AFTER_INTERRUPT_MINUTES)
+    return False
 
 
 def mark_harvest_run(db: Database, *, now: datetime | None = None) -> None:
+    """Record that a harvest has STARTED."""
     now = now or datetime.now(timezone.utc).replace(tzinfo=None)
     set_setting(db, KEY_LAST_RUN, now.isoformat())
+
+
+def mark_harvest_finished(db: Database, *, now: datetime | None = None) -> None:
+    """Record that a harvest reached the end. Only then does it count as done."""
+    now = now or datetime.now(timezone.utc).replace(tzinfo=None)
+    set_setting(db, KEY_LAST_FINISH, now.isoformat())
 
 
 # --- Discovery (web-search) sub-schedule ----------------------------------
@@ -263,6 +293,61 @@ def is_icp_classification_due(db: Database, *, now: datetime | None = None) -> b
 def mark_icp_classification_run(db: Database, *, now: datetime | None = None) -> None:
     now = now or datetime.now(timezone.utc).replace(tzinfo=None)
     set_setting(db, KEY_ICP_LAST_RUN, now.isoformat())
+
+
+# --- Join-type re-check sub-schedule ---------------------------------------
+#
+# classify_join_type_pending (discovery/join_type.py) asks a community's own
+# API whether it is free, paid or invite-only. It is plain HTTP, no browser,
+# so the server can run it -- but nothing ever scheduled it, and it only ran
+# when someone typed the CLI command. On the machine that moved to the server
+# it simply stopped: 446 named communities sat at join_type "unknown" for
+# days, which keeps them out of every downstream queue because nothing knows
+# whether we could get in.
+
+KEY_JOIN_TYPE = "join_type_schedule"
+KEY_JOIN_TYPE_LAST_RUN = "join_type_last_run"
+DEFAULT_JOIN_TYPE_SCHEDULE = "every_6h"
+
+_JOIN_TYPE_SCHEDULES = _NAMED_SCHEDULES | {"every_run"}
+
+
+def get_join_type_schedule(db: Database) -> str:
+    return get_setting(db, KEY_JOIN_TYPE, DEFAULT_JOIN_TYPE_SCHEDULE) or DEFAULT_JOIN_TYPE_SCHEDULE
+
+
+def set_join_type_schedule(db: Database, schedule: str) -> None:
+    if schedule.startswith("custom:"):
+        if _schedule_minutes(schedule) is None:
+            raise ValueError(
+                f"Invalid custom schedule {schedule!r}; use custom:<hours> or "
+                f"custom:<n>m (e.g. custom:5m)"
+            )
+    elif schedule not in _JOIN_TYPE_SCHEDULES:
+        raise ValueError(
+            f"Unknown join-type schedule {schedule!r}; choose from "
+            f"{sorted(_JOIN_TYPE_SCHEDULES)} or custom:<hours> / custom:<n>m"
+        )
+    set_setting(db, KEY_JOIN_TYPE, schedule)
+
+
+def is_join_type_check_due(db: Database, *, now: datetime | None = None) -> bool:
+    schedule = get_join_type_schedule(db)
+    if schedule == "every_run":
+        return True
+    minutes = _schedule_minutes(schedule)
+    if minutes is None:
+        return False  # 'off'
+    now = now or datetime.now(timezone.utc).replace(tzinfo=None)
+    last = _parse_ts(get_setting(db, KEY_JOIN_TYPE_LAST_RUN))
+    if last is None:
+        return True  # never run
+    return now - last >= timedelta(minutes=minutes)
+
+
+def mark_join_type_check_run(db: Database, *, now: datetime | None = None) -> None:
+    now = now or datetime.now(timezone.utc).replace(tzinfo=None)
+    set_setting(db, KEY_JOIN_TYPE_LAST_RUN, now.isoformat())
 
 
 # --- Lead requirements override (stored in the DB, not the file) -----------

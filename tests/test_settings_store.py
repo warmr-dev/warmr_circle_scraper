@@ -69,8 +69,13 @@ def test_due_again_after_interval(db):
 
 
 def test_daily_not_due_after_a_few_hours(db):
+    from circle_leads.storage.settings_store import mark_harvest_finished
+
     set_schedule(db, "daily")
     mark_harvest_run(db)
+    # A harvest counts as done only once it reaches the end; a start with no
+    # finish is an interrupted run and becomes due again shortly.
+    mark_harvest_finished(db)
     soon = datetime.utcnow() + timedelta(hours=3)
     assert is_harvest_due(db, now=soon) is False
 
@@ -82,9 +87,12 @@ def test_generic_setting_roundtrip(db):
 
 
 def test_custom_schedule(db):
+    from circle_leads.storage.settings_store import mark_harvest_finished
+
     set_schedule(db, "custom:3")
     assert get_schedule(db) == "custom:3"
     mark_harvest_run(db)
+    mark_harvest_finished(db)
     soon = datetime.utcnow() + timedelta(hours=2)
     later = datetime.utcnow() + timedelta(hours=4)
     assert is_harvest_due(db, now=soon) is False    # < 3h
@@ -300,3 +308,74 @@ def test_load_effective_requirements_ignores_a_corrupt_override(db):
     set_setting(db, REQUIREMENTS_KEY, "{not valid json")
     req = load_effective_requirements(db)
     assert req.max_post_age_days == 365  # fell back to defaults
+
+
+# --- an interrupted harvest must not count as a finished one ---------------
+#
+# A stock Ubuntu box runs unattended-upgrades daily and needrestart restarts
+# every service whose libraries changed. In prod that killed the worker eight
+# seconds after a harvest began. The start was already recorded, so the
+# schedule believed the harvest had run and waited the full six hours; two
+# days passed with no completed harvest and no new community found.
+
+def test_a_harvest_that_finished_waits_the_full_interval(db):
+    from circle_leads.storage.settings_store import (
+        is_harvest_due, mark_harvest_finished, mark_harvest_run, set_schedule,
+    )
+
+    set_schedule(db, "every_6h")
+    now = datetime(2026, 9, 24, 12, 0, 0)
+    mark_harvest_run(db, now=now)
+    mark_harvest_finished(db, now=now + timedelta(minutes=30))
+
+    assert not is_harvest_due(db, now=now + timedelta(hours=1))
+    assert not is_harvest_due(db, now=now + timedelta(hours=5))
+    assert is_harvest_due(db, now=now + timedelta(hours=6, minutes=1))
+
+
+def test_an_interrupted_harvest_is_due_again_soon(db):
+    from circle_leads.storage.settings_store import (
+        RETRY_AFTER_INTERRUPT_MINUTES, is_harvest_due, mark_harvest_run, set_schedule,
+    )
+
+    set_schedule(db, "every_6h")
+    now = datetime(2026, 9, 24, 12, 0, 0)
+    mark_harvest_run(db, now=now)          # started ...
+    # ... and killed: no finish stamp ever written.
+
+    # Not instantly, or a harvest that dies on startup would spin.
+    assert not is_harvest_due(db, now=now + timedelta(minutes=1))
+    assert is_harvest_due(
+        db, now=now + timedelta(minutes=RETRY_AFTER_INTERRUPT_MINUTES + 1))
+
+
+def test_a_stale_finish_stamp_does_not_count_for_a_later_run(db):
+    """Finish from the previous harvest, start from one that was then killed."""
+    from circle_leads.storage.settings_store import (
+        is_harvest_due, mark_harvest_finished, mark_harvest_run, set_schedule,
+    )
+
+    set_schedule(db, "every_6h")
+    base = datetime(2026, 9, 24, 6, 0, 0)
+    mark_harvest_run(db, now=base)
+    mark_harvest_finished(db, now=base + timedelta(minutes=20))
+    mark_harvest_run(db, now=base + timedelta(hours=6))   # killed seconds later
+
+    assert is_harvest_due(db, now=base + timedelta(hours=6, minutes=15))
+
+
+def test_the_join_type_check_has_its_own_schedule(db):
+    from circle_leads.storage.settings_store import (
+        DEFAULT_JOIN_TYPE_SCHEDULE, is_join_type_check_due,
+        mark_join_type_check_run, set_join_type_schedule,
+    )
+
+    assert DEFAULT_JOIN_TYPE_SCHEDULE == "every_6h"
+    now = datetime(2026, 9, 24, 12, 0, 0)
+    assert is_join_type_check_due(db, now=now)        # never run
+    mark_join_type_check_run(db, now=now)
+    assert not is_join_type_check_due(db, now=now + timedelta(hours=5))
+    assert is_join_type_check_due(db, now=now + timedelta(hours=6, minutes=1))
+
+    set_join_type_schedule(db, "off")
+    assert not is_join_type_check_due(db, now=now + timedelta(days=7))

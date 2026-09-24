@@ -268,6 +268,14 @@ def fetch_join_classification(
     return classification
 
 
+# Hosts one *scheduled* (unattended) join-type pass may check. Each row is an
+# HTTP GET to a different Circle host, sharing the per-IP budget with reads
+# that can actually produce a lead, so an unbounded pass over a fresh
+# directory crawl would starve the poller. 100 every six hours clears a
+# 446-row backlog in about a day.
+SCHEDULED_BATCH = 100
+
+
 def classify_join_type_pending(
     db, *, limit: int | None = None, recheck: bool = False
 ) -> dict[str, int]:
