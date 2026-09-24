@@ -351,7 +351,13 @@ def _triage_posts(
             lead.evidence_quote = classification.evidence_quote
             lead.lead_score = score
             lead.priority = priority
-            lead.score_breakdown = breakdown
+            # The model's description the lead rule decided on rides along in
+            # the breakdown: it has no column, and a reviewer needs it to see
+            # why the post was filed.
+            lead.score_breakdown = (
+                {**breakdown, "described": classification.described}
+                if classification.described else breakdown
+            )
             lead.duplicate_of_id = duplicate_lead_id
             lead.job_title = extracted.get("job_title")
             lead.skills = extracted.get("skills") or []

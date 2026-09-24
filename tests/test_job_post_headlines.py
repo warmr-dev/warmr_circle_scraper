@@ -17,12 +17,24 @@ def reqs():
 @pytest.mark.parametrize("text", [
     "Senior Data/Analytics Engineer (Contract)",
     "2x DevOps/Platform Engineers needed for our platform",
-    "Snowflake, dbt, Sigma freelancers wanted for a 3-month build",
     "Snowflake Developer Contract Opportunity - Dublin (Hybrid)",
-    "Sigma Experts Wanted",
 ])
 def test_hiring_headlines_are_leads(reqs, text):
     assert classify(text, reqs, llm=None).classification == "LEAD"
+
+
+@pytest.mark.parametrize("text", [
+    "Snowflake, dbt, Sigma freelancers wanted for a 3-month build",
+    "Sigma Experts Wanted",
+])
+def test_tool_only_headlines_are_left_to_the_model(reqs, text):
+    # The headline grammar still reads a hire here, so a model is asked. The
+    # rules alone cannot tell Sigma from a Google Ads account, and since
+    # 2026-09-24 they file only hires that name software work.
+    result = classify(text, reqs, llm=None)
+    assert result.rule_score >= 35
+    assert result.classification == "NOT_LEAD"
+    assert "no software work named" in result.reason
 
 
 @pytest.mark.parametrize("text", [
