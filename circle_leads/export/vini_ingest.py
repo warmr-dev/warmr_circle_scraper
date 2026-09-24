@@ -64,7 +64,7 @@ class PushResult:
 # "skipped"/"duplicate" are the endpoint's words for "already have this one",
 # which is a success from here -- re-sending forever would not help.
 LANDED_STATUSES = frozenset(
-    {"inserted", "accepted", "skipped", "ok", "duplicate", "success"}
+    {"inserted", "created", "accepted", "skipped", "ok", "duplicate", "success"}
 )
 
 # "held" is its own thing: the endpoint took the lead but parked it, so the
@@ -104,6 +104,34 @@ def _iso_utc(value: datetime | None) -> str | None:
     return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _message_token(post: Post) -> str:
+    raw = (post.source_content_id or "").strip()
+    return raw.split(":")[-1] or str(post.id)
+
+
+def _message_id(community: Community, post: Post) -> str:
+    """Identity the portal stores on the ingress receipt.
+
+    Re-sending the same id returns the previous decision and does not insert
+    a second row. A community homepage is not a message id: posts that only
+    have that URL still need their own id, or they never leave the hold for
+    ``missing_root_message_identity``.
+    """
+    return f"circle:{community.slug}:lead:{_message_token(post)}"
+
+
+def _post_url(url: str, token: str) -> str:
+    """One URL is one lead on the portal.
+
+    Several posts stored with the community homepage collapse into the first
+    of them (``lead_duplicate:exact``). A URL that is not already a Circle
+    post permalink gets a stable path so each post is its own row.
+    """
+    if "/c/" in url:
+        return url
+    return f"{url.rstrip('/')}/c/post/{token}"
+
+
 def lead_to_ingest_payload(
     lead: Lead,
     post: Post,
@@ -116,36 +144,44 @@ def lead_to_ingest_payload(
     if not url or not content:
         return None
 
-    # The portal parks a lead that has a display name and no stable author id
+    # The portal parks a lead with no source_author_id
     # ("missing_source_author_identity", filed as decision "invalid_timestamp").
-    # A name alone is not an identity: the parsers that land always send
-    # source_author_id. Without one there is nothing to POST.
-    author_id = ""
-    if author and (author.source_author_id or "").strip():
-        author_id = author.source_author_id.strip()
-    if not author_id:
-        return None
-
-    community_name = (community.name or community.slug or "").strip() or "Circle"
+    # A Circle member id is best. Posts scraped before that id was stored still
+    # have a display name; that name, scoped to the community, is enough for
+    # the check. With neither, there is nothing to POST.
     name = None
     if author and (author.display_name or "").strip():
         name = author.display_name.strip()
     elif (lead.company or "").strip():
         name = lead.company.strip()
+    author_id = ""
+    if author and (author.source_author_id or "").strip():
+        author_id = author.source_author_id.strip()
+    elif name:
+        author_id = f"circle:{community.slug}:{name.lower()}"
+    if not author_id:
+        return None
 
-    external_id = (
-        f"circle:{community.slug}:{post.content_type}:{post.source_content_id}"
-    )
+    community_name = (community.name or community.slug or "").strip() or "Circle"
+    token = _message_token(post)
+    external_id = _message_id(community, post)
+    posted_at = _iso_utc(post.published_at) or _iso_utc(lead.created_at)
     payload: dict[str, Any] = {
-        "url": url,
+        "url": _post_url(url, token),
         "community": community_name,
         "content": content,
-        "posted_at": _iso_utc(post.published_at) or _iso_utc(lead.created_at),
+        "posted_at": posted_at,
+        # The portal files a missing event time as invalid_timestamp, and
+        # refuses one older than 48 hours. This is the post's own time.
+        "source_event_at": posted_at,
+        "delivery_mode": "live",
         "intent_type": DEFAULT_INTENT_TYPE,
         "platform": PLATFORM,
         "parser": PARSER_NAME,
         "external_id": external_id,
         "source_author_id": author_id,
+        "root_message_id": external_id,
+        "source_message_id": external_id,
     }
     if name:
         payload["name"] = name
@@ -264,7 +300,7 @@ def push_leads_by_ids(
             result.skipped += 1
             logger.warning(
                 "Skipping lead %s for Vini ingest: missing url, content, "
-                "or source_author_id",
+                "or an author name",
                 lead.id,
             )
             continue
@@ -444,11 +480,6 @@ def push_unsynced_leads(
         .where(Lead.classification == "LEAD")
         .where(Lead.duplicate_of_id.is_(None))
         .where(Lead.external_synced_at.is_(None))
-        # A display name with no Circle member id is what the portal parks.
-        # Leave those rows unsynced, but do not let them fill the batch: the
-        # next read that learns the id is what makes them sendable.
-        .where(Author.source_author_id.is_not(None))
-        .where(Author.source_author_id != "")
         .order_by(Lead.id.asc())
     )
     if limit:

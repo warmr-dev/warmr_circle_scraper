@@ -92,22 +92,53 @@ def test_payload_shape(db):
         "content": "Looking for an agency to rebuild our app.",
         "name": "Dana Ops",
         "posted_at": "2026-09-07T10:00:00Z",
+        "source_event_at": "2026-09-07T10:00:00Z",
+        "delivery_mode": "live",
         "intent_type": "explicit",
         "platform": "circle",
         "parser": PARSER_NAME,
-        "external_id": "circle:acme:post:post-1",
+        "external_id": "circle:acme:lead:post-1",
         "source_author_id": "42",
+        "root_message_id": "circle:acme:lead:post-1",
+        "source_message_id": "circle:acme:lead:post-1",
     }
 
 
-def test_payload_without_author_id_is_not_sent(db):
-    """A display name is what the portal calls missing_source_author_identity."""
+def test_a_display_name_stands_in_for_a_missing_member_id(db):
+    """The portal rejects a lead with no source_author_id. A Circle member id
+    is not always on the row; the name scoped to the community is enough."""
     lead_id = _seed_lead(db)
     with db.session() as s:
         lead = s.get(Lead, lead_id)
         post = s.get(Post, lead.post_id)
         author = s.get(Author, post.author_id)
         author.source_author_id = None
+        community = s.get(Community, post.community_id)
+        payload = lead_to_ingest_payload(lead, post, community, author)
+    assert payload is not None
+    assert payload["source_author_id"] == "circle:acme:dana ops"
+
+
+def test_a_community_homepage_is_not_the_post_url(db):
+    """Posts that share the community homepage collapse into one lead."""
+    lead_id = _seed_lead(db, url="https://acme.circle.so")
+    with db.session() as s:
+        lead = s.get(Lead, lead_id)
+        post = s.get(Post, lead.post_id)
+        community = s.get(Community, post.community_id)
+        author = s.get(Author, post.author_id)
+        payload = lead_to_ingest_payload(lead, post, community, author)
+    assert payload["url"] == "https://acme.circle.so/c/post/post-1"
+
+
+def test_payload_without_author_name_or_id_is_not_sent(db):
+    lead_id = _seed_lead(db)
+    with db.session() as s:
+        lead = s.get(Lead, lead_id)
+        post = s.get(Post, lead.post_id)
+        author = s.get(Author, post.author_id)
+        author.source_author_id = None
+        author.display_name = None
         community = s.get(Community, post.community_id)
         assert lead_to_ingest_payload(lead, post, community, author) is None
 
@@ -318,7 +349,7 @@ def test_a_refused_lead_is_tried_again(db, monkeypatch):
         assert s.get(Lead, ids[0]).external_synced_at is not None
 
 
-@pytest.mark.parametrize("status", ["inserted", "accepted", "held", "skipped"])
+@pytest.mark.parametrize("status", ["inserted", "created", "accepted", "held", "skipped"])
 def test_the_statuses_that_count_as_delivered(db, monkeypatch, status):
     ids, result = _push_with(db, monkeypatch, [{"status": status}])
     assert result.sent == 1, status
