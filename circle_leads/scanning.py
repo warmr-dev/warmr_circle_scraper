@@ -14,13 +14,13 @@ import logging
 import time
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from circle_leads.config.settings import Requirements
 from circle_leads.storage.activity import log_activity
 from circle_leads.storage.database import Database
 from circle_leads.storage.models import (
-    CircleConnection, ConnectionPriority, ConnectionState, ReplaySession,
+    CircleConnection, Community, ConnectionPriority, ConnectionState, ReplaySession,
     SCAN_ORDER,
 )
 
@@ -36,6 +36,26 @@ def cookie_hosts_vip_first(db: Database) -> list[str]:
                 and c.priority != ConnectionPriority.PAUSED.value]
         rows.sort(key=lambda c: (SCAN_ORDER.get(c.priority, 1), c.host))
         return [c.host for c in rows]
+
+
+# How far a re-read looks back past the previous complete read: a comment on a
+# week-old post is still worth catching, and an edit or a slow clock can put a
+# post a little behind the stamp.
+RESCAN_OVERLAP = _dt.timedelta(days=7)
+
+
+def _rescan_since(db: Database, host: str) -> _dt.datetime | None:
+    """Where a re-read of ``host`` may start: its last complete, successful
+    scan minus RESCAN_OVERLAP. None -- read everything -- before the first
+    scan, and after a failed, partial or empty one."""
+    with db.session() as s:
+        conn = s.scalar(select(CircleConnection).where(CircleConnection.host == host))
+        if (conn is None or conn.last_sync_at is None
+                or conn.state != ConnectionState.CONNECTED.value
+                or "partial" in (conn.state_detail or "")
+                or not conn.spaces_readable):
+            return None
+        return conn.last_sync_at - RESCAN_OVERLAP
 
 
 def scan_cookie_host(db: Database, requirements: Requirements, host: str, *,
@@ -64,6 +84,7 @@ def scan_cookie_host(db: Database, requirements: Requirements, host: str, *,
     # unrelated communities onto one row and discards the second URL -- silently.
     slug = unique_slug_for_host(host)
     cookies = {c["name"]: c["value"] for c in (load_cookies(db, host) or [])}
+    since = _rescan_since(db, host)
     state = ConnectionState.CONNECTED
     detail = ""
     total = readable = spaces_total = leads = 0
@@ -91,7 +112,7 @@ def scan_cookie_host(db: Database, requirements: Requirements, host: str, *,
                     recs = fetch_space_posts(
                         reader, sp["id"], max_pages=max_pages,
                         with_comments=with_comments, max_comment_posts=cap,
-                        space_slug=sp.get("slug"))
+                        space_slug=sp.get("slug"), since=since)
                 except SessionInvalid:
                     continue
                 if not recs:
@@ -136,6 +157,12 @@ def scan_cookie_host(db: Database, requirements: Requirements, host: str, *,
         conn.spaces_readable = readable
         conn.spaces_total = spaces_total
         conn.last_sync_at = _dt.datetime.utcnow()
+        if state == ConnectionState.CONNECTED and spaces_total and not partial:
+            # A complete member read is a read. Only the public harvest used to
+            # stamp one, so a community read every six hours with its session
+            # (community.freelancemvp.com) sat on the dashboard as never read.
+            s.execute(update(Community).where(Community.host == host)
+                      .values(last_synced_at=conn.last_sync_at))
         log_activity(
             s, kind="ingest",
             level="warning" if state != ConnectionState.CONNECTED

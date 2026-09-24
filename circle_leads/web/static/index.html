@@ -1215,7 +1215,7 @@ const FUNNEL_STEPS = [
   ['alive', 'Responded', 'The community really exists: it is listed in Circle\'s own directory, or its page returned a name, or it told us how to join. A generic "login required" reply does not count, because Circle sends that even for addresses that do not exist.', 'found'],
   ['named', 'Named', 'We know the community\'s name. Without a name there is nothing to judge, so these are the only ones we can check against the profile.', 'alive'],
   ['live', 'Live', 'Named, and the community\'s own site confirmed how to get in: free to join, paid, invite only, or a login screen. Not counted: named communities whose owner stopped paying for Circle (the site no longer works), and those we have not re-checked since finding the name.', 'named'],
-  ['icp', 'ICP fit', 'The community\'s audience matches the ideal customer profile (ICP): founders and business owners who hire developers. Not counted: communities not hosted on Circle, and communities whose owner stopped paying for Circle.', 'named'],
+  ['icp', 'ICP fit', 'The community\'s audience matches the ideal customer profile (ICP): founders and business owners who hire developers. Not counted: communities not hosted on Circle, communities whose owner stopped paying for Circle, and paid communities we have no login for (listed in section 2).', 'named'],
   ['read', 'Read', 'ICP-fit communities whose posts we have read at least once.', 'icp'],
   ['posts', 'Posts', 'Posts and comments saved from all communities we have read.'],
   ['leads', 'Leads', 'Posts where someone wants to hire or pay for software or development work.'],
@@ -1260,14 +1260,12 @@ function renderFunnel(f) {
 const QUEUES = {
   name: ['Waiting for a name', 'Communities we have no name for yet. Addresses already found to be dead are not counted.',
     'Last change to a named community we have not read or joined yet: there is no separate "name found" time.'],
-  join_type_recheck: ['Waiting for a join-type re-check', 'Named communities whose join type is still unknown.',
+  join_type_recheck: ['Waiting for a join-type re-check', 'Named communities whose join type is still unknown and that another check could still settle. Communities that have left Circle are not counted: nothing is waiting there.',
     'Last join-type check of a named community.'],
-  read: ['Waiting to be read', 'ICP-fit communities on Circle whose posts we have never read.',
-    'Last time an ICP-fit community on Circle was read.'],
-  join: ['Waiting to be joined', 'ICP-fit communities that are free to join and that our bot has not tried yet.',
+  read: ['Waiting to be read', 'ICP-fit communities we can read and have never read: free ones, and paid ones only where we have a login. Paid communities without a login are listed in section 2 and are not read.',
+    'Last time an ICP-fit community we can read was read, with a login or without.'],
+  join: ['Waiting to be joined', 'ICP-fit, free-to-join communities at a known address that our bot will try. Paid communities are never joined.',
     'Last join attempt on an ICP-fit, free-to-join community.'],
-  paid_decision: ['Waiting for a decision on payment', 'ICP-fit communities that charge for membership. We do not pay to join without a decision.',
-    'Last recorded decision on a paid ICP-fit community.'],
 };
 function renderQueues(list) {
   const rows = list.map(q => {
@@ -1283,18 +1281,23 @@ function renderQueues(list) {
 }
 
 function renderIcp(g) {
+  const optional = (label, n) => (n ? [[label, n]] : []);
   const groups = [
     ['var(--high)', 'Free to join', g.free.total,
       'Anyone can join for free. Our bot joins these automatically, then we read them.',
-      [['Joined', g.free.joined], ['Waiting to be joined', g.free.waiting],
-       ['Asked for payment at sign-up', g.free.hit_paywall], ...(g.free.failed ? [['Join failed', g.free.failed]] : [])]],
-    ['var(--medium)', 'Paid', g.paid.total,
-      'Membership costs money. We do not pay to join, so these can only be read if they have public posts.',
-      [['Directory listings without a community address yet', g.paid.directory_cards], ['Paid communities on Circle', g.paid.on_circle]]],
+      [['Joined, or read with a saved login', g.free.joined], ['Waiting to be joined', g.free.waiting],
+       ...optional('Waiting for the community to approve us', g.free.pending_approval),
+       ['Asked for payment at sign-up', g.free.hit_paywall],
+       ...optional('Directory listing without a community address yet', g.free.no_address),
+       ...optional('Join did not work', g.free.failed)]],
     ['var(--low)', 'Closed or unclear', g.closed.total,
       'We could not see how to get in: the community only shows a login screen, is invite-only, or did not answer our check.',
       [['Login screen only', g.closed.locked], ['Invite only', g.closed.invite_only], ['Could not check yet', g.closed.unclear]]],
   ];
+  if (g.paid.with_session) {
+    groups.push(['var(--medium)', 'Paid, with a login', g.paid.with_session,
+      'Paid communities we hold a working login for (one someone bought). Read like any other.', []]);
+  }
   const total = g.total || 1;
   $('ov-icp').innerHTML = `
     <div class="meta" style="margin-bottom:4px"><b style="color:var(--ink);font-size:15px">${fmtN(g.total)}</b> ICP-fit communities we can pursue</div>
@@ -1306,7 +1309,14 @@ function renderIcp(g) {
         <ul>${items.map(([l, v]) => `<li><span>${l}</span><b>${fmtN(v)}</b></li>`).join('')}</ul>
       </div>`).join('')}</div>
     <p class="meta" style="margin:12px 0 0">Not counted above: ${fmtN(g.excluded.not_on_circle)} ICP-fit communities that are not hosted on Circle,
-      and ${fmtN(g.excluded.subscription_expired)} whose owner's Circle plan has lapsed (the site no longer works).</p>`;
+      and ${fmtN(g.excluded.subscription_expired)} whose owner's Circle plan has lapsed (the site no longer works).</p>
+    <details class="ov-paid" style="margin-top:12px">
+      <summary class="meta"><b style="color:var(--ink)">${fmtN(g.paid.without_session)}</b> paid ICP-fit communities without a login: listed only.
+        We do not pay to join, and we do not read them unless someone buys access and we save the login.</summary>
+      <ul style="margin:8px 0 0;padding-left:18px;font-size:13px;columns:2;column-gap:24px">${
+        (g.paid.items || []).filter(i => !i.has_session).map(i => `<li><a href="${esc(i.url)}" target="_blank" rel="noopener">${esc(i.name)}</a>${
+          i.price ? ` <span class="muted">${esc(i.price)}</span>` : ''}</li>`).join('')}</ul>
+    </details>`;
 }
 
 const CONN_BUCKETS = {

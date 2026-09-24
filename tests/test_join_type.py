@@ -483,3 +483,125 @@ def test_classify_join_type_pending_recheck_touches_already_checked_rows(monkeyp
     with db.session() as s:
         row = s.scalar(select(Community).where(Community.slug == "already-checked"))
         assert row.join_type == JoinType.FREE_JOIN  # overwritten by the recheck
+
+
+# --- a custom domain Circle no longer serves ----------------------------------
+#
+# 269 of the 443 communities stuck at "unknown" on 2026-09-24 failed the TLS
+# handshake on their own domain, whose DNS still pointed at <slug>.circle.so:
+# the community had dropped the custom domain and lives on at the Circle host.
+
+
+class TlsFailingSession(RoutedStubSession):
+    """The custom domain fails the handshake; the Circle host answers."""
+
+    def __init__(self, dead_host, routes):
+        super().__init__(routes)
+        self._dead = dead_host
+
+    def get(self, url, **kw):
+        if self._dead in url:
+            import requests
+            self.calls.append(url)
+            raise requests.exceptions.SSLError("handshake failure")
+        return super().get(url, **kw)
+
+
+FREE_PAYLOAD = {"is_private": False, "allow_signups_to_public_community": True,
+                "has_non_draft_paywalls": False, "name": "SaaS Alliance"}
+
+
+def test_a_dead_custom_domain_is_followed_to_its_circle_host(monkeypatch):
+    monkeypatch.setattr(join_type_module, "circle_host_behind",
+                        lambda host: "future-of-saas.circle.so")
+    session = TlsFailingSession("futureofsaas.io",
+                                {"future-of-saas.circle.so": StubResp(200, FREE_PAYLOAD)})
+    c = fetch_join_classification("community.futureofsaas.io", session=session)
+    assert c.join_type == JoinType.FREE_JOIN
+    assert c.moved_to == "future-of-saas.circle.so"
+    assert "no longer served" in c.detail
+
+
+def test_a_dead_custom_domain_with_nothing_behind_it_is_terminal(monkeypatch):
+    monkeypatch.setattr(join_type_module, "circle_host_behind", lambda host: None)
+    session = TlsFailingSession("gone.example", {})
+    c = fetch_join_classification("community.gone.example", session=session)
+    assert c.join_type == JoinType.UNKNOWN and c.moved_to is None
+    assert c.detail.startswith("custom domain no longer served")
+
+
+def test_a_circle_host_that_fails_tls_is_not_followed(monkeypatch):
+    def boom(host):
+        raise AssertionError("no CNAME lookup for a *.circle.so host")
+
+    monkeypatch.setattr(join_type_module, "circle_host_behind", boom)
+    c = fetch_join_classification("x.circle.so", session=TlsFailingSession("x.circle.so", {}))
+    assert c.detail.startswith("request failed: SSLError")
+
+
+def _unknown(s, slug, url, *, detail, days_ago=3, icp=False, name="n"):
+    from datetime import timedelta
+
+    from circle_leads.storage.models import utcnow
+
+    c = get_or_create_community(s, slug=slug, url=url)
+    c.name, c.icp_flag, c.join_type, c.join_type_detail = name, icp, JoinType.UNKNOWN, detail
+    c.join_type_checked_at = utcnow() - timedelta(days=days_ago)
+    return c
+
+
+def test_the_scheduled_pass_rechecks_unknowns_it_can_still_change(monkeypatch):
+    """The first version took never-checked rows by id -- and every one of the
+    443 rows the dashboard counted had been checked once already."""
+    db = _db()
+    with db.session() as s:
+        _unknown(s, "tls", "https://community.tls.io", detail="request failed: SSLError", icp=True)
+        _unknown(s, "legacy", "https://legacy.circle.so", detail=None)
+        _unknown(s, "fresh", "https://fresh.circle.so", detail="HTTP 500", days_ago=0)
+        _unknown(s, "gone", "https://gone.circle.so",
+                 detail="host no longer maps to a community (redirects to circle.so marketing site)")
+        _unknown(s, "site", "https://www.site.com", detail="non-JSON response")
+        get_or_create_community(s, slug="card", url="https://discover.circle.so/products/card")
+
+    seen = []
+    monkeypatch.setattr(join_type_module, "fetch_join_classification",
+                        lambda host, session=None: seen.append(host) or JoinClassification(
+                            JoinType.INVITE_ONLY, "no public signup, no paywall detected"))
+    stats = classify_join_type_pending(db, scheduled=True)
+    # ICP-fit first; not the fresh answer, the dead ones, or a directory card.
+    assert seen == ["community.tls.io", "legacy.circle.so"]
+    assert stats["checked"] == 2
+
+
+def test_a_moved_community_is_repointed_to_its_circle_host(monkeypatch):
+    db = _db()
+    with db.session() as s:
+        _unknown(s, "saas", "https://community.futureofsaas.io",
+                 detail="request failed: SSLError", icp=True)
+    monkeypatch.setattr(join_type_module, "fetch_join_classification",
+                        lambda host, session=None: JoinClassification(
+                            JoinType.FREE_JOIN, "open (at future-of-saas.circle.so ...)",
+                            moved_to="future-of-saas.circle.so"))
+    stats = classify_join_type_pending(db, scheduled=True)
+    assert stats["moved"] == 1
+    with db.session() as s:
+        row = s.scalar(select(Community).where(Community.slug == "saas"))
+        assert (row.host, row.url, row.join_type) == (
+            "future-of-saas.circle.so", "https://future-of-saas.circle.so", JoinType.FREE_JOIN)
+
+
+def test_a_moved_community_already_on_file_is_left_as_a_dead_copy(monkeypatch):
+    db = _db()
+    with db.session() as s:
+        _unknown(s, "saas", "https://community.futureofsaas.io",
+                 detail="request failed: SSLError", icp=True)
+        get_or_create_community(s, slug="future-of-saas", url="https://future-of-saas.circle.so")
+    monkeypatch.setattr(join_type_module, "fetch_join_classification",
+                        lambda host, session=None: JoinClassification(
+                            JoinType.FREE_JOIN, "open", moved_to="future-of-saas.circle.so"))
+    classify_join_type_pending(db, scheduled=True)
+    with db.session() as s:
+        row = s.scalar(select(Community).where(Community.slug == "saas"))
+        assert row.host == "community.futureofsaas.io"
+        assert row.join_type == JoinType.UNKNOWN
+        assert row.join_type_detail.startswith("custom domain no longer served")

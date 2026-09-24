@@ -32,6 +32,7 @@ from datetime import datetime, timedelta, timezone
 import requests
 from sqlalchemy import or_, select
 
+from circle_leads.reach import readable
 from circle_leads.storage.database import Database
 from circle_leads.storage.heartbeat import start_heartbeat
 from circle_leads.storage.models import (
@@ -58,10 +59,6 @@ RECENT_IDS_KEPT = 200
 
 CHALLENGE_MARKERS = ("__cf_chl_", "cf-chl-", "<title>just a moment", "verifying you are a human")
 
-# Platforms that mean "this is a Circle community". "discover" is one found
-# through Circle's own directory whose platform was never narrowed; it is on
-# Circle just the same. Kept identical to web.overview.CIRCLE_PLATFORMS.
-CIRCLE_PLATFORMS = ("circle", "discover")
 
 # How often the running poller re-reads which communities are worth watching.
 # The list used to be built only by `watch --sync`, which the service does not
@@ -146,14 +143,14 @@ def ensure_watch_rows(db: Database, *, quiet_days: int = 14) -> int:
     with db.session() as s:
         rows = s.execute(
             select(Community.id, Community.host, Community.slug)
-            # "discover" is a community found through Circle's own directory
-            # whose platform was never narrowed to "circle". It is still a
-            # Circle community, and the rest of the codebase says so
-            # (overview.CIRCLE_PLATFORMS). Matching only "circle" here quietly
-            # left out eight ICP-fit communities, three of them with posts
-            # already read and a stored session.
-            .where(Community.platform.in_(CIRCLE_PLATFORMS))
-            .where(Community.host.is_not(None))
+            # The reading rule the harvest and the join bot share
+            # (circle_leads/reach.py). Matching platform == "circle" alone
+            # once left out eight ICP-fit communities found through Circle's
+            # directory; matching ("circle", "discover") still left out every
+            # row older than the platform column -- among them the seven
+            # busiest communities we hold a session for. And no paid
+            # community without a login.
+            .where(readable())
             .where(
                 or_(
                     Community.watching.is_(True),

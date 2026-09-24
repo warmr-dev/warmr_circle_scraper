@@ -27,6 +27,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 
 import requests
 
@@ -148,8 +149,12 @@ class MemberApiReader:
         return out
 
     def list_posts(self, space_id: str | int, *, per_page: int = 20,
-                   max_pages: int = 10) -> list[dict]:
-        """Posts in a space, paginated."""
+                   max_pages: int = 10, newer_than: datetime | None = None) -> list[dict]:
+        """Posts in a space, paginated, newest first.
+
+        ``newer_than`` stops at the first page holding nothing newer: the rest
+        was read last time. A post with no date counts as new.
+        """
         records: list[dict] = []
         for pageno in range(1, max_pages + 1):
             path = (f"/internal_api/spaces/{space_id}/posts"
@@ -162,6 +167,8 @@ class MemberApiReader:
                 break
             records.extend(batch)
             if isinstance(payload, dict) and not payload.get("has_next_page"):
+                break
+            if newer_than is not None and not any(_is_newer(r, newer_than) for r in batch):
                 break
             time.sleep(self.request_pause)
         return records
@@ -223,12 +230,18 @@ def _comment_author(record: dict) -> dict:
     }
 
 
+def _is_newer(record: dict, since: datetime) -> bool:
+    when = parse_timestamp(record.get("created_at") or record.get("published_at"))
+    return when is None or when >= since
+
+
 def fetch_space_posts(reader: MemberApiReader, space_id: str | int, *,
                       excluded_content: list[str] | None = None,
                       max_pages: int = 10,
                       with_comments: bool = True,
                       max_comment_posts: int = 25,
-                      space_slug: str | None = None) -> list[dict]:
+                      space_slug: str | None = None,
+                      since: datetime | None = None) -> list[dict]:
     """Read + normalize a space's posts (and their comments + replies) for the
     lead pipeline. Same record shape as the browser reader, so callers are
     interchangeable.
@@ -236,11 +249,19 @@ def fetch_space_posts(reader: MemberApiReader, space_id: str | int, *,
     ``with_comments`` also pulls comments and their replies for up to
     ``max_comment_posts`` posts -- hiring intent often lives in a comment
     ("DM me", "we're looking for…") as much as the post body.
+
+    ``since`` makes it a re-read: pages stop once they hold nothing newer, and
+    comments are fetched only for posts that new. The posts list carries no
+    ``comments_count``, so without it every scan fetched the comments of the
+    first 25 posts of every space again -- on 2026-09-23/24 one pass over the
+    ~40 stored sessions took eleven hours, asaporg alone two.
     """
     community_url = reader.base
     records: list[dict] = []
-    posts = reader.list_posts(space_id, max_pages=max_pages)
+    posts = reader.list_posts(space_id, max_pages=max_pages, newer_than=since)
     for i, record in enumerate(posts):
+        if since is not None and not _is_newer(record, since):
+            continue  # read last time; a page can hold both
         pid = _post_id(record)
         if pid is None:
             continue

@@ -1637,7 +1637,7 @@ def worker_cmd(ctx, poll_seconds, use_llm):
                         classify_join_type_pending,
                     )
 
-                    jt = classify_join_type_pending(db, limit=JOIN_TYPE_BATCH)
+                    jt = classify_join_type_pending(db, limit=JOIN_TYPE_BATCH, scheduled=True)
                     click.echo(f"  scheduled join-type check: {jt}")
             except Exception as exc:  # noqa: BLE001
                 click.echo(
