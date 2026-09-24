@@ -601,7 +601,18 @@ def harvest(
         )
 
     _register_monitored_communities(db)
+    _drain_unsynced_leads(db)
     return result
+
+
+def _drain_unsynced_leads(db: Database) -> None:
+    """Send leads left unsynced, including ones parked for a missing author id."""
+    try:
+        from circle_leads.export.vini_ingest import drain_unsynced_leads
+
+        drain_unsynced_leads(db)
+    except Exception as exc:  # noqa: BLE001 - the sync must never break a harvest
+        logger.warning("Vini retry failed: %s", exc)
 
 
 def _register_monitored_communities(db: Database) -> None:

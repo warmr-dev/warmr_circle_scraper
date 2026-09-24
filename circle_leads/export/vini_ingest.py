@@ -21,7 +21,7 @@ import requests
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from circle_leads.storage.models import Author, Community, Lead, Post, utcnow
+from circle_leads.storage.models import Author, Community, Lead, Post, Setting, utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -68,11 +68,18 @@ LANDED_STATUSES = frozenset(
 )
 
 # "held" is its own thing: the endpoint took the lead but parked it, so the
-# client does not see it. Retrying cannot clear a hold -- only fixing what the
-# hold complains about can -- so a held lead is marked as sent AND reported.
+# client does not see it. A hold whose cause a retry cannot change is marked
+# as sent AND reported, so we do not POST the same body forever.
+# "missing_source_author_identity" is the exception: the portal files it under
+# decision "invalid_timestamp", and it clears once the body carries
+# source_author_id. Stamping that one is how a lead stayed parked after the
+# id was already sitting on the author row.
 # Observed holds: {"status": "held", "decision": "invalid_timestamp",
 # "holdReason": "missing_source_author_identity"}.
 HELD_STATUS = "held"
+AUTHOR_IDENTITY_HOLD = "missing_source_author_identity"
+# One-shot: leads stamped synced before the payload carried source_author_id.
+RESEND_WITH_AUTHOR_KEY = "vini_author_identity_resend"
 
 
 def load_vini_ingest_config() -> ViniIngestConfig:
@@ -109,6 +116,16 @@ def lead_to_ingest_payload(
     if not url or not content:
         return None
 
+    # The portal parks a lead that has a display name and no stable author id
+    # ("missing_source_author_identity", filed as decision "invalid_timestamp").
+    # A name alone is not an identity: the parsers that land always send
+    # source_author_id. Without one there is nothing to POST.
+    author_id = ""
+    if author and (author.source_author_id or "").strip():
+        author_id = author.source_author_id.strip()
+    if not author_id:
+        return None
+
     community_name = (community.name or community.slug or "").strip() or "Circle"
     name = None
     if author and (author.display_name or "").strip():
@@ -128,6 +145,7 @@ def lead_to_ingest_payload(
         "platform": PLATFORM,
         "parser": PARSER_NAME,
         "external_id": external_id,
+        "source_author_id": author_id,
     }
     if name:
         payload["name"] = name
@@ -245,7 +263,9 @@ def push_leads_by_ids(
         if payload is None:
             result.skipped += 1
             logger.warning(
-                "Skipping lead %s for Vini ingest: missing url or content", lead.id
+                "Skipping lead %s for Vini ingest: missing url, content, "
+                "or source_author_id",
+                lead.id,
             )
             continue
         payloads.append(payload)
@@ -277,15 +297,21 @@ def push_leads_by_ids(
             result.outcomes.get(status or "(no status)", 0) + 1
         )
         if status == HELD_STATUS:
-            # Parked, not delivered. Stamp it so we do not retry a hold that a
-            # retry cannot clear, but record why so a human can act.
-            lead.external_synced_at = synced_at
-            result.sent += 1
+            # Parked, not delivered. Record why so a human can act.
             reason = " ".join(
                 str(item.get(k)) for k in ("decision", "holdReason", "hold_reason")
                 if item.get(k)
             )
             result.held.append((lead.id, reason[:300]))
+            sent_identity = bool((payloads[index] or {}).get("source_author_id"))
+            if AUTHOR_IDENTITY_HOLD in reason and not sent_identity:
+                # The body can still be fixed. Leave it unsynced so the next
+                # push sends source_author_id instead of parking it again.
+                continue
+            # Any other hold, or this one after we already sent the id: a
+            # retry of the same body will not clear it.
+            lead.external_synced_at = synced_at
+            result.sent += 1
             continue
         if status in LANDED_STATUSES:
             lead.external_synced_at = synced_at
@@ -353,6 +379,53 @@ def _alert_rejected(result: PushResult) -> None:
         logger.warning("could not send the Vini rejection alert", exc_info=True)
 
 
+def release_leads_sent_without_author_identity(session: Session) -> int:
+    """Unstamp leads the portal parked for a missing author id.
+
+    Runs once. A lead already in ``leads`` comes back as a duplicate, which
+    counts as delivered. A lead that was only parked is sent again, this time
+    with ``source_author_id``. Leads whose author still has no id stay put:
+    there is nothing new to send until a later read fills the id in.
+    """
+    if session.get(Setting, RESEND_WITH_AUTHOR_KEY) is not None:
+        return 0
+    leads = list(session.scalars(
+        select(Lead)
+        .join(Post, Lead.post_id == Post.id)
+        .join(Author, Post.author_id == Author.id)
+        .where(Lead.classification == "LEAD")
+        .where(Lead.duplicate_of_id.is_(None))
+        .where(Lead.external_synced_at.is_not(None))
+        .where(Author.source_author_id.is_not(None))
+        .where(Author.source_author_id != "")
+    ).all())
+    for lead in leads:
+        lead.external_synced_at = None
+    session.add(Setting(key=RESEND_WITH_AUTHOR_KEY, value="1"))
+    session.flush()
+    if leads:
+        logger.info(
+            "Vini: %d lead(s) queued again now that the author id is sent",
+            len(leads),
+        )
+    return len(leads)
+
+
+def drain_unsynced_leads(db, *, limit: int = 25) -> PushResult:
+    """Release the author-identity backlog once, then push unsynced leads.
+
+    No-op when ingest is not configured. Callers (the watcher, a harvest)
+    use this so a lead parked earlier still goes out without a manual
+    ``push-leads``.
+    """
+    cfg = load_vini_ingest_config()
+    if not cfg.enabled:
+        return PushResult()
+    with db.session() as s:
+        release_leads_sent_without_author_identity(s)
+        return push_unsynced_leads(s, limit=limit, config=cfg)
+
+
 def push_unsynced_leads(
     session: Session,
     *,
@@ -366,9 +439,16 @@ def push_unsynced_leads(
 
     stmt = (
         select(Lead.id)
+        .join(Post, Lead.post_id == Post.id)
+        .join(Author, Post.author_id == Author.id)
         .where(Lead.classification == "LEAD")
         .where(Lead.duplicate_of_id.is_(None))
         .where(Lead.external_synced_at.is_(None))
+        # A display name with no Circle member id is what the portal parks.
+        # Leave those rows unsynced, but do not let them fill the batch: the
+        # next read that learns the id is what makes them sendable.
+        .where(Author.source_author_id.is_not(None))
+        .where(Author.source_author_id != "")
         .order_by(Lead.id.asc())
     )
     if limit:

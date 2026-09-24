@@ -367,6 +367,12 @@ def get_or_create_author(
         )
         if a:
             return a
+        adopted = _adopt_author_identity(
+            session, community_id=community_id,
+            source_author_id=str(source_author_id), **kw,
+        )
+        if adopted is not None:
+            return adopted
     elif kw.get("display_name"):
         # Readers that only know a display name (every triage/harvest/cookie
         # read) used to create a fresh row per post per read: prod had 54,579
@@ -392,6 +398,87 @@ def get_or_create_author(
     session.add(a)
     session.flush()
     return a
+
+
+def _adopt_author_identity(
+    session: Session, *, community_id: int, source_author_id: str, **kw,
+) -> Author | None:
+    """Write a newly learned Circle member id onto the name-only author row.
+
+    Readers used to store the display name and drop the id, and the post still
+    points at that row. A later read that has the id must fill this row in,
+    not open a second author the post will never reference. Two people who
+    share a name are left alone: attaching the id to one of them would be a
+    guess. Once the id is on the row, leads parked for the missing id can go
+    out again.
+    """
+    name = kw.get("display_name")
+    if not name:
+        return None
+    rows = list(session.scalars(
+        select(Author).where(
+            Author.community_id == community_id,
+            Author.source_author_id.is_(None),
+            Author.display_name == name,
+        ).limit(2)
+    ).all())
+    if len(rows) != 1:
+        return None
+    chosen = rows[0]
+    profile = kw.get("profile_url")
+    if chosen.profile_url and profile and chosen.profile_url != profile:
+        return None
+    chosen.source_author_id = source_author_id
+    if profile and not chosen.profile_url:
+        chosen.profile_url = profile
+    _release_author_leads(session, chosen.id)
+    session.flush()
+    return chosen
+
+
+def _attach_author_with_identity(
+    session: Session, post: Post, author_id: int | None,
+) -> None:
+    """Point a stored post at an author who has a Circle member id.
+
+    A re-read finds the post by its text and used to leave the old name-only
+    author in place, so the lead kept going out without an identity.
+    """
+    if not author_id or author_id == post.author_id:
+        return
+    new_author = session.get(Author, author_id)
+    if new_author is None or not (new_author.source_author_id or "").strip():
+        return
+    old_author = session.get(Author, post.author_id) if post.author_id else None
+    if old_author is not None and (old_author.source_author_id or "").strip():
+        return
+    post.author_id = author_id
+    lead = session.scalar(select(Lead).where(Lead.post_id == post.id))
+    if (
+        lead is not None
+        and lead.classification == "LEAD"
+        and lead.duplicate_of_id is None
+        and lead.external_synced_at is not None
+    ):
+        lead.external_synced_at = None
+
+
+def _release_author_leads(session: Session, author_id: int) -> None:
+    """Clear the sync stamp on leads this author already tried to send.
+
+    The stamp was written when the portal parked them for a missing author
+    id. With the id now on the row, the next push can deliver them.
+    """
+    leads = session.scalars(
+        select(Lead)
+        .join(Post, Lead.post_id == Post.id)
+        .where(Post.author_id == author_id)
+        .where(Lead.classification == "LEAD")
+        .where(Lead.duplicate_of_id.is_(None))
+        .where(Lead.external_synced_at.is_not(None))
+    ).all()
+    for lead in leads:
+        lead.external_synced_at = None
 
 
 def live_original(lead: Lead | None) -> bool:
@@ -559,6 +646,7 @@ def upsert_post(session: Session, *, community_id: int, record: dict) -> tuple[P
             new_url = record.get("url")
             if new_url and new_url != existing.url:
                 existing.url = new_url
+            _attach_author_with_identity(session, existing, record.get("author_id"))
             return existing, "unchanged"
         # Content changed since last run: refresh and re-classify.
         existing.content = text

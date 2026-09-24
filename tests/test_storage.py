@@ -317,3 +317,45 @@ def test_display_name_only_authors_are_reused(db):
         assert a1.id == a2.id
         assert b.id != a1.id
         assert elsewhere.id != a1.id               # names are per community
+
+
+def test_a_later_read_attaches_the_member_id_and_releases_the_lead(db):
+    """The post already points at the name-only row. A later read must fill
+    that row's Circle member id and unstamp the lead the portal parked."""
+    from datetime import datetime
+
+    from sqlalchemy import select
+
+    from circle_leads.storage.database import get_or_create_author
+    from circle_leads.storage.models import Author, Lead, Post
+
+    with db.session() as s:
+        c = get_or_create_community(s, slug="acme", url="https://acme.circle.so")
+        author = get_or_create_author(
+            s, community_id=c.id, source_author_id=None, display_name="Keesha Brown",
+        )
+        post = Post(
+            community_id=c.id, author_id=author.id, source_content_id="p1",
+            content_type="post", content="We are hiring a Flutter developer.",
+            url="https://acme.circle.so/c/jobs/1", dedup_hash="h1",
+        )
+        s.add(post)
+        s.flush()
+        s.add(Lead(
+            post_id=post.id, classification="LEAD",
+            external_synced_at=datetime(2026, 9, 21),
+        ))
+        author_id = author.id
+        post_id = post.id
+
+    with db.session() as s:
+        again = get_or_create_author(
+            s, community_id=s.get(Author, author_id).community_id,
+            source_author_id="83308608", display_name="Keesha Brown",
+            profile_url="https://acme.circle.so/u/b3a08215",
+        )
+        assert again.id == author_id
+        assert again.source_author_id == "83308608"
+        assert again.profile_url == "https://acme.circle.so/u/b3a08215"
+        lead = s.scalar(select(Lead).where(Lead.post_id == post_id))
+        assert lead.external_synced_at is None
