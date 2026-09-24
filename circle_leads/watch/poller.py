@@ -381,6 +381,21 @@ def check_community(
                    seen_ids=[r.get("id") for r in fresh], etag=etag_value)
 
 
+def _drain_unsynced_leads(db: Database) -> None:
+    """Send leads the portal has not accepted yet.
+
+    Best-effort: a missing credential or a portal error must not stop polling.
+    The author-identity repair inside the drain runs once, then this only
+    pushes whatever is still unsynced.
+    """
+    try:
+        from circle_leads.export.vini_ingest import drain_unsynced_leads
+
+        drain_unsynced_leads(db)
+    except Exception:  # noqa: BLE001 - delivery must not stop the loop
+        logger.exception("could not retry unsynced leads")
+
+
 def _community_slug(db: Database, community_id: int) -> str:
     """The slug the harvest would use, so both paths name one community."""
     with db.session() as s:
@@ -543,6 +558,7 @@ def _run_watch_loop(db: Database, session, requirements, reloaded_at, tuning,
                     logger.info("watch list: %d community(ies) added", added)
             except Exception:  # noqa: BLE001 - a failed sync must not stop polling
                 logger.exception("could not refresh the watch list")
+            _drain_unsynced_leads(db)
 
         batch = due_states(db)
         if not batch:
@@ -575,5 +591,6 @@ def _run_watch_loop(db: Database, session, requirements, reloaded_at, tuning,
                     + (f", lag {outcome.lag_s:.0f}s" if outcome.lag_s else "")
                     if outcome.new_posts else "",
                 )
+        _drain_unsynced_leads(db)
         if once:
             return

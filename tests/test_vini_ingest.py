@@ -96,7 +96,20 @@ def test_payload_shape(db):
         "platform": "circle",
         "parser": PARSER_NAME,
         "external_id": "circle:acme:post:post-1",
+        "source_author_id": "42",
     }
+
+
+def test_payload_without_author_id_is_not_sent(db):
+    """A display name is what the portal calls missing_source_author_identity."""
+    lead_id = _seed_lead(db)
+    with db.session() as s:
+        lead = s.get(Lead, lead_id)
+        post = s.get(Post, lead.post_id)
+        author = s.get(Author, post.author_id)
+        author.source_author_id = None
+        community = s.get(Community, post.community_id)
+        assert lead_to_ingest_payload(lead, post, community, author) is None
 
 
 def test_payload_requires_url_and_content(db):
@@ -397,6 +410,33 @@ def test_a_held_lead_is_reported_not_silently_counted(db, monkeypatch):
     assert result.held and result.held[0][0] == ids[0]
     assert "missing_source_author_identity" in result.held[0][1]
     assert sent, "a parked lead must reach a human"
+
+
+def test_a_stamped_lead_is_sent_again_once_the_author_id_is_included(db, monkeypatch):
+    """Leads parked before the payload carried source_author_id stay stamped.
+
+    The first drain after the fix unstamps the ones whose author already has
+    an id and posts that id. A second drain does not send them again.
+    """
+    from circle_leads.export.vini_ingest import drain_unsynced_leads
+
+    lead_id = _seed_lead(db)
+    monkeypatch.setenv("SUPABASE_ANON_KEY", "anon")
+    monkeypatch.setenv("VINI_API_SECRET", "secret")
+    with db.session() as s:
+        s.get(Lead, lead_id).external_synced_at = datetime(2026, 9, 21)
+
+    with patch("circle_leads.export.vini_ingest.post_leads_to_vini") as mock_post:
+        mock_post.return_value = [{"status": "inserted"}]
+        result = drain_unsynced_leads(db)
+    assert result.sent == 1
+    body = mock_post.call_args.args[0]
+    assert body[0]["source_author_id"] == "42"
+
+    with patch("circle_leads.export.vini_ingest.post_leads_to_vini") as mock_post:
+        again = drain_unsynced_leads(db)
+    mock_post.assert_not_called()
+    assert again.sent == 0
 
 
 def test_a_held_lead_is_not_retried_forever(db, monkeypatch):
