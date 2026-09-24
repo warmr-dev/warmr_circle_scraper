@@ -7,6 +7,7 @@ no real network."""
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import tempfile
 from datetime import datetime, timedelta
@@ -30,6 +31,18 @@ def _isolate_attempt_log(tmp_path, monkeypatch):
     # test-seeded row there silently eats into a real budget or reshuffles a
     # real run's candidates.
     monkeypatch.setattr(joiner, "ATTEMPT_LOG_PATH", tmp_path / "join_attempts.log")
+
+
+@pytest.fixture(autouse=True)
+def _offline_join_environment(monkeypatch):
+    # Every account must name its own Ego Lite profile (accounts.py), and a
+    # run makes two network checks of its own -- a DNS pre-check before the
+    # browser opens a host and a cookie replay check after a join. None of
+    # that belongs in a unit test; the tests that exercise them set their own.
+    monkeypatch.setenv("CIRCLE_EGO_PROFILE", "erksh1")
+    monkeypatch.setenv("CIRCLE_EGO_PROFILE2", "erksh2")
+    monkeypatch.setattr(joiner, "_dead_host_reason", lambda url: None)
+    monkeypatch.setattr(joiner, "_replay_check", lambda host, cookies: "stubbed")
 
 
 def _db():
@@ -89,10 +102,23 @@ def test_orders_by_icp_score_descending_and_respects_limit():
     assert [c["slug"] for c in joiner.select_join_candidates(db, limit=1)] == ["high"]
 
 
-def test_paid_join_type_is_included():
+def test_paid_communities_are_never_queued():
+    # The bot does not pay, so a paid community's only visit ever ended on a
+    # checkout page. It is read only if a member session for it exists.
     db = _db()
-    _seed(db, "paid-one", join_type="paid", icp_score=5)
-    assert [c["slug"] for c in joiner.select_join_candidates(db)] == ["paid-one"]
+    _seed(db, "paid-one", join_type="paid", icp_score=50)
+    _seed(db, "free-one", join_type="free_join", icp_score=5)
+    assert [c["slug"] for c in joiner.select_join_candidates(db)] == ["free-one"]
+
+
+def test_a_directory_card_without_a_real_address_is_not_queued():
+    # discover.circle.so/products/... is Circle's storefront, not the
+    # community: every such visit on 2026-09-21 ended "unclear".
+    db = _db()
+    _seed(db, "card", url="https://discover.circle.so/products/card", icp_score=50)
+    _seed(db, "listed", platform="discover", url="https://www.listed.com/?utm_source=circle_discover")
+    _seed(db, "legacy", platform=None, url="https://community.legacy.com")
+    assert sorted(c["slug"] for c in joiner.select_join_candidates(db)) == ["legacy", "listed"]
 
 
 # --- pacing --------------------------------------------------------------------
@@ -151,7 +177,7 @@ def test_joined_outcome_is_persisted_and_batch_continues(monkeypatch):
     _seed(db, "a", icp_score=20)
     _seed(db, "b", icp_score=10)
 
-    monkeypatch.setattr(joiner, "open_join_space", lambda name: 42)
+    monkeypatch.setattr(joiner, "open_join_space", lambda name, **kw: 42)
     monkeypatch.setattr(
         joiner, "attempt_join",
         lambda space_id, url, **kw: EgoJoinResult(status="joined", detail="ok"),
@@ -178,10 +204,11 @@ def test_joined_with_cookies_wires_the_host_into_replay_store(monkeypatch):
     # scanning.py), which is exactly the gap that left 24 real joins from
     # this project's own sessions producing zero scraped leads.
     db = _db()
-    _seed(db, "a", icp_score=20, url="https://discover.circle.so/products/a", name="A Community")
+    _seed(db, "a", icp_score=20, url="https://www.a-community.com/join?invitation_token=t",
+          name="A Community")
 
     cookies = [{"name": "_circle_session", "value": "s3cr3t", "domain": "a-real-host.circle.so"}]
-    monkeypatch.setattr(joiner, "open_join_space", lambda name: 1)
+    monkeypatch.setattr(joiner, "open_join_space", lambda name, **kw: 1)
     monkeypatch.setattr(
         joiner, "attempt_join",
         lambda space_id, url, **kw: EgoJoinResult(status="joined", detail="ok", cookies=cookies),
@@ -196,19 +223,21 @@ def test_joined_with_cookies_wires_the_host_into_replay_store(monkeypatch):
 
     joiner.run_auto_join(db)
 
-    # The candidate's stored url is a discover.circle.so listing page -- the
-    # cookie's own domain (the page's actual final host after any redirect)
-    # is what gets connected, not that listing URL's host.
+    # The candidate's stored url is the community's own join link, which
+    # redirects -- the cookie's own domain (the page's actual final host after
+    # any redirect) is what gets connected, not the stored URL's host.
     assert seen["host"] == "a-real-host.circle.so"
     assert seen["cookies"] == cookies
-    assert seen["kw"]["member_label"] == "A Community"
+    # member_label is "who you're signed in as" (models.CircleConnection) --
+    # the account, not the community's name.
+    assert seen["kw"]["member_label"] == "main"
 
 
 def test_joined_without_cookies_does_not_crash_the_batch(monkeypatch):
     db = _db()
     _seed(db, "a", icp_score=20)
 
-    monkeypatch.setattr(joiner, "open_join_space", lambda name: 1)
+    monkeypatch.setattr(joiner, "open_join_space", lambda name, **kw: 1)
     monkeypatch.setattr(
         joiner, "attempt_join",
         lambda space_id, url, **kw: EgoJoinResult(status="joined", detail="ok"),
@@ -232,7 +261,7 @@ def test_credentials_are_read_from_env_and_passed_through(monkeypatch):
     _seed(db, "a", icp_score=10)
     monkeypatch.setenv("CIRCLE_EMAIL", "z@example.com")
     monkeypatch.setenv("CIRCLE_PASSWORD", "s3cret")
-    monkeypatch.setattr(joiner, "open_join_space", lambda name: 1)
+    monkeypatch.setattr(joiner, "open_join_space", lambda name, **kw: 1)
     monkeypatch.setattr(joiner, "sleep_between_attempts", lambda pacing: None)
 
     seen_kwargs = {}
@@ -254,7 +283,7 @@ def test_account_test_reads_the_second_credential_pair(monkeypatch):
     _seed(db, "a", icp_score=10)
     monkeypatch.setenv("CIRCLE_EMAIL2", "test-acct@example.com")
     monkeypatch.setenv("CIRCLE_PASSWORD2", "t3st")
-    monkeypatch.setattr(joiner, "open_join_space", lambda name: 1)
+    monkeypatch.setattr(joiner, "open_join_space", lambda name, **kw: 1)
     monkeypatch.setattr(joiner, "sleep_between_attempts", lambda pacing: None)
 
     seen_kwargs = {}
@@ -290,7 +319,7 @@ def test_test_account_daily_cap_is_independent_of_main(monkeypatch, tmp_path):
     monkeypatch.setattr(joiner, "ATTEMPT_LOG_PATH", tmp_path / "join_attempts.log")
     monkeypatch.setenv("CIRCLE_EMAIL2", "test-acct@example.com")
     monkeypatch.setenv("CIRCLE_PASSWORD2", "t3st")
-    monkeypatch.setattr(joiner, "open_join_space", lambda name: 1)
+    monkeypatch.setattr(joiner, "open_join_space", lambda name, **kw: 1)
     monkeypatch.setattr(joiner, "attempt_join", lambda *a, **kw: EgoJoinResult(status="joined", detail="ok"))
     monkeypatch.setattr(joiner, "sleep_between_attempts", lambda pacing: None)
 
@@ -311,7 +340,7 @@ def test_handoff_status_is_skipped_and_the_batch_continues(monkeypatch):
         "https://a.circle.so": EgoJoinResult(status="needs_login", detail="log in please"),
         "https://b.circle.so": EgoJoinResult(status="joined", detail="ok"),
     }
-    monkeypatch.setattr(joiner, "open_join_space", lambda name: 7)
+    monkeypatch.setattr(joiner, "open_join_space", lambda name, **kw: 7)
     monkeypatch.setattr(joiner, "attempt_join", lambda space_id, url, **kw: outcomes[url])
     monkeypatch.setattr(joiner, "sleep_between_attempts", lambda pacing: None)
 
@@ -338,7 +367,7 @@ def test_a_handed_off_host_goes_last_next_run_but_stays_in_the_queue(monkeypatch
 
     assert [c["slug"] for c in joiner.select_join_candidates(db)] == ["stuck", "fresh"]
 
-    monkeypatch.setattr(joiner, "open_join_space", lambda name: 1)
+    monkeypatch.setattr(joiner, "open_join_space", lambda name, **kw: 1)
     monkeypatch.setattr(
         joiner, "attempt_join",
         lambda space_id, url, **kw: EgoJoinResult(status="unclear", detail="unrecognized page"),
@@ -404,7 +433,7 @@ def test_handoff_outcome_is_logged_even_though_not_persisted_to_the_db(monkeypat
 
     log_path = tmp_path / "join_attempts.log"
     monkeypatch.setattr(joiner, "ATTEMPT_LOG_PATH", log_path)
-    monkeypatch.setattr(joiner, "open_join_space", lambda name: 7)
+    monkeypatch.setattr(joiner, "open_join_space", lambda name, **kw: 7)
     monkeypatch.setattr(
         joiner, "attempt_join",
         lambda space_id, url, **kw: EgoJoinResult(
@@ -449,7 +478,7 @@ def test_visits_count_toward_the_cap_even_when_no_join_is_recorded(monkeypatch):
     for i, slug in enumerate(["a", "b", "c", "d"]):
         _seed(db, slug, icp_score=100 - i)
 
-    monkeypatch.setattr(joiner, "open_join_space", lambda name: 1)
+    monkeypatch.setattr(joiner, "open_join_space", lambda name, **kw: 1)
     monkeypatch.setattr(
         joiner, "attempt_join",
         lambda space_id, url, **kw: EgoJoinResult(status="unclear", detail="unrecognized page"),
@@ -470,7 +499,7 @@ def test_cap_stops_the_batch_at_the_limit(monkeypatch):
     for i, slug in enumerate(["a", "b", "c"]):
         _seed(db, slug, icp_score=100 - i)
 
-    monkeypatch.setattr(joiner, "open_join_space", lambda name: 1)
+    monkeypatch.setattr(joiner, "open_join_space", lambda name, **kw: 1)
     monkeypatch.setattr(
         joiner, "attempt_join",
         lambda space_id, url, **kw: EgoJoinResult(status="joined", detail="ok"),
@@ -512,7 +541,7 @@ def test_main_and_test_accounts_do_not_spend_each_others_visit_budget(monkeypatc
     log_path = tmp_path / "join_attempts.log"
     _write_attempt_log(log_path, [("spam-community", "unclear", "test")])
     monkeypatch.setattr(joiner, "ATTEMPT_LOG_PATH", log_path)
-    monkeypatch.setattr(joiner, "open_join_space", lambda name: 1)
+    monkeypatch.setattr(joiner, "open_join_space", lambda name, **kw: 1)
     monkeypatch.setattr(
         joiner, "attempt_join",
         lambda space_id, url, **kw: EgoJoinResult(status="joined", detail="ok"),
@@ -532,7 +561,7 @@ def test_bridge_error_stops_the_batch_and_is_not_recorded_as_failed(monkeypatch)
     db = _db()
     _seed(db, "a", icp_score=10)
 
-    monkeypatch.setattr(joiner, "open_join_space", lambda name: 1)
+    monkeypatch.setattr(joiner, "open_join_space", lambda name, **kw: 1)
 
     def raise_bridge_error(space_id, url, **kw):
         raise EgoBrowserError("ego-browser not installed")
@@ -659,7 +688,7 @@ def test_host_filter_survives_the_limit_and_the_handoff_sort(monkeypatch, tmp_pa
     # The de-prioritisation itself is intact: unnamed, "stuck" is last.
     assert [c["slug"] for c in joiner.select_join_candidates(db)][-1] == "stuck"
 
-    monkeypatch.setattr(joiner, "open_join_space", lambda name: 1)
+    monkeypatch.setattr(joiner, "open_join_space", lambda name, **kw: 1)
     monkeypatch.setattr(
         joiner, "attempt_join",
         lambda space_id, url, **kw: EgoJoinResult(status="unclear", detail="unrecognized page"),
@@ -694,7 +723,7 @@ def test_host_filter_still_matches_a_url_substring_past_the_limit(monkeypatch):
         _seed(db, slug, icp_score=90 - i)
     _seed(db, "target", url="https://members.example.com/join", icp_score=1)
 
-    monkeypatch.setattr(joiner, "open_join_space", lambda name: 1)
+    monkeypatch.setattr(joiner, "open_join_space", lambda name, **kw: 1)
     monkeypatch.setattr(joiner, "attempt_join", lambda *a, **kw: EgoJoinResult(status="joined", detail="ok"))
     monkeypatch.setattr(joiner, "sleep_between_attempts", lambda pacing: None)
 
@@ -724,7 +753,7 @@ def test_the_attempt_log_is_parsed_once_per_batch(monkeypatch, tmp_path):
         return real_iter()
 
     monkeypatch.setattr(joiner, "_iter_attempt_log", counting_iter)
-    monkeypatch.setattr(joiner, "open_join_space", lambda name: 1)
+    monkeypatch.setattr(joiner, "open_join_space", lambda name, **kw: 1)
     monkeypatch.setattr(joiner, "attempt_join", lambda *a, **kw: EgoJoinResult(status="joined", detail="ok"))
     monkeypatch.setattr(joiner, "sleep_between_attempts", lambda pacing: None)
 
@@ -783,3 +812,313 @@ def test_the_row_bound_still_reaches_past_every_de_prioritised_host(monkeypatch,
     monkeypatch.setattr(joiner, "ATTEMPT_LOG_PATH", log_path)
 
     assert [c["slug"] for c in joiner.select_join_candidates(db, limit=1)] == ["fresh"]
+
+
+# --- accounts, browser profiles and the new-member profile step ---------------
+
+
+def test_a_run_without_a_browser_profile_for_the_account_is_refused(monkeypatch):
+    db = _db()
+    _seed(db, "a", icp_score=10)
+    monkeypatch.delenv("CIRCLE_EGO_PROFILE", raising=False)
+    monkeypatch.setattr(joiner, "open_join_space",
+                        lambda *a, **kw: pytest.fail("must not open a space without a profile"))
+    with pytest.raises(RuntimeError, match="CIRCLE_EGO_PROFILE"):
+        joiner.run_auto_join(db)
+
+
+def test_the_space_is_opened_on_the_accounts_own_profile(monkeypatch):
+    db = _db()
+    _seed(db, "a", icp_score=10)
+    monkeypatch.setenv("CIRCLE_EMAIL3", "three@example.com")
+    monkeypatch.setenv("CIRCLE_PASSWORD3", "p3")
+    monkeypatch.setenv("CIRCLE_EGO_PROFILE3", "erksh3")
+    opened, seen = {}, {}
+
+    def fake_open(name, **kw):
+        opened.update(name=name, **kw)
+        return 5
+
+    def fake_attempt(space_id, url, **kw):
+        seen.update(kw)
+        return EgoJoinResult(status="joined", detail="ok")
+
+    monkeypatch.setattr(joiner, "open_join_space", fake_open)
+    monkeypatch.setattr(joiner, "attempt_join", fake_attempt)
+    monkeypatch.setattr(joiner, "sleep_between_attempts", lambda pacing: None)
+
+    joiner.run_auto_join(db, account="3", space_id=None)
+
+    assert opened["profile"] == "erksh3"
+    assert "3" in opened["name"] and "erksh3" in opened["name"]
+    assert seen["email"] == "three@example.com" and seen["password"] == "p3"
+
+
+def test_a_dead_host_is_recorded_without_opening_the_browser(monkeypatch, tmp_path):
+    db = _db()
+    _seed(db, "gone", icp_score=20)
+    _seed(db, "alive", icp_score=10)
+    monkeypatch.setattr(
+        joiner, "_dead_host_reason",
+        lambda url: "Host no longer resolves" if "gone" in url else None,
+    )
+    visited = []
+    monkeypatch.setattr(joiner, "open_join_space", lambda name, **kw: 1)
+    monkeypatch.setattr(
+        joiner, "attempt_join",
+        lambda sid, url, **kw: visited.append(url) or EgoJoinResult(status="joined", detail="ok"),
+    )
+    monkeypatch.setattr(joiner, "sleep_between_attempts", lambda pacing: None)
+
+    result = joiner.run_auto_join(db)
+
+    assert visited == ["https://alive.circle.so"]
+    assert result.skipped == {"gone": "Host no longer resolves"}
+    with db.session() as s:
+        gone = s.scalar(select(Community).where(Community.slug == "gone"))
+        assert gone.join_status == JoinStatus.DEAD_HOST.value
+    # The pre-check opened no page, so it doesn't spend the daily cap.
+    assert joiner._visits_today_for_account("main") == 1
+
+
+def test_a_driver_dead_host_outcome_is_terminal(monkeypatch):
+    db = _db()
+    _seed(db, "a", icp_score=10)
+    monkeypatch.setattr(joiner, "open_join_space", lambda name, **kw: 1)
+    monkeypatch.setattr(joiner, "attempt_join",
+                        lambda sid, url, **kw: EgoJoinResult(status="dead_host", detail="gone"))
+    monkeypatch.setattr(joiner, "sleep_between_attempts", lambda pacing: None)
+    joiner.run_auto_join(db)
+    with db.session() as s:
+        assert s.scalar(select(Community.join_status)) == JoinStatus.DEAD_HOST.value
+
+
+def _profile_form_fields():
+    return {"fields": [{"id": "77", "index": 3, "label": "Company", "field_type": "text",
+                        "required": True, "choices": []}]}
+
+
+def test_profile_questions_are_answered_then_the_page_is_visited_again(monkeypatch):
+    from circle_leads.join.forms import FormResolution
+
+    db = _db()
+    _seed(db, "a", icp_score=10)
+    calls = []
+
+    def fake_attempt(space_id, url, **kw):
+        calls.append(kw.get("answers"))
+        if kw.get("answers") is None:
+            return EgoJoinResult(status="profile_form", detail="asks 1", form=_profile_form_fields())
+        return EgoJoinResult(status="joined", detail="done")
+
+    seen_fields = {}
+
+    def fake_resolve(db_, account, fields, **kw):
+        seen_fields.update(account=account, labels=[f.label for f in fields], host=kw.get("host"))
+        return FormResolution(answers={"77": "Acme Dev"})
+
+    monkeypatch.setattr(joiner, "open_join_space", lambda name, **kw: 1)
+    monkeypatch.setattr(joiner, "attempt_join", fake_attempt)
+    monkeypatch.setattr(joiner, "resolve_form", fake_resolve)
+    monkeypatch.setattr(joiner, "make_form_llm", lambda: None)
+    monkeypatch.setattr(joiner, "sleep_between_attempts", lambda pacing: None)
+
+    result = joiner.run_auto_join(db)
+
+    assert calls == [None, {"77": "Acme Dev"}]
+    assert seen_fields == {"account": "main", "labels": ["Company"], "host": "a.circle.so"}
+    assert result.joined == ["a"]
+    # Both page loads count toward the account's daily activity.
+    assert joiner._visits_today_for_account("main") == 2
+
+
+def test_a_profile_question_the_bot_may_not_answer_leaves_the_join_pending(monkeypatch):
+    from circle_leads.join.forms import FormField, FormResolution
+
+    db = _db()
+    _seed(db, "a", icp_score=10)
+    calls = []
+
+    def fake_attempt(space_id, url, **kw):
+        calls.append(kw.get("answers"))
+        return EgoJoinResult(status="profile_form", detail="asks 1", form=_profile_form_fields())
+
+    monkeypatch.setattr(joiner, "open_join_space", lambda name, **kw: 1)
+    monkeypatch.setattr(joiner, "attempt_join", fake_attempt)
+    monkeypatch.setattr(
+        joiner, "resolve_form",
+        lambda *a, **kw: FormResolution(needs_human=[FormField(id="77", label="Company", field_type="text")]),
+    )
+    monkeypatch.setattr(joiner, "make_form_llm", lambda: None)
+    monkeypatch.setattr(joiner, "sleep_between_attempts", lambda pacing: None)
+
+    result = joiner.run_auto_join(db)
+
+    assert calls == [None]  # no second visit without answers
+    assert "Company" in result.handoffs["a"]
+    with db.session() as s:
+        row = s.scalar(select(Community).where(Community.slug == "a"))
+        assert row.join_status == JoinStatus.PROFILE_PENDING.value
+        assert "Company" in row.join_status_detail
+
+
+def test_profile_pending_communities_stay_in_the_queue():
+    db = _db()
+    _seed(db, "stuck", icp_score=5, join_status=JoinStatus.PROFILE_PENDING.value)
+    _seed(db, "done", icp_score=50, join_status=JoinStatus.JOINED.value)
+    assert [c["slug"] for c in joiner.select_join_candidates(db)] == ["stuck"]
+
+
+def test_hosts_we_already_hold_cookies_for_leave_the_queue_unless_pending(monkeypatch):
+    from circle_leads.storage.models import CircleConnection, ReplaySession
+
+    db = _db()
+    _seed(db, "member", icp_score=30, url="https://www.member.com")
+    _seed(db, "pending", icp_score=20, url="https://pending.circle.so",
+          join_status=JoinStatus.PROFILE_PENDING.value)
+    _seed(db, "fresh", icp_score=10)
+    with db.session() as s:
+        for host in ("www.member.com", "pending.circle.so"):
+            s.add(ReplaySession(host=host, encrypted_cookies="x", cookie_count=1))
+            s.add(CircleConnection(host=host, state="connected"))
+
+    assert [c["slug"] for c in joiner.select_join_candidates(db)] == ["pending", "fresh"]
+
+
+def test_a_different_signed_in_account_is_a_handoff_not_a_record(monkeypatch):
+    db = _db()
+    _seed(db, "a", icp_score=10)
+    monkeypatch.setattr(joiner, "open_join_space", lambda name, **kw: 1)
+    monkeypatch.setattr(joiner, "attempt_join",
+                        lambda sid, url, **kw: EgoJoinResult(status="wrong_account", detail="other"))
+    monkeypatch.setattr(joiner, "sleep_between_attempts", lambda pacing: None)
+    result = joiner.run_auto_join(db)
+    assert "wrong_account" in result.handoffs["a"]
+    with db.session() as s:
+        assert s.scalar(select(Community.join_status)) == JoinStatus.NOT_ATTEMPTED.value
+
+
+def test_a_join_links_the_connection_and_records_the_replay_check(monkeypatch):
+    from circle_leads.storage.models import CircleConnection
+
+    db = _db()
+    _seed(db, "a", icp_score=10)
+    cookies = [{"name": "_circle_session", "value": "v", "domain": ".a-host.example"}]
+    monkeypatch.setattr(joiner, "open_join_space", lambda name, **kw: 1)
+    monkeypatch.setattr(joiner, "attempt_join",
+                        lambda sid, url, **kw: EgoJoinResult(status="joined", detail="Joined.", cookies=cookies))
+    monkeypatch.setattr(joiner, "_replay_check", lambda host, cks: f"cookies read 3 space(s) on {host}")
+    monkeypatch.setattr(joiner, "sleep_between_attempts", lambda pacing: None)
+
+    joiner.run_auto_join(db)
+
+    with db.session() as s:
+        row = s.scalar(select(Community).where(Community.slug == "a"))
+        conn = s.scalar(select(CircleConnection).where(CircleConnection.host == "a-host.example"))
+        assert conn is not None and conn.community_id == row.id and conn.member_label == "main"
+        assert "cookies read 3 space(s) on a-host.example" in row.join_status_detail
+
+
+def test_open_join_space_with_a_profile_sends_it_and_reports_errors(monkeypatch):
+    scripts = []
+
+    def fake_run(*a, **kw):
+        scripts.append(kw["input"])
+        return _FakeCompleted(stdout='EGO_JOIN_SPACE_ERROR="Ego Lite profile \\"nope\\" not found"\n')
+
+    monkeypatch.setattr(ego_bridge.subprocess, "run", fake_run)
+    with pytest.raises(EgoBrowserError, match="not found"):
+        ego_bridge.open_join_space("warmr", profile="nope")
+    assert '"nope"' in scripts[0] and "profileId" in scripts[0]
+
+
+def test_attempt_join_passes_answers_and_reads_the_form(monkeypatch):
+    scripts = []
+
+    def fake_run(*a, **kw):
+        scripts.append(kw["input"])
+        return _FakeCompleted(stdout='EGO_JOIN_RESULT={"status": "profile_form", "detail": "q", '
+                                     '"form": {"fields": [{"id": "1", "label": "Company"}]}}\n')
+
+    monkeypatch.setattr(ego_bridge.subprocess, "run", fake_run)
+    result = ego_bridge.attempt_join(1, "https://x.circle.so", answers={"1": "Acme"})
+    assert result.form == {"fields": [{"id": "1", "label": "Company"}]}
+    assert 'const profileAnswers = {"1": "Acme"};' in scripts[0]
+    assert not re.search(r"__EGO_JOIN_[A-Z_]+__", scripts[0])
+
+
+def test_the_driver_script_is_valid_javascript_once_filled(tmp_path):
+    import shutil
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    script = (
+        ego_bridge.DRIVER_SCRIPT_PATH.read_text()
+        .replace("__EGO_JOIN_SPACE_ID__", "1")
+        .replace("__EGO_JOIN_URL__", json.dumps("https://x.circle.so"))
+        .replace("__EGO_JOIN_SCREENSHOT_DIR__", '""')
+        .replace("__EGO_JOIN_EMAIL__", '""')
+        .replace("__EGO_JOIN_PASSWORD__", '""')
+        .replace("__EGO_JOIN_ANSWERS__", "null")
+    )
+    # Every placeholder filled (the header comment's "__EGO_JOIN_*__" is prose).
+    assert not re.search(r"__EGO_JOIN_[A-Z_]+__", script)
+    path = tmp_path / "driver.mjs"
+    path.write_text(script)
+    proc = subprocess.run([node, "--check", str(path)], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_credentials_are_only_ever_typed_through_the_circle_page_guard():
+    # 2026-09-18: the bot typed the main account's Circle email and password
+    # into login.ecommerce.pl -- the community's own site, not Circle -- once
+    # it learned Polish button texts. Every credential fill must go through
+    # fillCredential(), which refuses any page that doesn't answer as Circle.
+    src = ego_bridge.DRIVER_SCRIPT_PATH.read_text()
+    raw_fills = re.findall(
+        r"page\.fill\([^)]*(?:EMAIL_SELECTOR|PASSWORD_SELECTOR|loginEmail|loginPassword)", src)
+    assert raw_fills == []
+    guard = src[src.index("async function fillCredential"):]
+    guard = guard[:guard.index("\n}\n")]
+    assert guard.index("isCirclePage") < guard.index("page.fill(")
+
+
+def test_the_circle_page_guard_is_a_host_check_and_nothing_else():
+    # 2026-09-21: aimarketerhq's "Sign up" led to auth0.aimarketerhq.com and a
+    # "does this page look like Circle?" check let the password through. Only
+    # the community's own host or *.circle.so may receive credentials -- not a
+    # page that merely answers Circle's API or loads its assets.
+    src = ego_bridge.DRIVER_SCRIPT_PATH.read_text()
+    body = src[src.index("async function isCirclePage"):]
+    body = body[:body.index("\n}\n")]
+    assert "communityHost" in body and '.endsWith(".circle.so")' in body
+    assert "memberState" not in body and "fetchJson" not in body
+
+
+def test_a_community_that_signs_in_on_its_own_site_is_terminal(monkeypatch):
+    db = _db()
+    _seed(db, "a", icp_score=10)
+    monkeypatch.setattr(joiner, "open_join_space", lambda name, **kw: 1)
+    monkeypatch.setattr(joiner, "attempt_join",
+                        lambda sid, url, **kw: EgoJoinResult(status="external_login", detail="own site"))
+    monkeypatch.setattr(joiner, "sleep_between_attempts", lambda pacing: None)
+    result = joiner.run_auto_join(db)
+    assert result.handoffs == {}
+    with db.session() as s:
+        assert s.scalar(select(Community.join_status)) == JoinStatus.EXTERNAL_LOGIN.value
+
+
+def test_an_emailed_verification_code_leaves_the_join_pending(monkeypatch):
+    db = _db()
+    _seed(db, "a", icp_score=10)
+    monkeypatch.setattr(joiner, "open_join_space", lambda name, **kw: 1)
+    monkeypatch.setattr(joiner, "attempt_join", lambda sid, url, **kw: EgoJoinResult(
+        status="email_code_needed", detail="Circle emailed a verification code"))
+    monkeypatch.setattr(joiner, "sleep_between_attempts", lambda pacing: None)
+    result = joiner.run_auto_join(db)
+    assert "email_code_needed" in result.handoffs["a"]
+    with db.session() as s:
+        row = s.scalar(select(Community).where(Community.slug == "a"))
+        assert row.join_status == JoinStatus.PROFILE_PENDING.value
+        assert "verification code" in row.join_status_detail

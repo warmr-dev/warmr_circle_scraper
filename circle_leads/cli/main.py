@@ -384,9 +384,12 @@ def join_queue_cmd(ctx, limit):
               help="Resume an existing ego-browser task space, e.g. after resolving a handoff.")
 @click.option("--screenshot-dir", default=None, help="Save a screenshot on every stop/handoff here.")
 @click.option("--dry-run", is_flag=True, help="List what would be attempted; no browser involved.")
-@click.option("--account", type=click.Choice(["main", "test"]), default="main", show_default=True,
-              help="Which Circle login to use: main (CIRCLE_EMAIL/PASSWORD) or test (CIRCLE_EMAIL2/PASSWORD2). "
-                   "Each has its own daily cap -- they don't share it.")
+@click.option("--account", type=click.Choice(["main", "test"] + [str(n) for n in range(1, 11)]),
+              default="main", show_default=True,
+              help="Which Circle login to use: main (=1, CIRCLE_EMAIL/PASSWORD), test (=2, "
+                   "CIRCLE_EMAIL2/PASSWORD2) or 3..10 (CIRCLE_EMAIL<n>/PASSWORD<n>). Each runs in "
+                   "its own Ego Lite profile (CIRCLE_EGO_PROFILE, CIRCLE_EGO_PROFILE2, ...) and has "
+                   "its own daily cap.")
 @click.pass_context
 def auto_join_cmd(ctx, limit, host, space_id, screenshot_dir, dry_run, account):
     """Join ICP-qualified free/paid Circle communities via ego-browser.
@@ -433,6 +436,11 @@ def auto_join_cmd(ctx, limit, host, space_id, screenshot_dir, dry_run, account):
         f"Attempted {len(result.attempted)}, joined {len(result.joined)}: "
         f"{', '.join(result.joined) or '(none)'}"
     )
+    if result.skipped:
+        click.echo(
+            f"Skipped without a visit ({len(result.skipped)}): "
+            + ", ".join(f"{slug} ({why})" for slug, why in result.skipped.items())
+        )
     # A handoff no longer ends the batch (join/joiner.py skips and continues),
     # so without this the run's most actionable outcome -- the hosts waiting on
     # a human -- would be invisible in the output.
@@ -776,6 +784,7 @@ def read_all_cmd(ctx, feeds_config, use_llm):
                 try:
                     recs = fetch_space_posts(
                         reader, space["id"], excluded_content=reqs.excluded_content,
+                        space_slug=space.get("slug"),
                     )
                     records.extend(recs)
                     click.echo(f"  {host} / {space.get('name', space['id'])}: {len(recs)} post(s)", err=True)
@@ -1457,8 +1466,9 @@ def worker_cmd(ctx, poll_seconds, use_llm):
     from circle_leads.scanning import cookie_hosts_vip_first, scan_cookie_host
     from circle_leads.storage.settings_store import (
         is_discovery_due, is_harvest_due, is_icp_classification_due,
-        load_effective_requirements, mark_discovery_run, mark_harvest_run,
-        mark_icp_classification_run,
+        is_join_type_check_due, load_effective_requirements,
+        mark_discovery_run, mark_harvest_finished, mark_harvest_run,
+        mark_icp_classification_run, mark_join_type_check_run,
     )
 
     # Read the same config the dashboard writes (DB override on top of the
@@ -1483,12 +1493,48 @@ def worker_cmd(ctx, poll_seconds, use_llm):
         res = harvest(db, req, verbose_log=True, use_llm=use_llm, search=search)
         if search:
             mark_discovery_run(db)
+        # Only here, at the end. The start was recorded before any of this ran
+        # so a crash loop cannot hammer the schedule, but a harvest killed
+        # halfway -- the daily unattended-upgrade restarts our services -- must
+        # not count as a completed one.
+        mark_harvest_finished(db)
         return {"private_leads": priv_leads, "public_leads": res.leads_found,
                 "communities_read": res.communities_read,
                 "new_communities": res.new_communities, "searched": search}
 
     last_schedule_check = 0.0
+
+    # Say we are alive somewhere the outside can read: nothing running on this
+    # machine can report that the machine itself has stopped, so the
+    # dashboard's /api/watchdog reads this on a schedule and shouts.
+    #
+    # It runs in its own thread because the top of this loop is only reached
+    # between jobs, and one job can be a harvest that runs for hours. Beating
+    # from here made a busy worker look dead and sent a false alarm.
+    from circle_leads.storage.heartbeat import start_heartbeat
+
+    start_heartbeat(db, "worker_heartbeat")
+
+    # Stop on request instead of being killed mid-write. This is not a rare
+    # event: a stock Ubuntu box runs unattended-upgrades daily and needrestart
+    # restarts every service whose libraries changed, so the worker is asked
+    # to stop roughly once a day whether we like it or not.
+    import signal as _signal
+
+    stopping = {"now": False}
+
+    def _stop(signum, _frame):
+        click.echo(f"Signal {signum}: finishing the current step, then stopping.")
+        stopping["now"] = True
+
+    _signal.signal(_signal.SIGTERM, _stop)
+    _signal.signal(_signal.SIGINT, _stop)
+
     while True:
+        if stopping["now"]:
+            click.echo("Worker stopped cleanly.")
+            return
+
         # Pick up dashboard config edits (age cap, roles, thresholds) without a
         # restart. Cheap: one indexed settings lookup, and it falls back to the
         # value already loaded on any error.
@@ -1577,7 +1623,91 @@ def worker_cmd(ctx, poll_seconds, use_llm):
             except Exception as exc:  # noqa: BLE001
                 click.echo(f"  ICP schedule error: {exc.__class__.__name__}", err=True)
 
+            try:
+                if is_join_type_check_due(db):
+                    mark_join_type_check_run(db)
+                    # Plain HTTP, one GET per host, and it runs at LOW
+                    # priority so it yields to reads that can produce a lead.
+                    # Nothing scheduled this before: a community whose join
+                    # type stays "unknown" is in no queue at all, because
+                    # nothing knows whether we could get in. Prod had 446 of
+                    # them sitting still for days.
+                    from circle_leads.discovery.join_type import (
+                        SCHEDULED_BATCH as JOIN_TYPE_BATCH,
+                        classify_join_type_pending,
+                    )
+
+                    jt = classify_join_type_pending(db, limit=JOIN_TYPE_BATCH, scheduled=True)
+                    click.echo(f"  scheduled join-type check: {jt}")
+            except Exception as exc:  # noqa: BLE001
+                click.echo(
+                    f"  join-type schedule error: {exc.__class__.__name__}", err=True
+                )
+
         _t.sleep(max(1, poll_seconds))
+
+
+@cli.command("watch")
+@click.option("--fast-interval", type=int, default=120, show_default=True,
+              help="Seconds between checks of a community that posts.")
+@click.option("--slow-interval", type=int, default=900, show_default=True,
+              help="Seconds between checks of one that has gone quiet.")
+@click.option("--quiet-days", type=int, default=14, show_default=True,
+              help="Days without a post before a community drops to the slow tier.")
+@click.option("--per-page", type=int, default=5, show_default=True,
+              help="Feed records per request.")
+@click.option("--use-llm/--no-llm", default=None,
+              help="Escalate ambiguous posts to the LLM (default: on if a key is set).")
+@click.option("--once", is_flag=True, help="One pass over everything due, then exit.")
+@click.option("--sync/--no-sync", default=True, show_default=True,
+              help="Create watch rows for communities that have none yet.")
+@click.pass_context
+def watch_cmd(ctx, fast_interval, slow_interval, quiet_days, per_page, use_llm, once, sync):
+    """Poll community feeds and triage new posts within a couple of minutes.
+
+    The harvest walks every space and takes hours, so a post published just
+    after it passed waits for the next run. This asks each community's
+    newest-first feed for one page, with If-None-Match, and hands anything new
+    to the same triage the harvest uses -- so one post makes one lead, whichever
+    of the two finds it first.
+
+    Run it as its own service: a harvest that takes three hours must not hold
+    up a poll that is supposed to take two minutes.
+    """
+    import signal
+
+    from circle_leads.watch import ensure_watch_rows, run_watch
+    from circle_leads.watch.poller import WatchTuning
+
+    db = ctx.obj["db"]
+    if use_llm is None:
+        use_llm = bool(os.environ.get("OPENAI_API_KEY"))
+
+    if sync:
+        created = ensure_watch_rows(db)
+        click.echo(f"Watch list: {created} community(ies) added.")
+
+    stopping = {"now": False}
+
+    def _stop(signum, _frame):
+        # Finish the community in flight, then leave: a watermark written
+        # halfway through a triage would skip the posts it had not reached.
+        click.echo(f"Signal {signum}: finishing the current community, then stopping.")
+        stopping["now"] = True
+
+    signal.signal(signal.SIGTERM, _stop)
+    signal.signal(signal.SIGINT, _stop)
+
+    tuning = WatchTuning(
+        fast_interval=fast_interval, slow_interval=slow_interval,
+        quiet_days=quiet_days, per_page=per_page,
+    )
+    click.echo(
+        f"Watching: fast every {fast_interval}s, quiet ones every {slow_interval}s, "
+        f"LLM {'on' if use_llm else 'off'}."
+    )
+    run_watch(db, tuning=tuning, use_llm=use_llm, once=once, stop=lambda: stopping["now"])
+    click.echo("Watcher stopped.")
 
 
 def main() -> None:

@@ -1,0 +1,49 @@
+[Unit]
+Description=Warmr feed watcher: poll community feeds, triage new posts within minutes
+Documentation=https://github.com/warmr-dev/warmr_circle_scraper
+After=network-online.target
+Wants=network-online.target
+
+OnFailure=warmr-alert@%n.service
+# Without these, OnFailure= above never fires: Restart=always only reaches
+# the failed state after StartLimitBurst starts inside StartLimitIntervalSec,
+# and the default window (10s) is shorter than our own RestartSec.
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=warmr
+Group=warmr
+# Not root's home: the CLI reads .env from the working directory, and a
+# directory this account cannot stat used to abort the command.
+WorkingDirectory=/var/lib/warmr
+EnvironmentFile=/etc/warmr/warmr.env
+# Its own request budget. Sharing one file with the worker would let a
+# three-hour harvest spend the poller's allowance and push every community
+# past its two-minute window.
+Environment=CIRCLE_GOVERNOR_FILE=/var/lib/warmr/watch-governor.json
+ExecStart=/opt/warmr/current/venv/bin/circle-leads watch
+Restart=always
+RestartSec=10
+# SIGTERM finishes the community in flight; a watermark written halfway
+# through a triage would skip the posts it had not reached.
+TimeoutStopSec=120
+KillSignal=SIGTERM
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/warmr
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+MemoryMax=1G
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=warmr-watcher
+
+[Install]
+WantedBy=multi-user.target

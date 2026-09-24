@@ -150,9 +150,13 @@ def test_exa_backend_parses_results(monkeypatch):
 
 
 def test_exa_is_preferred_when_key_set(monkeypatch):
+    """Exa first -- but no longer alone: it answered 402 for two days and,
+    being the only backend chosen, took discovery down with it."""
     monkeypatch.setenv("EXA_API_KEY", "x")
+    for key in ("BRAVE_API_KEY", "SERPAPI_API_KEY"):
+        monkeypatch.delenv(key, raising=False)
     from circle_leads.discovery.web_search import choose_backend
-    assert choose_backend().name == "exa"
+    assert choose_backend().live == ["exa", "duckduckgo"]
 
 
 # --- Supplementary site: search --------------------------------------------

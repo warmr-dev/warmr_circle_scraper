@@ -411,3 +411,149 @@ def test_tiptap_mentions_and_post_links_keep_their_text():
     ]}]}
     text = _tiptap_text(doc)
     assert "@Jane Doe" in text and "#Hiring board" in text
+
+
+# --- a join whose new-member profile step is still open --------------------
+
+def test_profile_step_still_open_is_reported_not_read_as_no_spaces():
+    # Confirmed live 2026-09-18: until "Create a profile" is saved, Circle
+    # answers every API call with this 400. It used to come back as None, so
+    # the scan wrote "connected, 0 spaces" -- a silent failure.
+    from circle_leads.scraper.member_api_reader import ProfileIncomplete
+
+    routes = {"/internal_api/spaces": _Resp(
+        400, {"success": False, "message": "Please confirm before proceeding", "error_details": []})}
+    with pytest.raises(ProfileIncomplete, match="profile step"):
+        _reader(routes).list_spaces()
+
+
+def test_any_other_400_still_reads_as_nothing():
+    routes = {"/internal_api/spaces": _Resp(400, {"success": False, "message": "Bad request"})}
+    assert _reader(routes).list_spaces() == []
+
+
+def test_scan_reports_an_unfinished_join_as_an_error_with_the_reason(monkeypatch):
+    import tempfile
+
+    from sqlalchemy import select
+
+    from circle_leads.config.settings import load_requirements
+    from circle_leads.scanning import scan_cookie_host
+    from circle_leads.scraper import member_api_reader
+    from circle_leads.storage.database import Database
+    from circle_leads.storage.models import CircleConnection
+    from circle_leads.web import replay_store
+
+    db = Database("sqlite:///" + tempfile.mktemp(suffix=".db"))
+    monkeypatch.setattr(replay_store, "load_cookies",
+                        lambda db_, host: [{"name": "_circle_session", "value": "tok"}])
+
+    def fake_list_spaces(self):
+        raise member_api_reader.ProfileIncomplete("Circle answered 400: the join is not finished")
+
+    monkeypatch.setattr(member_api_reader.MemberApiReader, "list_spaces", fake_list_spaces)
+
+    out = scan_cookie_host(db, load_requirements(), "x.circle.so")
+
+    assert out["state"] == "error"
+    with db.session() as s:
+        conn = s.scalar(select(CircleConnection).where(CircleConnection.host == "x.circle.so"))
+        assert conn.state == "error"
+        assert "join is not finished" in conn.state_detail
+
+
+# --- a re-read takes only what is new ------------------------------------------
+#
+# One pass over the ~40 stored sessions took eleven hours on 2026-09-23/24: the
+# posts list carries no comments_count, so every scan fetched the comments of
+# the first 25 posts of every space again, and paged through old posts too.
+
+def test_a_reread_stops_paging_and_skips_the_comments_of_old_posts():
+    from datetime import datetime
+
+    new = {"id": 1, "name": "New", "truncated_content": "fresh", "created_at": "2026-09-24T10:00:00Z"}
+    old = {"id": 2, "name": "Old", "truncated_content": "stale", "created_at": "2026-08-01T10:00:00Z"}
+    older = {"id": 3, "name": "Older", "truncated_content": "stale", "created_at": "2026-07-01T10:00:00Z"}
+    routes = {
+        "/internal_api/spaces/9/posts?page=1": _Resp(200, {"records": [new, old], "has_next_page": True}),
+        "/internal_api/spaces/9/posts?page=2": _Resp(200, {"records": [older], "has_next_page": True}),
+        "/internal_api/spaces/9/posts?page=3": _Resp(200, {"records": [older], "has_next_page": False}),
+        "/internal_api/posts/": _Resp(200, {"records": [], "has_next_page": False}),
+    }
+    r = _reader(routes)
+    r.request_pause = 0
+    recs = fetch_space_posts(r, 9, since=datetime(2026, 9, 17))
+    assert [x["title"] for x in recs] == ["New"]
+    asked = r._http.requested
+    # Page 2 held nothing new, so page 3 was never asked for.
+    assert not any(p.startswith("/internal_api/spaces/9/posts?page=3") for p in asked)
+    assert any(p.startswith("/internal_api/posts/1/comments") for p in asked)
+    assert not any(p.startswith("/internal_api/posts/2/comments") for p in asked)
+
+
+def test_a_first_read_still_takes_everything():
+    old = {"id": 2, "name": "Old", "truncated_content": "stale", "created_at": "2026-08-01T10:00:00Z"}
+    routes = {
+        "/internal_api/spaces/9/posts?page=1": _Resp(200, {"records": [old], "has_next_page": False}),
+        "/internal_api/posts/": _Resp(200, {"records": [], "has_next_page": False}),
+    }
+    r = _reader(routes)
+    r.request_pause = 0
+    assert [x["title"] for x in fetch_space_posts(r, 9)] == ["Old"]
+
+
+def _conn_db():
+    import tempfile
+
+    from circle_leads.storage.database import Database
+    return Database("sqlite:///" + tempfile.mktemp(suffix=".db"))
+
+
+@pytest.mark.parametrize("state,detail,readable,expect_since", [
+    ("connected", "40 post(s), 0 lead(s) from 3/3 space(s)", 3, True),
+    ("connected", "12 post(s) ... (partial — scan again to continue)", 3, False),
+    ("connected", "No readable posts (3 space(s) visible).", 0, False),
+    ("error", "Session rejected", 3, False),
+])
+def test_a_reread_starts_from_the_last_complete_scan_only(state, detail, readable, expect_since):
+    from datetime import datetime, timedelta
+
+    from circle_leads.scanning import RESCAN_OVERLAP, _rescan_since
+    from circle_leads.storage.models import CircleConnection
+
+    db = _conn_db()
+    at = datetime(2026, 9, 24, 6, 0)
+    with db.session() as s:
+        s.add(CircleConnection(host="x.circle.so", state=state, state_detail=detail,
+                               spaces_readable=readable, last_sync_at=at))
+    since = _rescan_since(db, "x.circle.so")
+    assert since == (at - RESCAN_OVERLAP if expect_since else None)
+    assert RESCAN_OVERLAP == timedelta(days=7)
+
+
+def test_a_complete_member_scan_counts_as_a_read(monkeypatch):
+    """community.freelancemvp.com was read every six hours with its session and
+    still showed on the dashboard as never read."""
+    from sqlalchemy import select
+
+    from circle_leads.config.settings import load_requirements
+    from circle_leads.scanning import scan_cookie_host
+    from circle_leads.scraper import member_api_reader
+    from circle_leads.storage.database import get_or_create_community
+    from circle_leads.storage.models import Community
+    from circle_leads.web import replay_store
+
+    db = _conn_db()
+    with db.session() as s:
+        get_or_create_community(s, slug="x", url="https://x.circle.so")
+    monkeypatch.setattr(replay_store, "load_cookies",
+                        lambda db_, host: [{"name": "_circle_session", "value": "tok"}])
+    monkeypatch.setattr(member_api_reader.MemberApiReader, "list_spaces",
+                        lambda self: [{"id": 1, "slug": "general", "name": "General"}])
+    monkeypatch.setattr(member_api_reader, "fetch_space_posts", lambda *a, **kw: [])
+
+    out = scan_cookie_host(db, load_requirements(), "x.circle.so")
+
+    assert out["state"] == "connected"
+    with db.session() as s:
+        assert s.scalar(select(Community.last_synced_at).where(Community.slug == "x")) is not None

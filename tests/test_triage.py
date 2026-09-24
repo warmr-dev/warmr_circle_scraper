@@ -371,3 +371,40 @@ def test_full_text_that_retires_an_unsent_lead_deletes_it(db, reqs):
     triage_records(db, [_record(full, when)], reqs, community="acme")
     with db.session() as s:
         assert s.scalar(select(Lead)) is None
+
+
+def test_the_author_identity_reaches_the_stored_author():
+    """triage_records used to pass source_author_id=None outright.
+
+    Every reader supplies Circle's community_member.id, and dropping it left
+    all 134 stored authors with nothing but a display name -- which is what
+    the Vini endpoint reports as "missing_source_author_identity" when it
+    parks a lead instead of showing it to the client.
+    """
+    import tempfile
+
+    from circle_leads.storage.database import Database
+    from circle_leads.storage.models import Author, Post
+    from circle_leads.triage.pipeline import triage_records
+
+    db = Database("sqlite:///" + tempfile.mktemp(suffix=".db"))
+    records = [{
+        "content": "We are hiring a Flutter developer for a 3 month build.",
+        "title": None,
+        "url": "https://acme.circle.so/c/jobs/hiring-flutter",
+        "author": {
+            "source_author_id": "83308608",
+            "display_name": "Keesha Brown",
+            "profile_url": "https://acme.circle.so/u/b3a08215",
+        },
+    }]
+    triage_records(db, records, load_requirements(), community="acme",
+                   source_url="https://acme.circle.so", use_llm=False)
+
+    with db.session() as s:
+        author = s.query(Author).one()
+        assert author.source_author_id == "83308608"
+        assert author.profile_url == "https://acme.circle.so/u/b3a08215"
+        # The per-post link must survive too: without it every lead from one
+        # community shares the community root and the far end dedups them.
+        assert s.query(Post).one().url == "https://acme.circle.so/c/jobs/hiring-flutter"

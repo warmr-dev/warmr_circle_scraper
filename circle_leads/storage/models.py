@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     DateTime,
     Float,
@@ -81,6 +82,11 @@ class Community(Base):
     slug: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     name: Mapped[str | None] = mapped_column(String(512))
     url: Mapped[str] = mapped_column(String(1024), unique=True, index=True)
+    # The host from ``url``, kept as its own column because ``url`` alone does
+    # not identify a community: the same place arrives once as a directory link
+    # (``/join?invitation_token=...``) and once bare, and the two spellings used
+    # to become two rows that both collected the same posts.
+    host: Mapped[str | None] = mapped_column(String(255), index=True)
 
     discovered_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     discovery_source: Mapped[str | None] = mapped_column(String(255))
@@ -155,6 +161,13 @@ class Community(Base):
     watching: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
 
     last_synced_at: Mapped[datetime | None] = mapped_column(DateTime)
+    # What the last harvest read actually saw, set with last_synced_at:
+    # "public" (space list answered), "private" (401/403 on the list or on
+    # every space), "gone" (404, or the host no longer maps to a community),
+    # "error" (network failure, 429, 5xx -- says nothing about the community).
+    # Decides how soon the harvest reads it again (harvest._recheck_hours).
+    # NULL on rows last read before this column existed.
+    read_outcome: Mapped[str | None] = mapped_column(String(32))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=utcnow, onupdate=utcnow
     )
@@ -365,6 +378,18 @@ class JoinStatus(str, enum.Enum):
     INVITE_SKIP = "invite_skip"
     SUBSCRIPTION_EXPIRED_SKIP = "subscription_expired_skip"
     FAILED = "failed"
+    # The host (or the custom domain it redirects to) no longer resolves --
+    # nothing to join. Recorded so the queue stops spending visits on it.
+    DEAD_HOST = "dead_host"
+    # Circle made us a member but the new-member "Create a profile" step is
+    # still open: until it is saved every API call answers 400 "Please confirm
+    # before proceeding", so nothing can be read. Stays in the join queue so
+    # the bot comes back to finish it.
+    PROFILE_PENDING = "profile_pending"
+    # Signing in goes through the community's own website (ecommerce, ulule),
+    # not Circle: it needs an account there, which is a person's decision. The
+    # bot never types the Circle login into such a page.
+    EXTERNAL_LOGIN = "external_login"
 
 
 class ConnectionState(str, enum.Enum):
@@ -565,3 +590,128 @@ class ScanJob(Base):
     claimed_at: Mapped[datetime | None] = mapped_column(DateTime)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime)
     attempts: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class WatchMode(str, enum.Enum):
+    """How a community's feed is read, or why it is not read at all."""
+
+    ANON = "anon"        # the feed answers without a session
+    COOKIE = "cookie"    # needs the stored session
+    OFF = "off"          # closed, dead, or moved: checked once a day at most
+
+
+class WatchState(Base):
+    """Where the fast poller has got to in one community's feed.
+
+    The harvest reads everything every few hours; this reads one page of
+    ``/internal_api/home_page_posts?sort=latest`` every couple of minutes and
+    passes anything new to the same triage the harvest uses. It keeps a
+    watermark rather than a timestamp: a post is new when its id is one we have
+    not seen, which survives clock skew, a slow write, and a post edited after
+    publication. ``recent_ids`` exists because ``last_post_id`` alone is not
+    enough -- Circle can publish an id below the newest one when a draft is
+    released or a post is restored.
+    """
+
+    __tablename__ = "watch_state"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    community_id: Mapped[int] = mapped_column(
+        ForeignKey("communities.id"), unique=True, index=True
+    )
+    host: Mapped[str] = mapped_column(String(255), index=True)
+
+    mode: Mapped[str] = mapped_column(String(16), default=WatchMode.ANON.value, index=True)
+    # The busy communities are polled at the fast interval; one that has been
+    # silent for weeks is polled slowly until it posts again, which is what
+    # keeps the whole watch list inside one IP's request budget.
+    tier: Mapped[str] = mapped_column(String(16), default="fast", index=True)
+
+    last_post_id: Mapped[int | None] = mapped_column(BigInteger)
+    recent_ids: Mapped[list | None] = mapped_column(JSON, default=list)
+    etag: Mapped[str | None] = mapped_column(String(255))
+
+    next_check_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime)
+    last_new_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+    # "ok" | "not_modified" | "unauthorized" | "ratelimited" | "challenge" |
+    # "notfound" | "error" -- the same words the egress probe uses.
+    last_status: Mapped[str | None] = mapped_column(String(32), index=True)
+    last_detail: Mapped[str | None] = mapped_column(Text)
+    consecutive_errors: Mapped[int] = mapped_column(Integer, default=0)
+
+    posts_seen: Mapped[int] = mapped_column(Integer, default=0)
+    leads_found: Mapped[int] = mapped_column(Integer, default=0)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=utcnow, onupdate=utcnow
+    )
+
+
+class JoinFormQuestion(Base):
+    """A question some community's join/profile form asked, seen by the bot.
+
+    One row per distinct question, keyed by its field type plus normalised
+    label, so the same "Company" field on fifty communities is one row with
+    ``times_seen=50``. Choices are per community and kept only as the last
+    example -- the answer is matched against each form's own options at fill
+    time. See circle_leads/join/forms.py.
+    """
+
+    __tablename__ = "join_form_questions"
+    __table_args__ = (UniqueConstraint("question_key", name="uq_join_form_question_key"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    question_key: Mapped[str] = mapped_column(String(300), index=True)
+    label: Mapped[str] = mapped_column(Text)
+    field_type: Mapped[str] = mapped_column(String(32))
+    description: Mapped[str | None] = mapped_column(Text)
+    example_choices: Mapped[list | None] = mapped_column(JSON, default=list)
+    # Set when a differently-worded question was judged to mean the same thing
+    # as an earlier one; its answers are then shared with that one.
+    same_as_id: Mapped[int | None] = mapped_column(ForeignKey("join_form_questions.id"))
+    times_seen: Mapped[int] = mapped_column(Integer, default=0)
+    first_host: Mapped[str | None] = mapped_column(String(255))
+    last_host: Mapped[str | None] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class JoinFormAnswer(Base):
+    """The answer one account gives to one question -- reused on every form
+    that asks it. ``source`` says who wrote it (the persona file, the LLM, or a
+    person); a person can correct any row and later fills use the correction."""
+
+    __tablename__ = "join_form_answers"
+    __table_args__ = (
+        UniqueConstraint("question_id", "account", name="uq_join_form_answer_question_account"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    question_id: Mapped[int] = mapped_column(ForeignKey("join_form_questions.id"), index=True)
+    account: Mapped[str] = mapped_column(String(32), index=True)
+    answer: Mapped[str] = mapped_column(Text)
+    source: Mapped[str] = mapped_column(String(16))  # persona | ai | human
+    reviewed: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class JoinFormFill(Base):
+    """What the bot put into which community's form, as which account --
+    the audit trail for "what did we tell this community about ourselves"."""
+
+    __tablename__ = "join_form_fills"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    community_id: Mapped[int | None] = mapped_column(ForeignKey("communities.id"), index=True)
+    host: Mapped[str | None] = mapped_column(String(255))
+    account: Mapped[str] = mapped_column(String(32))
+    question_id: Mapped[int | None] = mapped_column(ForeignKey("join_form_questions.id"))
+    label: Mapped[str] = mapped_column(Text)
+    answer: Mapped[str | None] = mapped_column(Text)
+    # answered | needs_human (no answer the bot may give)
+    outcome: Mapped[str] = mapped_column(String(32))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)

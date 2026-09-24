@@ -27,9 +27,11 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 
 import requests
 
+from circle_leads.scraper.http_client import governed_session
 from circle_leads.scraper.normalize import parse_timestamp, redact_pii, strip_html
 from circle_leads.scraper.tiptap import tiptap_plain, tiptap_text
 
@@ -54,6 +56,14 @@ class ChallengeHit(RuntimeError):
     for /internal_api, but reported rather than worked around if it does)."""
 
 
+class ProfileIncomplete(RuntimeError):
+    """Circle answered 400 "Please confirm before proceeding": the member has
+    joined but never saved the new-member "Create a profile" step, and every
+    API call is refused until they do. Confirmed live 2026-09-18 on two
+    bot-joined communities. Not an expired session -- re-pasting the cookie
+    won't help; finishing the profile step will."""
+
+
 @dataclass
 class MemberApiReader:
     """Reads a Circle community's spaces and posts over HTTP with a session."""
@@ -66,7 +76,7 @@ class MemberApiReader:
     def __post_init__(self):
         self.host = self.host.replace("https://", "").replace("http://", "").strip("/")
         self.base = f"https://{self.host}"
-        self._http = requests.Session()
+        self._http = governed_session()
         self._http.headers.update({"User-Agent": _UA, "Accept": "application/json"})
         # Only pass known session cookies; ignore analytics/cf junk.
         for name in SESSION_COOKIE_NAMES:
@@ -94,6 +104,16 @@ class MemberApiReader:
                 f"Circle rejected the session on {path} ({r.status_code}). "
                 "The cookie is missing or expired -- re-authenticate."
             )
+        if r.status_code == 400:
+            try:
+                message = str((r.json() or {}).get("message") or "")
+            except ValueError:
+                message = ""
+            if "please confirm" in message.lower():
+                raise ProfileIncomplete(
+                    f"Circle answered 400 \"{message}\" on {path}: the join is not finished -- "
+                    "the new-member profile step is still open."
+                )
         if r.status_code >= 400:
             return None
         try:
@@ -129,8 +149,12 @@ class MemberApiReader:
         return out
 
     def list_posts(self, space_id: str | int, *, per_page: int = 20,
-                   max_pages: int = 10) -> list[dict]:
-        """Posts in a space, paginated."""
+                   max_pages: int = 10, newer_than: datetime | None = None) -> list[dict]:
+        """Posts in a space, paginated, newest first.
+
+        ``newer_than`` stops at the first page holding nothing newer: the rest
+        was read last time. A post with no date counts as new.
+        """
         records: list[dict] = []
         for pageno in range(1, max_pages + 1):
             path = (f"/internal_api/spaces/{space_id}/posts"
@@ -143,6 +167,8 @@ class MemberApiReader:
                 break
             records.extend(batch)
             if isinstance(payload, dict) and not payload.get("has_next_page"):
+                break
+            if newer_than is not None and not any(_is_newer(r, newer_than) for r in batch):
                 break
             time.sleep(self.request_pause)
         return records
@@ -204,11 +230,18 @@ def _comment_author(record: dict) -> dict:
     }
 
 
+def _is_newer(record: dict, since: datetime) -> bool:
+    when = parse_timestamp(record.get("created_at") or record.get("published_at"))
+    return when is None or when >= since
+
+
 def fetch_space_posts(reader: MemberApiReader, space_id: str | int, *,
                       excluded_content: list[str] | None = None,
                       max_pages: int = 10,
                       with_comments: bool = True,
-                      max_comment_posts: int = 25) -> list[dict]:
+                      max_comment_posts: int = 25,
+                      space_slug: str | None = None,
+                      since: datetime | None = None) -> list[dict]:
     """Read + normalize a space's posts (and their comments + replies) for the
     lead pipeline. Same record shape as the browser reader, so callers are
     interchangeable.
@@ -216,11 +249,19 @@ def fetch_space_posts(reader: MemberApiReader, space_id: str | int, *,
     ``with_comments`` also pulls comments and their replies for up to
     ``max_comment_posts`` posts -- hiring intent often lives in a comment
     ("DM me", "we're looking for…") as much as the post body.
+
+    ``since`` makes it a re-read: pages stop once they hold nothing newer, and
+    comments are fetched only for posts that new. The posts list carries no
+    ``comments_count``, so without it every scan fetched the comments of the
+    first 25 posts of every space again -- on 2026-09-23/24 one pass over the
+    ~40 stored sessions took eleven hours, asaporg alone two.
     """
     community_url = reader.base
     records: list[dict] = []
-    posts = reader.list_posts(space_id, max_pages=max_pages)
+    posts = reader.list_posts(space_id, max_pages=max_pages, newer_than=since)
     for i, record in enumerate(posts):
+        if since is not None and not _is_newer(record, since):
+            continue  # read last time; a page can hold both
         pid = _post_id(record)
         if pid is None:
             continue
@@ -229,9 +270,17 @@ def fetch_space_posts(reader: MemberApiReader, space_id: str | int, *,
                 if title and title != body else (body or title))
         text = redact_pii(text, excluded_content)
         if text.strip():
-            url = record.get("url")
+            url = record.get("url") or record.get("show_url")
             if url and url.startswith("/"):
                 url = community_url.rstrip("/") + url
+            elif not url:
+                # Circle's post records carry a slug, not a URL. Without this
+                # the post fell back to the community root, so every lead from
+                # one community shared a single link -- and the far end, which
+                # deduplicates, kept the first and dropped the rest.
+                slug = record.get("space_slug") or space_slug
+                if slug and record.get("slug"):
+                    url = f"{community_url.rstrip('/')}/c/{slug}/{record['slug']}"
             author = record.get("user") or record.get("community_member") or {}
             records.append({
                 "source_content_id": str(pid),

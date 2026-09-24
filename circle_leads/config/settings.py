@@ -304,10 +304,19 @@ def load_dotenv(path: str | Path = ".env") -> int:
     explicit export always overrides the file. Returns how many vars were set.
     """
     p = Path(path)
-    if not p.exists():
+    try:
+        if not p.exists():
+            return 0
+        text = p.read_text(encoding="utf-8")
+    except OSError:
+        # On a server the command runs as a service account that may not be
+        # allowed to stat its working directory, and the environment comes
+        # from systemd rather than a file. A missing .env is normal there; an
+        # unreadable one must not take the whole command down with an
+        # unhandled PermissionError before it has parsed a single argument.
         return 0
     count = 0
-    for line in p.read_text(encoding="utf-8").splitlines():
+    for line in text.splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue

@@ -78,7 +78,7 @@ def test_recheck_window_skips_recently_synced(monkeypatch):
     db = Database("sqlite:///" + tempfile.mktemp(suffix=".db"))
     with db.session() as s:
         c = Community(
-            slug="x", name="X", url="https://x.circle.so",
+            slug="x", name="X", url="https://x.circle.so", host="x.circle.so",
             discovery_source="t", access_status=AccessState.NOT_VISITED.value,
             permission_status=PermissionStatus.CANDIDATE.value,
             relevance_score=50, relevant=True,

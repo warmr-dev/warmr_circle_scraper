@@ -14,9 +14,14 @@ behaviour, independent of how the product is currently aimed.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
+
+# Tests must never spend (or wait on) this machine's real Circle budget in
+# ~/.warmr -- governor tests turn it back on against a temp file.
+os.environ["CIRCLE_GOVERNOR"] = "off"
 
 from circle_leads.config.settings import Requirements, load_requirements
 

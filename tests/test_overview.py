@@ -84,7 +84,9 @@ def test_funnel_splits_by_source_and_ignores_a_bare_401(client):
     assert by["dns"]["named"] == 2
     # dns-lapsed is ICP-fit but excluded; dns-locked counts.
     assert by["dns"]["icp"] == 1
-    assert by["directory"]["icp"] == 2  # landing page excluded
+    # The landing page is not on Circle; the paid card has no login, so it is
+    # only listed (section 2), never counted as a community we pursue.
+    assert by["directory"]["icp"] == 1
     assert by["directory"]["read"] == 1
     # The lapsed community was read, but it is not in the ICP count.
     assert by["dns"]["read"] == 0 and by["dns"]["read_other"] == 1
@@ -94,11 +96,14 @@ def test_funnel_splits_by_source_and_ignores_a_bare_401(client):
 
 def test_icp_groups_by_access_and_exclusions(client):
     g = client.get("/api/overview").json()["icp_groups"]
-    assert g["free"] == {"joined": 1, "waiting": 0, "hit_paywall": 1, "failed": 0, "total": 2}
-    assert g["paid"]["directory_cards"] == 1 and g["paid"]["total"] == 1
+    assert g["free"] == {"joined": 1, "waiting": 0, "pending_approval": 0, "hit_paywall": 1,
+                         "no_address": 0, "failed": 0, "total": 2}
+    assert (g["paid"]["with_session"], g["paid"]["without_session"], g["paid"]["total"]) == (0, 1, 1)
+    assert [i["name"] for i in g["paid"]["items"]] == ["B"]
     assert g["closed"]["locked"] == 1 and g["closed"]["total"] == 1
     assert g["excluded"] == {"not_on_circle": 1, "subscription_expired": 1, "total": 2}
-    assert g["total"] == 4
+    # What we can pursue leaves the paid card out: it has no login.
+    assert g["total"] == 3
 
 
 def test_cloudflare_block_is_not_reported_as_an_expired_cookie(client):
@@ -155,12 +160,14 @@ def test_named_split_and_queues(tmp_path):
     assert q["join_type_recheck"]["waiting"] == 1
     assert q["join_type_recheck"]["field"] == "join_type_checked_at"
     assert not q["join_type_recheck"]["stale"]
+    # The read queue counts what a reader will take: the free and the locked
+    # community. The paid one has no login, so nothing reads it -- by decision
+    # -- and counting it would keep the row red for work that never comes.
     assert q["read"]["waiting"] == 2 and not q["read"]["stale"]
     # One free community waits and the last join attempt was 3 days ago.
     assert q["join"]["waiting"] == 1 and q["join"]["stale"]
-    # A paid community waits and no decision was ever recorded.
-    assert q["paid_decision"]["waiting"] == 1
-    assert q["paid_decision"]["last_moved"] is None and q["paid_decision"]["stale"]
+    # No process decides whether to pay, so there is no such queue.
+    assert "paid_decision" not in q
 
 
 def test_empty_queue_is_never_stale(tmp_path):
@@ -170,3 +177,163 @@ def test_empty_queue_is_never_stale(tmp_path):
     with db.session() as s:
         queues = build_overview(s, utcnow().replace(tzinfo=None))["queues"]
     assert all(x["waiting"] == 0 and not x["stale"] for x in queues)
+
+
+def test_overview_is_served_from_a_short_cache(client, monkeypatch):
+    import circle_leads.web.app as web_app
+    import circle_leads.web.overview as overview
+
+    real = overview.build_overview
+    calls = []
+
+    def counting(s, now):
+        calls.append(now)
+        return real(s, now)
+
+    monkeypatch.setattr(overview, "build_overview", counting)
+    first = client.get("/api/overview").json()
+    second = client.get("/api/overview").json()
+    assert second == first
+    assert len(calls) == 1
+
+    monkeypatch.setattr(web_app, "OVERVIEW_TTL_SECONDS", 0)
+    client.get("/api/overview")
+    assert len(calls) == 2
+
+
+# --- one page, one number --------------------------------------------------
+#
+# The queue table said 87 were "waiting to be joined" while the panel below it
+# said 21, for the same step. 66 of the difference were communities not hosted
+# on Circle at all -- marketing sites that merely had a directory card. They
+# can never be joined, so they sat in the queue forever and painted it red
+# with "no movement for over a day". The fixture's "dir-landing" row is
+# exactly that case.
+
+def _queue(payload, key):
+    return next(q for q in payload["queues"] if q["key"] == key)
+
+
+def test_the_join_queue_matches_the_panel_beside_it(client):
+    data = client.get("/api/overview").json()
+    assert _queue(data, "join")["waiting"] == data["icp_groups"]["free"]["waiting"]
+
+
+def test_paid_is_a_list_and_in_no_queue(client):
+    """By decision of 2026-09-24: a number and a list, nothing more."""
+    data = client.get("/api/overview").json()
+    assert [q["key"] for q in data["queues"]] == ["name", "join_type_recheck", "read", "join"]
+    paid = data["icp_groups"]["paid"]
+    assert paid["total"] == len(paid["items"]) == 1
+    assert paid["items"][0]["has_session"] is False
+
+
+def test_a_community_that_is_not_on_circle_is_in_no_queue(client):
+    """Nothing can join, read or join-type check a site that is not on Circle."""
+    data = client.get("/api/overview").json()
+    # dir-landing is ICP-fit, free_join, never attempted -- and platform
+    # "other". It must not be counted as work that is waiting.
+    assert _queue(data, "join")["waiting"] == data["icp_groups"]["free"]["waiting"]
+    assert data["icp_groups"]["excluded"]["not_on_circle"] >= 1
+
+
+def test_a_directory_community_counts_as_being_on_circle(client):
+    """platform "discover" means "found via Circle's directory", not "not Circle"."""
+    data = client.get("/api/overview").json()
+    # dir-card is platform "discover", ICP-fit, paid: it belongs to the paid
+    # list, not to the excluded pile.
+    assert data["icp_groups"]["paid"]["total"] >= 1
+    assert data["icp_groups"]["excluded"]["not_on_circle"] == 1
+
+
+def test_a_community_whose_address_we_do_not_know_is_not_waiting_to_be_read(tmp_path):
+    """276 of prod's ICP-fit rows are directory cards with no host resolved.
+
+    Counting them as a read backlog painted the queue red forever; nearly all
+    are paid cards, which are only listed.
+    """
+    from circle_leads.web.overview import build_overview
+
+    db = Database(f"sqlite:///{tmp_path / 'nohost.db'}")
+    now = utcnow().replace(tzinfo=None)
+    with db.session() as s:
+        carded = _row(s, "card", source="circle_directory", name="C",
+                      platform="discover", join_type="paid", icp=True)
+        carded.host = None
+        carded.url = "https://discover.circle.so/products/card"
+        reachable = _row(s, "reach", source="circle_directory", name="R",
+                         join_type="free_join", icp=True)
+        reachable.host = "reach.circle.so"
+
+    with db.session() as s:
+        q = {x["key"]: x for x in build_overview(s, now)["queues"]}
+    assert q["read"]["waiting"] == 1
+
+
+# --- who is waiting for what (circle_leads/reach.py) ---------------------------
+
+def _session(s, host):
+    from circle_leads.storage.models import ReplaySession
+    s.add(ReplaySession(host=host, encrypted_cookies="x", cookie_count=1))
+
+
+def test_a_paid_community_with_a_login_is_pursued_and_read(tmp_path):
+    """Paid is read only with a login someone bought -- and then it counts."""
+    from circle_leads.web.overview import build_overview
+
+    db = Database(f"sqlite:///{tmp_path / 'paid.db'}")
+    now = utcnow().replace(tzinfo=None)
+    with db.session() as s:
+        _row(s, "bought", source="circle_directory", name="Bought", join_type="paid", icp=True)
+        _row(s, "not-bought", source="circle_directory", name="Other", join_type="paid", icp=True)
+        _session(s, "bought.circle.so")
+    with db.session() as s:
+        ov = build_overview(s, now)
+    q = {x["key"]: x for x in ov["queues"]}
+    assert q["read"]["waiting"] == 1
+    assert ov["funnel"]["total"]["icp"] == 1
+    paid = ov["icp_groups"]["paid"]
+    assert (paid["with_session"], paid["without_session"]) == (1, 1)
+    assert {i["name"]: i["has_session"] for i in paid["items"]} == {"Bought": True, "Other": False}
+    assert ov["icp_groups"]["total"] == 1
+
+
+def test_an_unknown_that_left_circle_is_not_waiting_for_a_recheck(tmp_path):
+    from circle_leads.web.overview import build_overview
+
+    db = Database(f"sqlite:///{tmp_path / 'gone.db'}")
+    now = utcnow().replace(tzinfo=None)
+    with db.session() as s:
+        for slug, detail in [
+            ("gone", "host no longer maps to a community (redirects to circle.so marketing site)"),
+            ("site", "non-JSON response"),
+            ("missing", "HTTP 404"),
+            ("moved-away", "custom domain no longer served: TLS fails on x and y"),
+            ("tls", "request failed: SSLError"),
+            ("legacy", None),
+        ]:
+            r = _row(s, slug, source=DNS_SOURCE, name=slug, join_type="unknown")
+            r.join_type_detail = detail
+    with db.session() as s:
+        q = {x["key"]: x for x in build_overview(s, now)["queues"]}
+    # Only the TLS failure (its CNAME is followed next time) and the row
+    # checked before reasons were recorded can still change.
+    assert q["join_type_recheck"]["waiting"] == 2
+
+
+def test_a_free_community_we_hold_a_session_for_is_joined_not_waiting(tmp_path):
+    """siliconslopes sat in the join queue while being read with its session."""
+    from circle_leads.web.overview import build_overview
+
+    db = Database(f"sqlite:///{tmp_path / 'sess.db'}")
+    now = utcnow().replace(tzinfo=None)
+    with db.session() as s:
+        _row(s, "read-by-cookie", source=DNS_SOURCE, name="S", join_type="free_join", icp=True)
+        _row(s, "to-join", source=DNS_SOURCE, name="T", join_type="free_join", icp=True)
+        _session(s, "read-by-cookie.circle.so")
+    with db.session() as s:
+        ov = build_overview(s, now)
+    q = {x["key"]: x for x in ov["queues"]}
+    assert q["join"]["waiting"] == 1
+    assert ov["icp_groups"]["free"]["joined"] == 1
+    assert ov["icp_groups"]["free"]["waiting"] == q["join"]["waiting"]

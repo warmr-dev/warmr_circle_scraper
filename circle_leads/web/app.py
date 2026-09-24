@@ -8,6 +8,7 @@ posture is closed.
 from __future__ import annotations
 
 import os
+import time
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -37,6 +38,24 @@ from circle_leads.web.auth import (
 
 STATIC_DIR = Path(__file__).parent / "static"
 REVIEW_STATUSES = {"pending_review", "contacted", "replied", "rejected", "won"}
+
+
+# How long one computed /api/overview is served before it is recomputed. The
+# funnel moves at the pace of the worker's slowest stage (hourly at best), and
+# the page is the first thing a client opens: 11 aggregate queries per view
+# bought nothing between two views a minute apart.
+OVERVIEW_TTL_SECONDS = 120
+
+
+def _parse_day(value: str | None, name: str) -> datetime | None:
+    """A ``YYYY-MM-DD`` query param as midnight UTC; 400 on anything else."""
+    if not value:
+        return None
+    try:
+        day = datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(400, f"{name} must be a date like 2026-09-21") from None
+    return day.replace(tzinfo=timezone.utc)
 
 
 def create_app(
@@ -179,17 +198,41 @@ def create_app(
         community: str | None = None,
         priority: str | None = None,
         status: str | None = None,
+        q: str | None = None,
+        days: int | None = None,
+        since: str | None = None,
+        until: str | None = None,
+        date_field: str = "published",
+        sort: str = "score",
         min_score: int = 0,
         limit: int = 200,
         _: None = Depends(require_auth),
     ) -> dict[str, Any]:
+        """Leads for the dashboard.
+
+        Time window: ``days`` (the last N days) or ``since``/``until`` as
+        inclusive ``YYYY-MM-DD`` dates; ``date_field`` picks the post date
+        (``published``) or the date the lead was found (``found``).
+        """
         skill_list = [s.strip() for s in skills.split(",")] if skills else None
-        with db.session() as s:
-            rows = query_leads(
-                s, role=role, skills=skill_list, community=community,
-                priority=priority, min_score=min_score, review_status=status,
-                limit=limit,
-            )
+        start = _parse_day(since, "since")
+        end = _parse_day(until, "until")
+        if end is not None:
+            end += timedelta(days=1)  # inclusive: the whole "until" day
+        if days is not None:
+            if days < 1:
+                raise HTTPException(400, "days must be at least 1")
+            start = datetime.now(timezone.utc) - timedelta(days=days)
+        try:
+            with db.session() as s:
+                rows = query_leads(
+                    s, role=role, skills=skill_list, community=community,
+                    priority=priority, min_score=min_score, review_status=status,
+                    search=q, since=start, until=end, date_field=date_field,
+                    sort=sort, limit=limit,
+                )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
         return {"leads": rows, "count": len(rows)}
 
     @app.post("/api/leads/{lead_id}/status")
@@ -672,7 +715,8 @@ def create_app(
                         cap = 8 if time_budget else 25
                         recs = fetch_space_posts(
                             reader, sp["id"], max_pages=max_pages,
-                            with_comments=True, max_comment_posts=cap)
+                            with_comments=True, max_comment_posts=cap,
+                            space_slug=sp.get("slug"))
                     except SessionInvalid:
                         # A single space may deny access; don't fail the whole scan.
                         continue
@@ -1067,13 +1111,24 @@ def create_app(
 
     # --- Stats and activity ----------------------------------------------
 
+    # One computed overview per warm instance, see OVERVIEW_TTL_SECONDS. Two
+    # requests racing past an expired entry both compute it; that costs one
+    # extra query batch and nothing else, so there is no lock.
+    overview_cache: dict[str, Any] = {"at": 0.0, "value": None}
+
     @app.get("/api/overview")
     def api_overview(_: None = Depends(require_auth)) -> dict[str, Any]:
         """The client-facing funnel -- see web/overview.py for definitions."""
         from circle_leads.web.overview import build_overview
 
+        started = time.monotonic()
+        if (overview_cache["value"] is not None
+                and started - overview_cache["at"] < OVERVIEW_TTL_SECONDS):
+            return overview_cache["value"]
         with db.session() as s:
-            return build_overview(s, datetime.now(timezone.utc).replace(tzinfo=None))
+            value = build_overview(s, datetime.now(timezone.utc).replace(tzinfo=None))
+        overview_cache.update(at=started, value=value)
+        return value
 
     @app.get("/api/stats")
     def api_stats(_: None = Depends(require_auth)) -> dict[str, Any]:
@@ -1380,6 +1435,70 @@ def create_app(
             })
         return {"by_status": by_status, "attempted_today": attempted_today,
                 "attempted_week": attempted_week, "recent": recent}
+
+    @app.get("/api/watchdog")
+    def api_watchdog(request: Request) -> dict[str, Any]:
+        """Is the server still alive? Nothing on it can answer that itself.
+
+        The worker and the watcher each stamp a heartbeat into the database.
+        This runs on Vercel, on a schedule, and shouts on Telegram when a stamp
+        goes stale -- which is the only way we hear about a droplet that has
+        stopped, run out of disk, or lost its network.
+
+        Open by design: it takes no input, returns no secrets, and Vercel's own
+        cron cannot send an Authorization header. The worst a stranger can do
+        is learn whether two timestamps are recent.
+        """
+        from datetime import datetime as _dtm
+
+        from circle_leads.notify import notify
+        from circle_leads.storage.settings_store import get_setting
+
+        # How long a stamp may be missing before it is a problem. Both services
+        # now beat from a thread beside the work rather than from the top of
+        # their loop, so a window no longer has to cover the length of a job.
+        # The worker's used to be 90 minutes to survive a harvest and went
+        # stale anyway, crying wolf while the journal showed it working. It
+        # keeps the wider of the two only because it competes for a
+        # three-connection pool, where a beat can be skipped under load.
+        LIMITS = {"watcher_heartbeat": 900, "worker_heartbeat": 1800}
+
+        now = _dtm.utcnow()
+        report: dict[str, Any] = {"checked_at": now.isoformat(), "services": {}}
+        stale: list[str] = []
+        for key, limit in LIMITS.items():
+            raw = get_setting(db, key)
+            name = key.replace("_heartbeat", "")
+            if not raw:
+                report["services"][name] = {"state": "never", "age_s": None}
+                stale.append(f"{name}: никогда не отчитывался")
+                continue
+            try:
+                age = (now - _dtm.fromisoformat(raw)).total_seconds()
+            except ValueError:
+                report["services"][name] = {"state": "unreadable", "age_s": None}
+                stale.append(f"{name}: непонятная отметка времени")
+                continue
+            ok = age <= limit
+            report["services"][name] = {
+                "state": "ok" if ok else "stale",
+                "age_s": round(age),
+                "limit_s": limit,
+            }
+            if not ok:
+                stale.append(f"{name}: молчит {age / 60:.0f} мин (порог {limit // 60})")
+
+        report["ok"] = not stale
+        if stale:
+            notify(
+                "Warmr: служба молчит",
+                "\n".join(stale) + "\n\nПроверить: <code>systemctl status warmr-worker "
+                "warmr-watcher</code> на 168.144.131.38",
+                level="error",
+                # One message per hour per distinct problem, not one per cron tick.
+                dedup_key="watchdog:" + "|".join(sorted(stale)),
+            )
+        return report
 
     @app.post("/api/tick")
     @app.get("/api/tick")

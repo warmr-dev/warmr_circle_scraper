@@ -1,0 +1,49 @@
+[Unit]
+Description=Warmr Circle worker: drains the scan-job queue, runs scheduled harvests
+Documentation=https://github.com/warmr-dev/warmr_circle_scraper
+After=network-online.target
+Wants=network-online.target
+
+OnFailure=warmr-alert@%n.service
+# Without these, OnFailure= above never fires: Restart=always only reaches
+# the failed state after StartLimitBurst starts inside StartLimitIntervalSec,
+# and the default window (10s) is shorter than our own RestartSec.
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=warmr
+Group=warmr
+WorkingDirectory=/var/lib/warmr
+EnvironmentFile=/etc/warmr/warmr.env
+# Set here, not in warmr.env: EnvironmentFile= wins over
+# Environment=, so a per-service path only works if the shared
+# file does not set it at all.
+Environment=CIRCLE_GOVERNOR_FILE=/var/lib/warmr/circle-governor.json
+# /opt/warmr/current is a symlink to the release; systemd resolves it at start,
+# so a deploy is: swap the link, restart.
+ExecStart=/opt/warmr/current/venv/bin/circle-leads worker
+Restart=always
+RestartSec=15
+# Long jobs (a harvest pass runs for hours) must finish, not be killed mid-write.
+TimeoutStopSec=300
+KillSignal=SIGTERM
+
+# The worker needs its state dir, the release tree, and nothing else on disk.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/warmr
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+MemoryMax=2G
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=warmr-worker
+
+[Install]
+WantedBy=multi-user.target

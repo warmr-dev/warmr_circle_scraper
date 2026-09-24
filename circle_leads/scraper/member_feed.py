@@ -29,6 +29,7 @@ from typing import Iterator
 
 import requests
 
+from circle_leads.scraper.http_client import governed_session
 from circle_leads.scraper.normalize import parse_timestamp, redact_pii, strip_html
 from circle_leads.scraper.tiptap import tiptap_plain, tiptap_text
 
@@ -52,7 +53,7 @@ class MemberFeedClient:
     cookie: str  # the full Cookie header value, from the environment
     requests_per_minute: int = 30
     timeout: int = 20
-    session: requests.Session = field(default_factory=requests.Session)
+    session: requests.Session = field(default_factory=governed_session)
     _last_request: float = 0.0
 
     def __post_init__(self) -> None:

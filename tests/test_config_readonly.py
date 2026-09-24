@@ -111,3 +111,30 @@ def test_database_falls_back_when_default_path_is_unwritable(monkeypatch, tmp_pa
     # It should be usable (a real, writable sqlite file).
     with db.session() as s:
         assert s is not None
+
+
+def test_an_unreadable_dotenv_does_not_kill_the_command(tmp_path, monkeypatch):
+    """A service account may not be allowed to stat its working directory.
+
+    On the server the CLI runs as `warmr` with the environment supplied by
+    systemd. Before this was handled, `circle-leads watch` died with a bare
+    PermissionError from the dotenv loader before parsing a single argument.
+    """
+    import os
+    from circle_leads.config.settings import load_dotenv
+
+    secret = tmp_path / ".env"
+    secret.write_text("SHOULD_NOT_LOAD=1\n")
+    os.chmod(secret, 0o000)
+    monkeypatch.delenv("SHOULD_NOT_LOAD", raising=False)
+    try:
+        assert load_dotenv(secret) == 0
+        assert "SHOULD_NOT_LOAD" not in os.environ
+    finally:
+        os.chmod(secret, 0o600)
+
+
+def test_a_missing_dotenv_is_not_an_error(tmp_path):
+    from circle_leads.config.settings import load_dotenv
+
+    assert load_dotenv(tmp_path / "nope.env") == 0

@@ -8,3 +8,4 @@ exports
 .env
 tests
 node_modules
+desktop

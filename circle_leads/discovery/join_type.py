@@ -16,11 +16,15 @@ yes/no that decides which account, if any, should join.
 from __future__ import annotations
 
 import logging
+import socket
 from dataclasses import dataclass
+from datetime import timedelta
 from urllib.parse import urlparse
 
 import requests
 
+from circle_leads.reach import TERMINAL_UNKNOWN_PREFIXES, recheckable_unknown  # noqa: F401
+from circle_leads.scraper.governor import LOW, priority
 from circle_leads.scraper.http_client import BROWSER_UA, shared_session
 
 logger = logging.getLogger(__name__)
@@ -76,6 +80,40 @@ def _redirects_to_marketing_site(
 class JoinClassification:
     join_type: str
     detail: str = ""
+    #: The community's display name when the call answered 200 -- the same
+    #: payload carries it, so the harvest doesn't ask a second time.
+    name: str | None = None
+    #: Set when the community answered at the *.circle.so host its dead custom
+    #: domain still points to: the address it actually lives at now.
+    moved_to: str | None = None
+
+
+def circle_host_behind(host: str) -> str | None:
+    """The ``<slug>.circle.so`` name a custom domain is a CNAME for, if any.
+
+    A community that drops its custom domain on Circle keeps living at its
+    Circle host, while the domain's DNS often still points there -- Circle
+    just stops serving a certificate for the custom name, so every request
+    fails the TLS handshake. 269 of the 443 communities stuck at "unknown" on
+    2026-09-24 were this; community.futureofsaas.io, for one, answered as a
+    free community at future-of-saas.circle.so.
+    """
+    try:
+        canonical = socket.gethostbyname_ex(host)[0]
+    except OSError:
+        return None
+    canonical = (canonical or "").lower().rstrip(".")
+    if canonical and canonical != host.lower() and canonical.endswith(".circle.so"):
+        return canonical
+    return None
+
+
+def payload_name(data: dict) -> str | None:
+    for key in ("name", "community_name", "title"):
+        val = data.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()[:120]
+    return None
 
 
 def _price_label_fallback(price_label: str | None) -> JoinClassification | None:
@@ -212,7 +250,9 @@ def _fetch_join_classification_once(
     if not isinstance(data, dict) or "is_private" not in data:
         return JoinClassification(JoinType.UNKNOWN, "response missing expected fields")
 
-    return _classify_payload(data)
+    classification = _classify_payload(data)
+    classification.name = payload_name(data)
+    return classification
 
 
 def fetch_join_classification(
@@ -249,12 +289,58 @@ def fetch_join_classification(
             return JoinClassification(
                 retry.join_type,
                 f"{retry.detail} (www retry; apex failed: {classification.detail})",
+                name=retry.name,
             )
+    if (classification.join_type == JoinType.UNKNOWN
+            and classification.detail.startswith("request failed: SSLError")
+            and not host.lower().endswith(".circle.so")):
+        return _follow_dead_custom_domain(host, http=http, timeout=timeout)
     return classification
 
 
+def _follow_dead_custom_domain(host: str, *, http, timeout: int) -> JoinClassification:
+    """A custom domain whose TLS handshake fails: ask the Circle host behind it.
+
+    Any answer other than "unknown" there is a community -- a 401 that does not
+    fall through to circle.so's marketing site included, since the name came
+    from the owner's own DNS, not from a guess (see circle-wildcard-401 in the
+    project notes) -- so the row has moved. Otherwise the domain is simply no
+    longer served, which another look will not change.
+    """
+    target = circle_host_behind(host)
+    if target is None:
+        return JoinClassification(
+            JoinType.UNKNOWN,
+            f"custom domain no longer served: TLS fails on {host} and its DNS "
+            "does not point to a *.circle.so host",
+        )
+    moved = _fetch_join_classification_once(target, http=http, timeout=timeout)
+    if moved.join_type == JoinType.UNKNOWN:
+        return JoinClassification(
+            JoinType.UNKNOWN,
+            f"custom domain no longer served: TLS fails on {host}, and {target} "
+            f"behind it is not a community ({moved.detail})",
+        )
+    return JoinClassification(
+        moved.join_type,
+        f"{moved.detail} (at {target}: the custom domain {host} is no longer served)",
+        name=moved.name,
+        moved_to=target,
+    )
+
+
+# Hosts one *scheduled* (unattended) join-type pass may check. Each row is an
+# HTTP GET to a different Circle host, sharing the per-IP budget with reads
+# that can actually produce a lead, so an unbounded pass over a fresh
+# directory crawl would starve the poller.
+SCHEDULED_BATCH = 100
+
+# How long an inconclusive answer stands before the scheduled pass asks again.
+UNKNOWN_RECHECK_AFTER = timedelta(days=1)
+
+
 def classify_join_type_pending(
-    db, *, limit: int | None = None, recheck: bool = False
+    db, *, limit: int | None = None, recheck: bool = False, scheduled: bool = False
 ) -> dict[str, int]:
     """Backfill join_type for communities that never got a live check.
 
@@ -266,18 +352,54 @@ def classify_join_type_pending(
     ``recheck`` re-classifies every community instead of only never-checked
     ones -- e.g. to backfill join_type_detail (P21) onto rows classified
     before that column existed, or after a classification-rule change.
+    ``scheduled`` is the worker's unattended pass: never-checked rows plus
+    "unknown" answers older than UNKNOWN_RECHECK_AFTER that another look could
+    still change (not TERMINAL_UNKNOWN_PREFIXES), ICP-fit and named first --
+    the rows the dashboard's re-check queue counts. Before, the pass took
+    never-checked rows by id, so it could not touch a single one of the 443
+    "unknown" rows that queue showed: every one of them had been checked once.
+    Runs at low priority: it shares Circle's per-IP budget with reads that
+    can produce leads, and yields to them.
     """
-    from sqlalchemy import select
-
-    from circle_leads.storage.models import Community, utcnow
-
     stats: dict[str, int] = {"checked": 0}
     session = shared_session()
+    with priority(LOW):
+        _classify_rows(db, session, stats, limit=limit, recheck=recheck, scheduled=scheduled)
+    return stats
+
+
+def _pending_query(*, recheck: bool, scheduled: bool):
+    from sqlalchemy import and_, case, nullsfirst, or_, select
+
+    from circle_leads.reach import real_host
+    from circle_leads.storage.models import Community, utcnow
+
+    query = select(Community.id)
+    if scheduled:
+        named = and_(Community.name.is_not(None), Community.name != "")
+        return query.where(
+            real_host(),
+            or_(
+                Community.join_type_checked_at.is_(None),
+                and_(recheckable_unknown(),
+                     Community.join_type_checked_at < utcnow() - UNKNOWN_RECHECK_AFTER),
+            ),
+        ).order_by(
+            Community.icp_flag.desc(),
+            case((named, 0), else_=1),
+            nullsfirst(Community.join_type_checked_at.asc()),
+            Community.id,
+        )
+    if not recheck:
+        query = query.where(Community.join_type_checked_at.is_(None))
+    return query.order_by(Community.id)
+
+
+def _classify_rows(db, session, stats, *, limit, recheck, scheduled=False) -> None:
+    from circle_leads.storage.models import Community, utcnow
 
     with db.session() as s:
-        query = select(Community.id).order_by(Community.id)
-        if not recheck:
-            query = query.where(Community.join_type_checked_at.is_(None))
+        query = _pending_query(recheck=recheck, scheduled=scheduled)
         if limit:
             query = query.limit(limit)
         pending_ids = list(s.scalars(query).all())
@@ -287,16 +409,49 @@ def classify_join_type_pending(
             community = s.get(Community, community_pk)
             if community is None:
                 continue
-            host = urlparse(community.url).hostname or (
+            host = community.host or urlparse(community.url).hostname or (
                 community.url.replace("https://", "").replace("http://", "").strip("/")
             )
-            classification = refine_join_classification(
-                fetch_join_classification(host, session=session), community
-            )
+            live = fetch_join_classification(host, session=session)
+            classification = refine_join_classification(live, community)
+            if live.moved_to:
+                # refine() may swap in a price or manual verdict; the address
+                # the community answered at is still where it lives.
+                classification.moved_to = live.moved_to
+                classification = _repoint(s, community, classification, stats)
             community.join_type = classification.join_type
             community.join_type_detail = classification.detail[:2000]
             community.join_type_checked_at = utcnow()
             stats["checked"] += 1
             stats[classification.join_type] = stats.get(classification.join_type, 0) + 1
 
-    return stats
+
+def _repoint(s, community, classification: JoinClassification, stats) -> JoinClassification:
+    """Move a row to the Circle host its dead custom domain points to.
+
+    Unless that host is already another row: then this one is its dead copy.
+    The same rewrite the one-off p27 migration did by hand for 11 rows.
+    """
+    from sqlalchemy import select, update
+
+    from circle_leads.storage.models import Community, WatchState, utcnow
+
+    target = classification.moved_to
+    other = s.scalar(
+        select(Community.id).where(Community.host == target, Community.id != community.id)
+    )
+    if other is not None:
+        return JoinClassification(
+            JoinType.UNKNOWN,
+            f"custom domain no longer served: the community lives at {target}, "
+            f"which is community #{other}",
+        )
+    community.host = target
+    community.url = f"https://{target}"
+    community.platform = "circle"
+    s.execute(
+        update(WatchState).where(WatchState.community_id == community.id)
+        .values(host=target, consecutive_errors=0, next_check_at=utcnow())
+    )
+    stats["moved"] = stats.get("moved", 0) + 1
+    return classification

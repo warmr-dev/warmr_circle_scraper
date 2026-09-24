@@ -21,31 +21,34 @@ from __future__ import annotations
 
 import json
 import logging
-import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlparse
 
+import requests
 from sqlalchemy import or_, select
 
 from circle_leads.config.settings import JoinPacingConfig
-from circle_leads.join.ego_bridge import EgoBrowserError, attempt_join, open_join_space
+from circle_leads.join.accounts import resolve_account
+from circle_leads.join.ego_bridge import (
+    EgoBrowserError, EgoJoinResult, attempt_join, open_join_space,
+)
+from circle_leads.join.forms import FormField, make_form_llm, resolve_form
 from circle_leads.join.pacing import joins_attempted_today, sleep_between_attempts
+from circle_leads.reach import join_queue
 from circle_leads.storage.database import Database
-from circle_leads.storage.models import Community, JoinStatus, utcnow
+from circle_leads.storage.models import (
+    CircleConnection, Community, JoinStatus, ReplaySession, utcnow,
+)
 from circle_leads.web.replay_store import connect_host
 
 logger = logging.getLogger(__name__)
 
-# "main" is the connector's existing account (CIRCLE_EMAIL/PASSWORD, already
-# used to actually source leads); "test" is a separate account for anything
-# that shouldn't touch main's Circle-side reputation -- spam-looking
-# communities, and exercising new driver behavior. Circle rate-limits/flags
-# per account, so this is a real second budget, not just a label -- see the
-# account-scoped cap below.
-_ACCOUNT_ENV_VARS = {
-    "main": ("CIRCLE_EMAIL", "CIRCLE_PASSWORD"),
-    "test": ("CIRCLE_EMAIL2", "CIRCLE_PASSWORD2"),
-}
+# Accounts ("main" = 1, "test" = 2, then 3..10), their credentials and the
+# Ego Lite profile each one must run in: see circle_leads/join/accounts.py.
+# Circle rate-limits/flags per account, so each is a real separate budget --
+# see the account-scoped cap below.
 
 # Every raw driver outcome, terminal or not -- _persist_terminal_outcome only
 # ever writes joined/paid_skip/pending_approval/etc. to the DB, so a handoff
@@ -56,17 +59,23 @@ _ACCOUNT_ENV_VARS = {
 ATTEMPT_LOG_PATH = Path("data/join_attempts.log")
 
 
-def _log_attempt(candidate: dict, status: str, detail: str, account: str) -> None:
+def _log_attempt(candidate: dict, status: str, detail: str, account: str,
+                 *, visit: bool = True) -> None:
+    """``visit=False`` marks an entry that opened no page in the browser (a
+    dead-host pre-check), so it doesn't count toward the account's daily cap."""
     ATTEMPT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    entry = {
+        "at": utcnow().isoformat(),
+        "account": account,
+        "slug": candidate["slug"],
+        "url": candidate["url"],
+        "status": status,
+        "detail": detail,
+    }
+    if not visit:
+        entry["visit"] = False
     with ATTEMPT_LOG_PATH.open("a") as f:
-        f.write(json.dumps({
-            "at": utcnow().isoformat(),
-            "account": account,
-            "slug": candidate["slug"],
-            "url": candidate["url"],
-            "status": status,
-            "detail": detail,
-        }) + "\n")
+        f.write(json.dumps(entry) + "\n")
 
 
 def _iter_attempt_log() -> "list[dict]":
@@ -108,7 +117,9 @@ def _visits_today_for_account(account: str, entries: "list[dict] | None" = None)
     return sum(
         1
         for entry in entries
-        if entry.get("account") == account and str(entry.get("at", "")).startswith(today)
+        if entry.get("account") == account
+        and entry.get("visit", True)
+        and str(entry.get("at", "")).startswith(today)
     )
 
 
@@ -170,8 +181,9 @@ _TERMINAL_STATUS_MAP = {
     "pending_approval": JoinStatus.PENDING_APPROVAL.value,
     "subscription_expired_skip": JoinStatus.SUBSCRIPTION_EXPIRED_SKIP.value,
     "invite_skip": JoinStatus.INVITE_SKIP.value,
+    "dead_host": JoinStatus.DEAD_HOST.value,
+    "external_login": JoinStatus.EXTERNAL_LOGIN.value,
 }
-
 
 @dataclass
 class JoinBatchResult:
@@ -184,6 +196,30 @@ class JoinBatchResult:
     handoffs: dict[str, str] = field(default_factory=dict)
     stopped_for: str | None = None  # candidate slug that ended the batch early, if any
     stop_reason: str | None = None
+    # slug -> why, for candidates settled without opening the browser (a host
+    # that no longer resolves).
+    skipped: dict[str, str] = field(default_factory=dict)
+
+
+def _host_of(url: str | None) -> str:
+    raw = (url or "").strip()
+    return (urlparse(raw if "://" in raw else f"https://{raw}").hostname or "").lower()
+
+
+def _hosts_with_cookies(db: Database) -> tuple[set[str], set[int]]:
+    """Hosts (and community ids) we already hold a member session for.
+
+    Joining them again is wasted visits: siliconslopes, already read for 917
+    posts, sat in the join queue on the 2026-09-18 test run.
+    """
+    with db.session() as s:
+        hosts = {h.lower() for h in s.scalars(select(ReplaySession.host)).all() if h}
+        ids = {
+            cid for cid in s.scalars(
+                select(CircleConnection.community_id).where(CircleConnection.host.in_(hosts))
+            ).all() if cid
+        } if hosts else set()
+    return hosts, ids
 
 
 def _match_host(candidates: list[dict], host: str) -> list[dict]:
@@ -220,18 +256,14 @@ def select_join_candidates(
     caller that needs it more than once can pay for the parse only once.
     """
     handoffs = _handoff_counts(attempt_log)
+    member_hosts, member_ids = _hosts_with_cookies(db)
     with db.session() as s:
         query = (
             select(
                 Community.id, Community.slug, Community.url, Community.name,
-                Community.join_type, Community.icp_score,
+                Community.join_type, Community.icp_score, Community.join_status,
             )
-            .where(
-                Community.icp_flag.is_(True),
-                Community.platform == "circle",
-                Community.join_type.in_(["free_join", "paid"]),
-                Community.join_status == JoinStatus.NOT_ATTEMPTED.value,
-            )
+            .where(join_queue())
             .order_by(Community.icp_score.desc())
         )
         if host:
@@ -247,14 +279,21 @@ def select_join_candidates(
             # `limit + len(handoffs)` rows by icp_score. Cutting at plain
             # `limit` here instead is what would keep handing back the same
             # stuck head of the queue that the reordering exists to get past.
-            query = query.limit(limit + len(handoffs))
+            # Rows dropped below for an existing membership widen the bound
+            # the same way.
+            query = query.limit(limit + len(handoffs) + len(member_hosts))
         rows = s.execute(query).all()
     candidates = [
         {
             "id": r.id, "slug": r.slug, "url": r.url, "name": r.name,
             "join_type": r.join_type, "icp_score": r.icp_score,
+            "join_status": r.join_status,
         }
         for r in rows
+        # A community the bot left on the profile step keeps its cookies but
+        # still needs the bot; any other host with a member session doesn't.
+        if r.join_status == JoinStatus.PROFILE_PENDING.value
+        or (r.id not in member_ids and _host_of(r.url) not in member_hosts)
     ]
     if host:
         candidates = _match_host(candidates, host)
@@ -280,6 +319,57 @@ def _persist_terminal_outcome(db: Database, community_id: int, status: str, deta
             community.joined_at = utcnow()
 
 
+def _dead_host_reason(url: str) -> str | None:
+    """Why ``url`` can't be opened at all (its host, or the host it redirects
+    to, no longer resolves), or None. Checked before the browser opens it, so
+    a dead host costs no visit from the account's daily cap -- founders-run-
+    club redirects to a domain that is gone (2026-09-18). Anything short of a
+    DNS failure (a challenge, a timeout, a 4xx) is left for the browser."""
+    try:
+        requests.get(url, timeout=12, allow_redirects=True,
+                      headers={"User-Agent": "Mozilla/5.0 (Macintosh) warmr-join-precheck"})
+    except requests.exceptions.ConnectionError as exc:
+        text = str(exc)
+        if any(sig in text for sig in (
+            "NameResolutionError", "Name or service not known",
+            "nodename nor servname", "getaddrinfo failed", "No address associated",
+        )):
+            where = next(iter(re.findall(r"host='([^']+)'", text)), None)
+            return f"Host no longer resolves: {url}" + (f" (at {where})" if where else "")
+    except requests.RequestException:
+        return None
+    return None
+
+
+def _replay_check(host: str, cookies: list[dict]) -> str:
+    """Can the captured cookies read the community outside the browser -- the
+    way the scan will? Said in words, for join_status_detail."""
+    from circle_leads.scraper.member_api_reader import (
+        ChallengeHit, MemberApiReader, ProfileIncomplete, SessionInvalid,
+    )
+
+    try:
+        reader = MemberApiReader(host, cookies={c["name"]: c["value"] for c in cookies})
+        n = len(reader.list_spaces())
+        return f"cookies read {n} space(s) outside the browser"
+    except ProfileIncomplete:
+        return "outside the browser Circle still asks to finish the profile"
+    except ChallengeHit:
+        return "outside the browser Cloudflare challenges the API -- read it from this machine's browser"
+    except SessionInvalid:
+        return "outside the browser Circle rejected the cookies"
+    except Exception as exc:  # noqa: BLE001 - a check must never undo a real join
+        return f"replay check failed ({exc.__class__.__name__})"
+
+
+def _link_connection(db: Database, host: str, community_id: int, account_key: str) -> None:
+    with db.session() as s:
+        row = s.scalar(select(CircleConnection).where(CircleConnection.host == host))
+        if row is not None:
+            row.community_id = row.community_id or community_id
+            row.member_label = account_key
+
+
 def run_auto_join(
     db: Database,
     *,
@@ -298,21 +388,22 @@ def run_auto_join(
     stops the run. See ``_handoff_counts`` for why (one stuck host used to
     block the queue on every subsequent run too).
 
+    The account runs in its own Ego Lite profile (accounts.py); a run with no
+    profile configured for it is refused. When Circle's new-member profile
+    step asks required questions, they are answered from the shared form
+    database (forms.py) and the page is visited a second time with the answers.
+
     ``host`` is an operator override and is honoured whatever the queue order
     says: a host that has needed a human before is sorted to the back of the
     queue, and naming it is precisely how the operator retries it. See
     ``select_join_candidates``.
     """
-    if account not in _ACCOUNT_ENV_VARS:
-        raise ValueError(f"Unknown account {account!r} -- expected one of {sorted(_ACCOUNT_ENV_VARS)}.")
+    acct = resolve_account(account)
     pacing = pacing or JoinPacingConfig()
     # One snapshot of the attempt log for the whole batch: the candidate
     # ordering (_handoff_counts) and the daily cap (_attempts_today) both read
-    # it, and the file only ever grows, so re-parsing it per caller made every
-    # run a little more expensive than the last for no new information. Both
-    # readings used to happen before the first browser visit anyway, so this
-    # cannot loosen the cap; anything appended mid-batch is counted in Python
-    # below, exactly as before.
+    # it, and the file only ever grows. Anything appended mid-batch is counted
+    # in Python below.
     attempt_log = _iter_attempt_log()
     candidates = select_join_candidates(db, limit=limit, host=host, attempt_log=attempt_log)
 
@@ -321,81 +412,122 @@ def run_auto_join(
     if not candidates:
         return JoinBatchResult(space_id=space_id or 0)
 
-    already_today = _attempts_today(db, account, attempt_log)
+    profile = acct.ego_profile
+    if not profile:
+        raise RuntimeError(
+            f"No Ego Lite profile configured for account {acct.key!r} -- set {acct.profile_var}. "
+            "Refusing to run in the default profile: every account on one profile shares one "
+            "set of cookies, so the join would land on whichever account is signed in there."
+        )
+
+    already_today = _attempts_today(db, acct.key, attempt_log)
     if already_today >= pacing.max_joins_per_day:
         raise RuntimeError(
-            f"Daily join cap already reached for account {account!r} "
+            f"Daily join cap already reached for account {acct.key!r} "
             f"({already_today}/{pacing.max_joins_per_day}) -- "
             "try again tomorrow or raise join_pacing.max_joins_per_day."
         )
 
-    # Reused as this account's Circle login for hosts ego-browser isn't
-    # already authenticated on (a *.circle.so login doesn't carry over to a
-    # custom domain -- confirmed live).
-    email_var, password_var = _ACCOUNT_ENV_VARS[account]
-    email = os.environ.get(email_var)
-    password = os.environ.get(password_var)
-
-    sid = space_id if space_id is not None else open_join_space(f"warmr auto-join ({account})")
+    sid = open_join_space(
+        f"warmr auto-join ({acct.key} · {profile})", profile=profile, existing_space_id=space_id,
+    )
     result = JoinBatchResult(space_id=sid)
+    form_llm = None  # built on the first profile form that needs it
 
     for candidate in candidates:
         if already_today >= pacing.max_joins_per_day:
             result.stop_reason = "daily cap reached mid-batch (every page opened counts)"
             break
 
-        try:
-            outcome = attempt_join(
-                sid, candidate["url"], email=email, password=password, screenshot_dir=screenshot_dir
+        dead = _dead_host_reason(candidate["url"])
+        if dead:
+            _log_attempt(candidate, "dead_host", dead, acct.key, visit=False)
+            _persist_terminal_outcome(db, candidate["id"], JoinStatus.DEAD_HOST.value, dead)
+            result.skipped[candidate["slug"]] = dead
+            continue
+
+        def visit(answers=None):
+            return attempt_join(
+                sid, candidate["url"], email=acct.email, password=acct.password,
+                screenshot_dir=screenshot_dir, answers=answers,
             )
+
+        try:
+            outcome = visit()
+            result.attempted.append(candidate["slug"])
+            already_today += 1
+            if outcome.status == "profile_form":
+                _log_attempt(candidate, outcome.status, outcome.detail, acct.key)
+                fields = [FormField.from_payload(f) for f in (outcome.form or {}).get("fields", [])]
+                if form_llm is None:
+                    form_llm = make_form_llm()
+                resolution = resolve_form(
+                    db, acct.key, fields, host=_host_of(candidate["url"]),
+                    community_id=candidate["id"], llm=form_llm,
+                )
+                if resolution.complete:
+                    outcome = visit(resolution.answers)
+                    already_today += 1
+                    if outcome.status == "profile_form":
+                        outcome = EgoJoinResult(
+                            status="profile_incomplete",
+                            detail="Filled every required question, Circle still shows them: "
+                                   + ", ".join(f.label for f in fields),
+                        )
+                else:
+                    outcome = EgoJoinResult(
+                        status="profile_incomplete",
+                        detail="Required profile question(s) the bot may not answer: "
+                               + ", ".join(f'"{f.label}"' for f in resolution.needs_human)
+                               + " -- answer them in join_form_answers, then run again.",
+                    )
         except EgoBrowserError as exc:
             logger.error("ego-browser bridge failed on %s: %s", candidate["slug"], exc)
             result.stopped_for = candidate["slug"]
             result.stop_reason = f"ego-browser bridge error: {exc}"
             break
 
-        result.attempted.append(candidate["slug"])
-        _log_attempt(candidate, outcome.status, outcome.detail, account)
-        # Counted here, before the outcome is even classified: the cap bounds
-        # how much activity Circle sees from this account today, and it has
-        # already seen this page load. Counting only what gets written to the
-        # DB is what let the 2026-09-16 run visit 70 hosts on a cap of 25.
-        already_today += 1
+        _log_attempt(candidate, outcome.status, outcome.detail, acct.key)
 
-        if outcome.status not in _TERMINAL_STATUS_MAP:
-            # Nothing is written to the DB (the community stays
-            # `not_attempted` so it is retried once the blocker is resolved),
-            # but the batch moves on to the next candidate instead of ending
-            # here. The handoff is durable in the attempt log, which is also
-            # what pushes this host down the queue on the next run.
+        if outcome.status in ("profile_incomplete", "email_code_needed"):
+            # The membership exists; only the profile step is open. Recorded so
+            # the dashboard shows it and the queue brings the bot back to it.
+            _persist_terminal_outcome(
+                db, candidate["id"], JoinStatus.PROFILE_PENDING.value, outcome.detail
+            )
+            result.handoffs[candidate["slug"]] = f"{outcome.status}: {outcome.detail}"
+        elif outcome.status not in _TERMINAL_STATUS_MAP:
+            # Nothing is written to the DB (the community stays in the queue so
+            # it is retried once the blocker is resolved), but the batch moves
+            # on. The handoff is durable in the attempt log, which is also what
+            # pushes this host down the queue on the next run.
             result.handoffs[candidate["slug"]] = f"{outcome.status}: {outcome.detail}"
             logger.info(
                 "%s needs a human (%s) -- skipping to the next candidate",
                 candidate["slug"], outcome.status,
             )
         else:
-            _persist_terminal_outcome(
-                db, candidate["id"], _TERMINAL_STATUS_MAP[outcome.status], outcome.detail
-            )
+            detail = outcome.detail
             if outcome.status == "joined":
                 result.joined.append(candidate["slug"])
                 if outcome.cookies:
                     # The cookies' own domain is the page's *actual* final host
                     # -- more trustworthy than candidate["url"], which can be a
                     # discover.circle.so listing page that redirected elsewhere.
-                    # This is the entire join->scrape hookup: without it, a real
-                    # join never reaches scan_cookie_host()/cookie_hosts_vip_first().
-                    # Not named `host`: that is this run's operator-targeting
-                    # filter, and rebinding it here has no business leaking
-                    # into a later iteration.
-                    cookie_host = outcome.cookies[0]["domain"]
-                    connect_host(db, cookie_host, outcome.cookies, member_label=candidate["name"])
+                    # This is the entire join->scrape hookup.
+                    cookie_host = outcome.cookies[0]["domain"].lstrip(".")
+                    connect_host(db, cookie_host, outcome.cookies, member_label=acct.key)
+                    _link_connection(db, cookie_host, candidate["id"], acct.key)
+                    detail = f"{detail} Replay check: {_replay_check(cookie_host, outcome.cookies)}."
                 else:
                     logger.warning(
                         "joined %s but captured no session cookies -- won't be scraped "
                         "until replay_store.connect_host() is called for it manually",
                         candidate["slug"],
                     )
+            _persist_terminal_outcome(
+                db, candidate["id"], _TERMINAL_STATUS_MAP[outcome.status], detail
+            )
 
         sleep_between_attempts(pacing)
 
