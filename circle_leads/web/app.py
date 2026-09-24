@@ -715,7 +715,8 @@ def create_app(
                         cap = 8 if time_budget else 25
                         recs = fetch_space_posts(
                             reader, sp["id"], max_pages=max_pages,
-                            with_comments=True, max_comment_posts=cap)
+                            with_comments=True, max_comment_posts=cap,
+                            space_slug=sp.get("slug"))
                     except SessionInvalid:
                         # A single space may deny access; don't fail the whole scan.
                         continue
@@ -1453,10 +1454,14 @@ def create_app(
         from circle_leads.notify import notify
         from circle_leads.storage.settings_store import get_setting
 
-        # How long a stamp may be missing before it is a problem. The watcher
-        # writes one a minute and the worker once a cycle, but a harvest pass
-        # is long, so the worker gets a much wider window.
-        LIMITS = {"watcher_heartbeat": 900, "worker_heartbeat": 5400}
+        # How long a stamp may be missing before it is a problem. Both services
+        # now beat from a thread beside the work rather than from the top of
+        # their loop, so a window no longer has to cover the length of a job.
+        # The worker's used to be 90 minutes to survive a harvest and went
+        # stale anyway, crying wolf while the journal showed it working. It
+        # keeps the wider of the two only because it competes for a
+        # three-connection pool, where a beat can be skipped under load.
+        LIMITS = {"watcher_heartbeat": 900, "worker_heartbeat": 1800}
 
         now = _dtm.utcnow()
         report: dict[str, Any] = {"checked_at": now.isoformat(), "services": {}}

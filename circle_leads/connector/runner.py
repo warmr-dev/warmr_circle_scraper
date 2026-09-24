@@ -166,7 +166,8 @@ def sync_community(
     for sp in spaces:
         try:
             records = fetch_space_posts(
-                reader, sp["id"], excluded_content=excluded_content, max_pages=max_pages
+                reader, sp["id"], excluded_content=excluded_content,
+                max_pages=max_pages, space_slug=sp.get("slug")
             )
         except NotLoggedIn:
             backend.report_connection(host=host, state=ConnectionState.SESSION_EXPIRED.value)

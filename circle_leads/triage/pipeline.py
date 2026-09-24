@@ -125,7 +125,11 @@ def triage_records(
             ),
             author=(r.get("author") or {}).get("display_name"),
             index=i,
-            meta={"url": r.get("url")},
+            # The whole author dict, not just the name. Keeping only the
+            # display name is how every stored author ended up without a
+            # stable id: the readers supply one, this step dropped it, and
+            # the far end held the lead for "missing_source_author_identity".
+            meta={"url": r.get("url"), "author": r.get("author") or {}},
         )
         for i, r in enumerate(records)
         if (r.get("content") or "").strip()
@@ -226,12 +230,18 @@ def _triage_posts(
                 result.too_old += 1
                 continue
 
+        author_meta = (raw.meta or {}).get("author") or {}
         with db.session() as s:
             author = get_or_create_author(
                 s,
                 community_id=community_pk,
-                source_author_id=None,
+                # Was hardcoded None. Every reader hands us an id (Circle's
+                # community_member.id); throwing it away here left 134 of 134
+                # stored authors with nothing but a display name, and two
+                # people with the same name became one author.
+                source_author_id=author_meta.get("source_author_id"),
                 display_name=raw.author,
+                profile_url=author_meta.get("profile_url"),
             )
             # Identity is the content itself: pasting the same screen twice
             # must not create a second lead.

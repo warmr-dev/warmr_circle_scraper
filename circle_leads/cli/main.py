@@ -776,6 +776,7 @@ def read_all_cmd(ctx, feeds_config, use_llm):
                 try:
                     recs = fetch_space_posts(
                         reader, space["id"], excluded_content=reqs.excluded_content,
+                        space_slug=space.get("slug"),
                     )
                     records.extend(recs)
                     click.echo(f"  {host} / {space.get('name', space['id'])}: {len(recs)} post(s)", err=True)
@@ -1488,22 +1489,19 @@ def worker_cmd(ctx, poll_seconds, use_llm):
                 "new_communities": res.new_communities, "searched": search}
 
     last_schedule_check = 0.0
-    last_beat = 0.0
+
+    # Say we are alive somewhere the outside can read: nothing running on this
+    # machine can report that the machine itself has stopped, so the
+    # dashboard's /api/watchdog reads this on a schedule and shouts.
+    #
+    # It runs in its own thread because the top of this loop is only reached
+    # between jobs, and one job can be a harvest that runs for hours. Beating
+    # from here made a busy worker look dead and sent a false alarm.
+    from circle_leads.storage.heartbeat import start_heartbeat
+
+    start_heartbeat(db, "worker_heartbeat")
 
     while True:
-        # Say we are alive somewhere the outside can read: nothing running on
-        # this machine can report that the machine itself has stopped. The
-        # dashboard's /api/watchdog reads this on a schedule and shouts.
-        if _t.monotonic() - last_beat > 60:
-            last_beat = _t.monotonic()
-            try:
-                from datetime import datetime as _dtm
-
-                from circle_leads.storage.settings_store import set_setting
-
-                set_setting(db, "worker_heartbeat", _dtm.utcnow().isoformat())
-            except Exception:  # noqa: BLE001 - a missed heartbeat is not a crash
-                pass
 
         # Pick up dashboard config edits (age cap, roles, thresholds) without a
         # restart. Cheap: one indexed settings lookup, and it falls back to the
