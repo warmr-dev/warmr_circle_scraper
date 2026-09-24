@@ -1458,8 +1458,9 @@ def worker_cmd(ctx, poll_seconds, use_llm):
     from circle_leads.scanning import cookie_hosts_vip_first, scan_cookie_host
     from circle_leads.storage.settings_store import (
         is_discovery_due, is_harvest_due, is_icp_classification_due,
-        load_effective_requirements, mark_discovery_run, mark_harvest_run,
-        mark_icp_classification_run,
+        is_join_type_check_due, load_effective_requirements,
+        mark_discovery_run, mark_harvest_finished, mark_harvest_run,
+        mark_icp_classification_run, mark_join_type_check_run,
     )
 
     # Read the same config the dashboard writes (DB override on top of the
@@ -1484,6 +1485,11 @@ def worker_cmd(ctx, poll_seconds, use_llm):
         res = harvest(db, req, verbose_log=True, use_llm=use_llm, search=search)
         if search:
             mark_discovery_run(db)
+        # Only here, at the end. The start was recorded before any of this ran
+        # so a crash loop cannot hammer the schedule, but a harvest killed
+        # halfway -- the daily unattended-upgrade restarts our services -- must
+        # not count as a completed one.
+        mark_harvest_finished(db)
         return {"private_leads": priv_leads, "public_leads": res.leads_found,
                 "communities_read": res.communities_read,
                 "new_communities": res.new_communities, "searched": search}
@@ -1501,7 +1507,25 @@ def worker_cmd(ctx, poll_seconds, use_llm):
 
     start_heartbeat(db, "worker_heartbeat")
 
+    # Stop on request instead of being killed mid-write. This is not a rare
+    # event: a stock Ubuntu box runs unattended-upgrades daily and needrestart
+    # restarts every service whose libraries changed, so the worker is asked
+    # to stop roughly once a day whether we like it or not.
+    import signal as _signal
+
+    stopping = {"now": False}
+
+    def _stop(signum, _frame):
+        click.echo(f"Signal {signum}: finishing the current step, then stopping.")
+        stopping["now"] = True
+
+    _signal.signal(_signal.SIGTERM, _stop)
+    _signal.signal(_signal.SIGINT, _stop)
+
     while True:
+        if stopping["now"]:
+            click.echo("Worker stopped cleanly.")
+            return
 
         # Pick up dashboard config edits (age cap, roles, thresholds) without a
         # restart. Cheap: one indexed settings lookup, and it falls back to the
@@ -1590,6 +1614,27 @@ def worker_cmd(ctx, poll_seconds, use_llm):
                     click.echo(f"  scheduled ICP classification: {stats}")
             except Exception as exc:  # noqa: BLE001
                 click.echo(f"  ICP schedule error: {exc.__class__.__name__}", err=True)
+
+            try:
+                if is_join_type_check_due(db):
+                    mark_join_type_check_run(db)
+                    # Plain HTTP, one GET per host, and it runs at LOW
+                    # priority so it yields to reads that can produce a lead.
+                    # Nothing scheduled this before: a community whose join
+                    # type stays "unknown" is in no queue at all, because
+                    # nothing knows whether we could get in. Prod had 446 of
+                    # them sitting still for days.
+                    from circle_leads.discovery.join_type import (
+                        SCHEDULED_BATCH as JOIN_TYPE_BATCH,
+                        classify_join_type_pending,
+                    )
+
+                    jt = classify_join_type_pending(db, limit=JOIN_TYPE_BATCH)
+                    click.echo(f"  scheduled join-type check: {jt}")
+            except Exception as exc:  # noqa: BLE001
+                click.echo(
+                    f"  join-type schedule error: {exc.__class__.__name__}", err=True
+                )
 
         _t.sleep(max(1, poll_seconds))
 
