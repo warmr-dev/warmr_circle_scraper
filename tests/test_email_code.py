@@ -225,3 +225,18 @@ def test_message_sent_at_handles_a_date_without_a_timezone():
     msg = EmailMessage()
     msg["Date"] = "Thu, 25 Sep 2026 10:00:00"
     assert message_sent_at(msg) == NOW
+
+
+def test_imap_host_comes_from_the_environment(creds, monkeypatch):
+    """Moving the bot mailbox off Gmail must not need a code change."""
+    monkeypatch.setenv("CIRCLE_MAIL_IMAP_HOST", "imap.fastmail.com")
+    fake = FakeIMAP([])
+    fetch_login_code(
+        "bot@example.com",
+        since=NOW,
+        timeout_seconds=0,
+        imap_factory=fake,
+        now=lambda: NOW + timedelta(seconds=1),
+        sleep=lambda _s: None,
+    )
+    assert ("connect", "imap.fastmail.com") in fake.calls

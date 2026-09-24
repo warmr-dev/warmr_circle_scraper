@@ -138,7 +138,7 @@ def fetch_login_code(
     since: datetime,
     timeout_seconds: float = 120.0,
     poll_seconds: float = 5.0,
-    host: str = DEFAULT_IMAP_HOST,
+    host: str | None = None,
     user: str | None = None,
     password: str | None = None,
     imap_factory=imaplib.IMAP4_SSL,
@@ -156,6 +156,9 @@ def fetch_login_code(
     minutes, and a held IMAP connection is one more thing to time out.
     """
     user, password = _credentials(user, password)
+    # Gmail is only the default: a bot mailbox moves to another provider the
+    # day Google refuses an app password, and that must not need a code change.
+    host = host or os.environ.get("CIRCLE_MAIL_IMAP_HOST") or DEFAULT_IMAP_HOST
     if since.tzinfo is None:
         since = since.replace(tzinfo=timezone.utc)
     deadline = now() + timedelta(seconds=timeout_seconds)
