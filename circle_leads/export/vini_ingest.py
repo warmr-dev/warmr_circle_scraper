@@ -56,14 +56,23 @@ class PushResult:
     outcomes: dict[str, int] = field(default_factory=dict)
     # (lead id, status, message) for every item the endpoint did not take.
     rejected: list[tuple[int, str, str]] = field(default_factory=list)
+    # (lead id, reason) for items the endpoint parked instead of publishing.
+    held: list[tuple[int, str]] = field(default_factory=list)
 
 
-# Per-item statuses that mean the lead is now on the far side. "skipped" is
-# the endpoint's word for "already hold this external_id", which is a success
-# from here -- re-sending it forever would not help.
+# Per-item statuses that mean the lead is on the far side and needs no retry.
+# "skipped"/"duplicate" are the endpoint's words for "already have this one",
+# which is a success from here -- re-sending forever would not help.
 LANDED_STATUSES = frozenset(
-    {"inserted", "accepted", "held", "skipped", "ok", "duplicate", "success"}
+    {"inserted", "accepted", "skipped", "ok", "duplicate", "success"}
 )
+
+# "held" is its own thing: the endpoint took the lead but parked it, so the
+# client does not see it. Retrying cannot clear a hold -- only fixing what the
+# hold complains about can -- so a held lead is marked as sent AND reported.
+# Observed holds: {"status": "held", "decision": "invalid_timestamp",
+# "holdReason": "missing_source_author_identity"}.
+HELD_STATUS = "held"
 
 
 def load_vini_ingest_config() -> ViniIngestConfig:
@@ -267,6 +276,17 @@ def push_leads_by_ids(
         result.outcomes[status or "(no status)"] = (
             result.outcomes.get(status or "(no status)", 0) + 1
         )
+        if status == HELD_STATUS:
+            # Parked, not delivered. Stamp it so we do not retry a hold that a
+            # retry cannot clear, but record why so a human can act.
+            lead.external_synced_at = synced_at
+            result.sent += 1
+            reason = " ".join(
+                str(item.get(k)) for k in ("decision", "holdReason", "hold_reason")
+                if item.get(k)
+            )
+            result.held.append((lead.id, reason[:300]))
+            continue
         if status in LANDED_STATUSES:
             lead.external_synced_at = synced_at
             result.sent += 1
@@ -277,6 +297,13 @@ def push_leads_by_ids(
             message = str(item.get("error") or item.get("reason") or "")[:300]
             result.rejected.append((lead.id, status or "(no status)", message))
 
+    if result.held:
+        logger.error(
+            "Vini parked %d of %d lead(s), the client will not see them: %s",
+            len(result.held), len(ready_leads),
+            "; ".join(reason for _, reason in result.held[:3]),
+        )
+        _alert_held(result)
     if result.rejected:
         logger.error(
             "Vini ingest refused %d of %d lead(s): %s",
@@ -284,6 +311,25 @@ def push_leads_by_ids(
         )
         _alert_rejected(result)
     return result
+
+
+def _alert_held(result: PushResult) -> None:
+    """A held lead looks delivered on every dashboard and is invisible to the
+    client. That combination is exactly how two weeks went by unnoticed."""
+    try:
+        from circle_leads.notify import notify
+
+        reasons: dict[str, int] = {}
+        for _, reason in result.held:
+            reasons[reason or "(без причины)"] = reasons.get(reason or "(без причины)", 0) + 1
+        notify(
+            f"Vini придержал {len(result.held)} лид(ов) — заказчик их не видит",
+            "\n".join(f"{reason}: {count}" for reason, count in sorted(reasons.items())),
+            level="error",
+            dedup_key="vini-held",
+        )
+    except Exception:  # noqa: BLE001 - an alert must never break the push
+        logger.warning("could not send the Vini hold alert", exc_info=True)
 
 
 def _alert_rejected(result: PushResult) -> None:

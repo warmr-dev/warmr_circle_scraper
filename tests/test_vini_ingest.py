@@ -373,3 +373,39 @@ def test_a_refusal_reaches_a_human(db, monkeypatch):
                         lambda *a, **k: sent.append((a, k)) or True)
     _push_with(db, monkeypatch, [{"status": "error", "error": "boom"}])
     assert sent, "a lead the client never sees must not be silent"
+
+
+# --- held is not delivered -------------------------------------------------
+
+def test_a_held_lead_is_reported_not_silently_counted(db, monkeypatch):
+    """Vini's own words for a lead it parked:
+
+        {"status": "held", "decision": "invalid_timestamp",
+         "holdReason": "missing_source_author_identity"}
+
+    It looked identical to a delivered lead on every dashboard we have, which
+    is how two weeks of leads the client never saw went unnoticed.
+    """
+    sent = []
+    monkeypatch.setattr("circle_leads.notify.notify",
+                        lambda *a, **k: sent.append((a, k)) or True)
+    ids, result = _push_with(db, monkeypatch, [{
+        "status": "held",
+        "decision": "invalid_timestamp",
+        "holdReason": "missing_source_author_identity",
+    }])
+    assert result.held and result.held[0][0] == ids[0]
+    assert "missing_source_author_identity" in result.held[0][1]
+    assert sent, "a parked lead must reach a human"
+
+
+def test_a_held_lead_is_not_retried_forever(db, monkeypatch):
+    """A retry cannot clear a hold; only fixing the payload can."""
+    from circle_leads.export.vini_ingest import push_unsynced_leads
+
+    monkeypatch.setattr("circle_leads.notify.notify", lambda *a, **k: True)
+    _push_with(db, monkeypatch, [{"status": "held", "holdReason": "x"}])
+    with patch("circle_leads.export.vini_ingest.post_leads_to_vini") as mock_post:
+        with db.session() as s:
+            push_unsynced_leads(s)
+        mock_post.assert_not_called()

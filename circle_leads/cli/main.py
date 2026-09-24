@@ -776,6 +776,7 @@ def read_all_cmd(ctx, feeds_config, use_llm):
                 try:
                     recs = fetch_space_posts(
                         reader, space["id"], excluded_content=reqs.excluded_content,
+                        space_slug=space.get("slug"),
                     )
                     records.extend(recs)
                     click.echo(f"  {host} / {space.get('name', space['id'])}: {len(recs)} post(s)", err=True)

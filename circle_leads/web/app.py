@@ -715,7 +715,8 @@ def create_app(
                         cap = 8 if time_budget else 25
                         recs = fetch_space_posts(
                             reader, sp["id"], max_pages=max_pages,
-                            with_comments=True, max_comment_posts=cap)
+                            with_comments=True, max_comment_posts=cap,
+                            space_slug=sp.get("slug"))
                     except SessionInvalid:
                         # A single space may deny access; don't fail the whole scan.
                         continue

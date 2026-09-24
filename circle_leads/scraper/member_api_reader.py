@@ -209,7 +209,8 @@ def fetch_space_posts(reader: MemberApiReader, space_id: str | int, *,
                       excluded_content: list[str] | None = None,
                       max_pages: int = 10,
                       with_comments: bool = True,
-                      max_comment_posts: int = 25) -> list[dict]:
+                      max_comment_posts: int = 25,
+                      space_slug: str | None = None) -> list[dict]:
     """Read + normalize a space's posts (and their comments + replies) for the
     lead pipeline. Same record shape as the browser reader, so callers are
     interchangeable.
@@ -230,9 +231,17 @@ def fetch_space_posts(reader: MemberApiReader, space_id: str | int, *,
                 if title and title != body else (body or title))
         text = redact_pii(text, excluded_content)
         if text.strip():
-            url = record.get("url")
+            url = record.get("url") or record.get("show_url")
             if url and url.startswith("/"):
                 url = community_url.rstrip("/") + url
+            elif not url:
+                # Circle's post records carry a slug, not a URL. Without this
+                # the post fell back to the community root, so every lead from
+                # one community shared a single link -- and the far end, which
+                # deduplicates, kept the first and dropped the rest.
+                slug = record.get("space_slug") or space_slug
+                if slug and record.get("slug"):
+                    url = f"{community_url.rstrip('/')}/c/{slug}/{record['slug']}"
             author = record.get("user") or record.get("community_member") or {}
             records.append({
                 "source_content_id": str(pid),

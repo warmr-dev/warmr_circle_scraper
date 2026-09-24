@@ -90,7 +90,8 @@ def scan_cookie_host(db: Database, requirements: Requirements, host: str, *,
                     cap = 8 if time_budget else 25
                     recs = fetch_space_posts(
                         reader, sp["id"], max_pages=max_pages,
-                        with_comments=with_comments, max_comment_posts=cap)
+                        with_comments=with_comments, max_comment_posts=cap,
+                        space_slug=sp.get("slug"))
                 except SessionInvalid:
                     continue
                 if not recs:
