@@ -384,9 +384,12 @@ def join_queue_cmd(ctx, limit):
               help="Resume an existing ego-browser task space, e.g. after resolving a handoff.")
 @click.option("--screenshot-dir", default=None, help="Save a screenshot on every stop/handoff here.")
 @click.option("--dry-run", is_flag=True, help="List what would be attempted; no browser involved.")
-@click.option("--account", type=click.Choice(["main", "test"]), default="main", show_default=True,
-              help="Which Circle login to use: main (CIRCLE_EMAIL/PASSWORD) or test (CIRCLE_EMAIL2/PASSWORD2). "
-                   "Each has its own daily cap -- they don't share it.")
+@click.option("--account", type=click.Choice(["main", "test"] + [str(n) for n in range(1, 11)]),
+              default="main", show_default=True,
+              help="Which Circle login to use: main (=1, CIRCLE_EMAIL/PASSWORD), test (=2, "
+                   "CIRCLE_EMAIL2/PASSWORD2) or 3..10 (CIRCLE_EMAIL<n>/PASSWORD<n>). Each runs in "
+                   "its own Ego Lite profile (CIRCLE_EGO_PROFILE, CIRCLE_EGO_PROFILE2, ...) and has "
+                   "its own daily cap.")
 @click.pass_context
 def auto_join_cmd(ctx, limit, host, space_id, screenshot_dir, dry_run, account):
     """Join ICP-qualified free/paid Circle communities via ego-browser.
@@ -433,6 +436,11 @@ def auto_join_cmd(ctx, limit, host, space_id, screenshot_dir, dry_run, account):
         f"Attempted {len(result.attempted)}, joined {len(result.joined)}: "
         f"{', '.join(result.joined) or '(none)'}"
     )
+    if result.skipped:
+        click.echo(
+            f"Skipped without a visit ({len(result.skipped)}): "
+            + ", ".join(f"{slug} ({why})" for slug, why in result.skipped.items())
+        )
     # A handoff no longer ends the batch (join/joiner.py skips and continues),
     # so without this the run's most actionable outcome -- the hosts waiting on
     # a human -- would be invisible in the output.
@@ -1629,7 +1637,7 @@ def worker_cmd(ctx, poll_seconds, use_llm):
                         classify_join_type_pending,
                     )
 
-                    jt = classify_join_type_pending(db, limit=JOIN_TYPE_BATCH)
+                    jt = classify_join_type_pending(db, limit=JOIN_TYPE_BATCH, scheduled=True)
                     click.echo(f"  scheduled join-type check: {jt}")
             except Exception as exc:  # noqa: BLE001
                 click.echo(

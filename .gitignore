@@ -62,3 +62,6 @@ circle tests/
 # database; the raw export is a local input, not a source file.
 rapiddns exports/
 *.rapiddns.txt
+
+# pip install . writes a copy of the package here
+build/

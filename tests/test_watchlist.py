@@ -12,7 +12,7 @@ from circle_leads.harvest import _community_hosts
 def _mk(db, slug, score, watching):
     with db.session() as s:
         c = Community(
-            slug=slug, name=slug, url=f"https://{slug}.circle.so",
+            slug=slug, name=slug, url=f"https://{slug}.circle.so", host=f"{slug}.circle.so",
             discovery_source="t", access_status=AccessState.NOT_VISITED.value,
             permission_status=PermissionStatus.CANDIDATE.value,
             relevance_score=score, relevant=True,

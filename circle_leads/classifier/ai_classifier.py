@@ -155,6 +155,31 @@ class OpenAIBackend:
         return resp.choices[0].message.content or ""
 
 
+class OpenRouterBackend(OpenAIBackend):
+    """Any model through OpenRouter's OpenAI-compatible API.
+
+    Requires OPENROUTER_API_KEY. The model comes from
+    CIRCLE_LEADS_OPENROUTER_MODEL (an OpenRouter id such as
+    ``openai/gpt-4o-mini``, the default).
+    """
+
+    def __init__(self, model: str | None = None, max_tokens: int = 600):
+        try:
+            import openai
+        except ImportError as exc:  # pragma: no cover
+            raise RuntimeError(
+                "Install openai to use the OpenRouter backend: pip install openai"
+            ) from exc
+        key = os.environ.get("OPENROUTER_API_KEY")
+        if not key:
+            raise RuntimeError("OPENROUTER_API_KEY is not set.")
+        self._client = openai.OpenAI(api_key=key, base_url="https://openrouter.ai/api/v1")
+        self.model = model or os.environ.get(
+            "CIRCLE_LEADS_OPENROUTER_MODEL", "openai/gpt-4o-mini"
+        )
+        self.max_tokens = max_tokens
+
+
 def make_backend() -> "LlmBackend | None":
     """Pick an available LLM backend, or None if no key is configured.
 

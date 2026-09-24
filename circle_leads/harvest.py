@@ -32,6 +32,7 @@ from circle_leads.discovery.validate_finds import (
     is_subdomain_community,
 )
 from circle_leads.discovery.web_search import discover_by_search
+from circle_leads.reach import ANSWERED_AS_CIRCLE, CIRCLE_PLATFORMS, readable
 from circle_leads.scraper.public_reader import PublicReader, discover_and_read_public
 from circle_leads.storage.activity import log_activity
 from circle_leads.storage.database import Database
@@ -140,13 +141,16 @@ def _reads_on_circle(c: Community) -> bool:
     """True when the public reader can read this community.
 
     Any Circle-hosted community works -- a ``<slug>.circle.so`` subdomain or a
-    custom domain like ``forum.joelpilger.com``. Rows created before the
-    ``platform`` column existed carry NULL, so fall back to the URL shape for
-    those (unchanged behaviour until the backfill runs).
+    custom domain like ``forum.joelpilger.com``, including one found through
+    Circle's own directory (platform "discover", which _community_hosts only
+    passes with a real address). Rows created before the ``platform`` column
+    existed carry NULL: a subdomain, or a custom domain whose join-type check
+    was answered by Circle. community.freelancemvp.com, free and ICP-fit, was
+    skipped on URL shape alone and never read.
     """
     if c.platform is not None:
-        return c.platform == "circle"
-    return is_subdomain_community(c.url)
+        return c.platform in CIRCLE_PLATFORMS
+    return is_subdomain_community(c.url) or c.join_type in ANSWERED_AS_CIRCLE
 
 
 def _community_hosts(
@@ -179,12 +183,14 @@ def _community_hosts(
     """
     with db.session() as s:
         # Narrow in SQL to what _reads_on_circle can possibly accept (NULL
-        # platform still needs the per-row URL-shape fallback, so it stays in).
-        # Without this the whole table is materialised just to discard ~15% of
-        # it in Python, which gets worse every time discovery runs.
+        # platform still needs the per-row fallback, so it stays in). Without
+        # this the whole table is materialised just to discard ~15% of it in
+        # Python, which gets worse every time discovery runs. readable() is the
+        # rule the join bot and the dashboard share (circle_leads/reach.py): a
+        # real address, and no paid community we hold no login for.
         stmt = (
             select(Community)
-            .where(or_(Community.platform == "circle", Community.platform.is_(None)))
+            .where(readable())
             .order_by(
                 Community.watching.desc(),
                 Community.icp_flag.desc(),
@@ -205,7 +211,8 @@ def _community_hosts(
             # path glued onto every API call built from it (PublicReader's own
             # base, and fetch_join_classification below), breaking both against
             # a nonsense URL. urlparse().hostname discards the path/query.
-            host = urlparse(c.url).hostname or c.url.replace("https://", "").replace("http://", "").strip("/")
+            host = c.host or urlparse(c.url).hostname or (
+                c.url.replace("https://", "").replace("http://", "").strip("/"))
             out.append((host, c.slug, c.last_synced_at, bool(c.watching)))
             if len(out) >= limit:
                 break

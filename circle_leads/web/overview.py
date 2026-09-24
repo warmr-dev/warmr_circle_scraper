@@ -24,7 +24,9 @@ client verbatim:
                since the name was found. Shown next to live, not in the funnel.
 * icp       -- ICP-fit AND worth pursuing. Excluded by decision of 2026-09-18:
                communities not hosted on Circle, and communities whose owner's
-               Circle subscription has lapsed (``subscription_expired``).
+               Circle subscription has lapsed (``subscription_expired``); by
+               decision of 2026-09-24, paid communities we hold no login for
+               (listed in section 2, counted nowhere else -- reach.py).
 * read      -- ICP-fit communities whose posts we have read at least once.
 * posts / leads -- everything read / found, per source of the community.
 
@@ -41,6 +43,10 @@ from typing import Any
 from sqlalchemy import String, and_, case, cast, func, or_, select
 from sqlalchemy.orm import Session
 
+from circle_leads.reach import (  # noqa: F401 - CIRCLE_PLATFORMS is re-exported
+    CIRCLE_PLATFORMS, has_session, is_paid, join_queue, on_circle, pursued, readable,
+    real_host, recheckable_unknown,
+)
 from circle_leads.storage.models import (
     CircleConnection, Community, ConnectionState, JoinStatus, Lead, Post,
     ScanJob, Setting,
@@ -69,14 +75,10 @@ DEAD_HOST_MARKER = "dead_host_marketing_title"
 
 STALE_QUEUE_HOURS = 24
 
-# Platforms we can actually join and read. "discover" is a Circle directory
-# card whose real host we have not resolved yet -- still on Circle.
-CIRCLE_PLATFORMS = ("circle", "discover")
-
 # Settings rows the worker writes after each scheduled stage.
 ACTIVITY_SETTINGS = (
-    "harvest_last_run", "harvest_schedule", "icp_classification_last_run",
-    "enrichment_cursor_id",
+    "harvest_last_run", "harvest_last_finish", "harvest_schedule",
+    "icp_classification_last_run", "join_type_last_run", "enrichment_cursor_id",
 )
 
 CLOUDFLARE_MARKER = "cloudflare challenge"
@@ -127,45 +129,31 @@ def build_queues(s: Session, now: datetime, *, named) -> list[dict[str, Any]]:
     c, jt = Community, Community.join_type
     fit = c.icp_flag.is_(True)
     dead = func.coalesce(cast(c.icp_reasons, String), "").like(f"%{DEAD_HOST_MARKER}%")
-    # The same reachability filter section 2 applies, and for the same reason:
-    # a row that is not on Circle cannot be joined, read or join-type checked,
-    # so counting it as "waiting" describes work that will never happen. The
-    # join queue said 87 while section 2 said 21 for the same step -- 66 of
-    # those were marketing sites that merely had a Circle directory card, and
-    # they are what painted the queue red with "no movement for over a day".
-    on_circle = or_(c.platform.is_(None), c.platform.in_(CIRCLE_PLATFORMS))
-    # Section 2 counts all three of these as waiting to be joined; the queue
-    # counted only NOT_ATTEMPTED, so a row that had been queued or was awaiting
-    # approval vanished from the queue without having moved anywhere.
-    awaiting_join = (JoinStatus.NOT_ATTEMPTED.value, JoinStatus.QUEUED.value,
-                     JoinStatus.PENDING_APPROVAL.value)
+    # Every queue counts exactly the rows its worker will take -- the rules live
+    # in circle_leads/reach.py and the workers use the same ones. A queue that
+    # counts rows nothing will ever take is red forever, and a warning that
+    # cannot clear teaches the reader to ignore the colour: the join queue once
+    # said 87 for 21 joinable communities, and a "decision on payment" queue
+    # counted 301 paid communities that no process decides.
     specs = [
         # No "name found at" column. The harvest and the join bot touch named
         # rows every few minutes, which would make a stalled name lookup look
         # busy, so their rows are left out of the proxy.
         ("name", and_(~named, ~dead), c.updated_at,
          and_(named, c.last_synced_at.is_(None), c.join_attempted_at.is_(None))),
-        ("join_type_recheck", and_(named, on_circle, jt == "unknown"),
-         c.join_type_checked_at, and_(named, on_circle)),
-        # platform "discover" is a community found through Circle's own
-        # directory whose platform was never narrowed. It is still on Circle.
-        #
-        # A known host is required, and that is the whole point of the row: 276
-        # of these are directory cards whose real address was never worked out.
-        # They are not waiting to be read -- nothing can read an address it does
-        # not have -- they are waiting at the step above, and counting them here
-        # would both paint this queue red forever and count them twice, since
-        # almost all of them are paid cards already sitting in paid_decision.
-        ("read", and_(fit, on_circle, c.host.is_not(None),
-                      c.last_synced_at.is_(None)),
-         c.last_synced_at, and_(fit, on_circle, c.host.is_not(None))),
-        ("join", and_(fit, on_circle, jt == "free_join",
-                      c.join_status.in_(awaiting_join)),
-         c.join_attempted_at, and_(fit, on_circle, jt == "free_join")),
-        # Nothing automatic decides these; the bot's paywall skip is the only
-        # recorded decision.
-        ("paid_decision", and_(fit, on_circle, jt == "paid"),
-         c.join_attempted_at, and_(fit, on_circle, jt == "paid")),
+        # Only an "unknown" another check can still change. A host that left
+        # Circle, or never was on it, is not waiting for anything: 27 of the
+        # 443 once counted here redirect to circle.so's own site, 20 answer
+        # 404, 13 are ordinary websites.
+        ("join_type_recheck", and_(named, on_circle(), recheckable_unknown()),
+         c.join_type_checked_at, and_(named, on_circle())),
+        # Readable and never read -- read with a session or anonymously. A
+        # paid community without a login is not waiting to be read: nothing
+        # reads it, by decision (reach.py).
+        ("read", and_(fit, readable(), c.last_synced_at.is_(None)),
+         c.last_synced_at, and_(fit, readable())),
+        ("join", join_queue(),
+         c.join_attempted_at, and_(fit, on_circle(), jt == "free_join")),
     ]
     # One round trip, as elsewhere on this page.
     values = s.execute(select(*[
@@ -199,11 +187,13 @@ def build_overview(s: Session, now: datetime) -> dict[str, Any]:
         named,
         Community.join_type.in_(DEFINITIVE_JOIN_TYPES),
     )
-    on_circle = or_(Community.platform.is_(None), Community.platform.in_(CIRCLE_PLATFORMS))
+    circle = on_circle()
     not_expired = or_(
         Community.join_type.is_(None), Community.join_type != "subscription_expired",
     )
-    icp = and_(Community.icp_flag.is_(True), on_circle, not_expired)
+    # A paid community we hold no login for is not pursued: counted and listed
+    # in section 2, and nowhere else (reach.py).
+    icp = and_(Community.icp_flag.is_(True), circle, not_expired, pursued())
     read = Community.last_synced_at.is_not(None)
     jt = Community.join_type
     live = and_(named, jt.in_(LIVE_JOIN_TYPES))
@@ -277,41 +267,63 @@ def build_overview(s: Session, now: datetime) -> dict[str, Any]:
     # --- 2. ICP-fit by how reachable they are ------------------------------
     fit = Community.icp_flag.is_(True)
     js = Community.join_status
-    free = and_(fit, on_circle, jt == "free_join")
-    paid = and_(fit, on_circle, jt == "paid")
-    closed = and_(fit, on_circle, or_(jt.is_(None), ~jt.in_(
+    session = has_session()
+    free = and_(fit, circle, jt == "free_join")
+    paid = and_(fit, circle, is_paid())
+    closed = and_(fit, circle, or_(jt.is_(None), ~jt.in_(
         ("free_join", "paid", "subscription_expired"))))
-    waiting = (JoinStatus.NOT_ATTEMPTED.value, JoinStatus.QUEUED.value,
-               JoinStatus.PENDING_APPROVAL.value)
+    # Each free community lands in exactly one bucket, first match wins, so the
+    # buckets add up and "waiting" is the join queue's own number: a queue row
+    # never has a session unless it sits on the profile step, and that step is
+    # checked before "joined".
+    free_bucket = case(
+        (or_(js == JoinStatus.JOINED.value,
+             and_(session, js != JoinStatus.PROFILE_PENDING.value)), "joined"),
+        (join_queue(), "waiting"),
+        (js == JoinStatus.PENDING_APPROVAL.value, "pending_approval"),
+        (js == JoinStatus.PAID_SKIP.value, "hit_paywall"),
+        (~real_host(), "no_address"),
+        else_="failed",
+    ).label("bucket")
+    free_counts = dict.fromkeys(
+        ("joined", "waiting", "pending_approval", "hit_paywall", "no_address", "failed"), 0)
+    for bucket, n in s.execute(
+        select(free_bucket, func.count()).where(free).group_by(free_bucket)
+    ).all():
+        free_counts[bucket] = int(n)
     g = s.execute(select(
-        _count(and_(free, js == JoinStatus.JOINED.value)),
-        _count(and_(free, js.in_(waiting))),
-        _count(and_(free, js == JoinStatus.PAID_SKIP.value)),
-        _count(and_(free, ~js.in_(waiting + (JoinStatus.JOINED.value,
-                                             JoinStatus.PAID_SKIP.value)))),
-        _count(and_(paid, Community.platform == "discover")),
-        _count(and_(paid, or_(Community.platform.is_(None),
-                              Community.platform != "discover"))),
+        _count(and_(paid, session)),
+        _count(and_(paid, ~session)),
         _count(and_(closed, jt == "locked_unknown")),
         _count(and_(closed, jt == "invite_only")),
         _count(and_(closed, or_(jt.is_(None), jt == "unknown"))),
-        _count(and_(fit, ~on_circle)),
-        _count(and_(fit, on_circle, jt == "subscription_expired")),
-        _count(and_(fit, read)),
+        _count(and_(fit, ~circle)),
+        _count(and_(fit, circle, jt == "subscription_expired")),
     )).one()
     g = [int(v) for v in g]
+    # Paid is a plain list, by decision of 2026-09-24: never joined, read only
+    # with a login someone bought, and outside every other count on the page.
+    paid_items = [
+        {"name": r.name or r.host or r.url, "url": r.url, "price": r.price_label,
+         "has_session": bool(r.has_session)}
+        for r in s.execute(
+            select(Community.name, Community.url, Community.host,
+                   Community.price_label, session.label("has_session"))
+            .where(paid).order_by(func.lower(func.coalesce(Community.name, Community.url)))
+        ).all()
+    ]
     icp_groups = {
-        "free": {"joined": g[0], "waiting": g[1], "hit_paywall": g[2], "failed": g[3]},
-        "paid": {"directory_cards": g[4], "on_circle": g[5]},
-        "closed": {"locked": g[6], "invite_only": g[7], "unclear": g[8]},
-        "excluded": {"not_on_circle": g[9], "subscription_expired": g[10]},
+        "free": {**free_counts, "total": sum(free_counts.values())},
+        "paid": {"with_session": g[0], "without_session": g[1], "total": g[0] + g[1],
+                 "items": paid_items},
+        "closed": {"locked": g[2], "invite_only": g[3], "unclear": g[4]},
+        "excluded": {"not_on_circle": g[5], "subscription_expired": g[6]},
     }
-    icp_groups["free"]["total"] = sum(icp_groups["free"].values())
-    icp_groups["paid"]["total"] = sum(icp_groups["paid"].values())
     icp_groups["closed"]["total"] = sum(icp_groups["closed"].values())
     icp_groups["excluded"]["total"] = sum(icp_groups["excluded"].values())
-    icp_groups["total"] = (icp_groups["free"]["total"] + icp_groups["paid"]["total"]
-                           + icp_groups["closed"]["total"])
+    # What we can pursue: paid ones only where a login makes them readable.
+    icp_groups["total"] = (icp_groups["free"]["total"] + icp_groups["closed"]["total"]
+                           + icp_groups["paid"]["with_session"])
 
     queues = build_queues(s, now, named=named)
 
