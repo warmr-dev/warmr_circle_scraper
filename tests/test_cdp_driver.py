@@ -261,3 +261,26 @@ def test_sign_in_waits_until_the_page_leaves_the_form():
 
     d.sign_in(page, email="bot@example.com", password="pw", community_host="community.example.com")
     assert page.url.endswith("/feed")
+
+
+def test_a_redirect_to_the_communitys_own_domain_is_followed_when_it_speaks_circle():
+    """b2b-tactics.circle.so sends you to go.b2btactics.com -- same community,
+    different host. Refusing there costs a join; accepting blindly is what let
+    the password reach auth0, so the host has to answer Circle's own API."""
+    page = FakePage(url="https://go.b2btactics.com/feed", inputs=("email", "password"))
+    page.evaluate = lambda script: True          # this host answers /internal_api/spaces
+    page.wait_for_selector = lambda selector, timeout=None: FakeElement("f", page)
+    page.spaces_response = {"count": 9, "flags": [None] * 9}
+
+    state = d.sign_in(page, email="bot@example.com", password="pw",
+                      community_host="b2b-tactics.circle.so")
+    assert state != d.EXTERNAL_LOGIN
+    assert ("email", "bot@example.com") in page.typed
+
+
+def test_a_redirect_to_a_third_party_login_is_still_refused():
+    page = FakePage(url="https://dev-xyz.us.auth0.com/u/login", inputs=("email",))
+    page.evaluate = lambda script: False         # auth0 answers no Circle API
+    state = d.sign_in(page, email="bot@example.com", password="pw",
+                      community_host="www.generouslifeapp.com")
+    assert state == d.EXTERNAL_LOGIN and page.typed == []

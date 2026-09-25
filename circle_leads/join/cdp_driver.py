@@ -173,6 +173,26 @@ def membership(page) -> Membership:
     return Membership(count=int(result.get("count", 0)), flags=list(result.get("flags") or []))
 
 
+def speaks_circle_api(page) -> bool:
+    """Whether the host currently open answers Circle's own internal API.
+
+    Circle redirects ``<slug>.circle.so`` to the community's custom domain, so
+    the host that ends up holding the login form is often not the host we
+    started from. Accepting it on the strength of this probe is narrow on
+    purpose: the auth0 page that took our password on 2026-09-21 answers
+    nothing of the sort, and neither does a community's own site. Only a host
+    that serves Circle's API is treated as the same community.
+    """
+    try:
+        return bool(page.evaluate(
+            """() => fetch('/internal_api/spaces', {headers: {'Accept': 'application/json'}})
+                 .then(r => r.ok && (r.headers.get('content-type') || '').includes('json'))
+                 .catch(() => false)"""
+        ))
+    except Exception:
+        return False
+
+
 def sign_in(page, *, email: str, password: str, community_host: str, timeout_ms: int = 15000) -> str:
     """Sign in on the page that is open. Returns the state afterwards.
 
@@ -185,8 +205,11 @@ def sign_in(page, *, email: str, password: str, community_host: str, timeout_ms:
     listen to.
     """
     if not is_circle_host(page.url, community_host):
-        logger.warning("refusing to type credentials on %s", page.url)
-        return EXTERNAL_LOGIN
+        if not speaks_circle_api(page):
+            logger.warning("refusing to type credentials on %s", page.url)
+            return EXTERNAL_LOGIN
+        community_host = (urlparse(page.url).hostname or community_host).lower()
+        logger.info("following Circle's redirect to its own domain %s", community_host)
 
     # A community's home page carries no login form; Circle serves it at
     # /users/sign_in, which then redirects to the central login when the
