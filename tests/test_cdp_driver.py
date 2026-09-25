@@ -179,3 +179,44 @@ def test_a_malformed_code_is_refused_before_touching_the_page():
     with pytest.raises(d.DriverError, match="6-digit"):
         d.enter_code(page, "12ab")
     assert page.typed == []
+
+
+# --- membership beats the look of the page -------------------------------
+
+
+def test_a_community_we_already_joined_is_MEMBER_even_with_a_join_button():
+    """Measured live: b2b-tactics still renders "Join" to a member. Without
+    this precedence every joined community would be sent to the agent again."""
+    page = FakePage(body="Members Only Community", buttons=["Join"])
+    page.spaces_response = {"count": 10, "flags": [True] + [None] * 9}
+    state, member = d.assess(page)
+    assert state == d.MEMBER and member.is_member
+
+
+def test_a_member_page_with_no_buttons_is_MEMBER_not_UNKNOWN():
+    page = FakePage(body="Latest posts", buttons=[])
+    page.spaces_response = {"count": 10, "flags": [True] * 10}
+    assert d.assess(page)[0] == d.MEMBER
+
+
+def test_a_non_member_still_gets_the_dom_verdict():
+    page = FakePage(body="Members Only Community", buttons=["Register for Free"])
+    page.spaces_response = {"count": 2, "flags": [None, None]}
+    assert d.assess(page)[0] == d.JOIN_GATE
+
+
+def test_sign_in_opens_the_login_page_when_the_current_one_has_no_field():
+    """A community home page greets a visitor with a join gate and no form;
+    Circle keeps the form at /users/sign_in (measured on generouslifeapp)."""
+    page = FakePage(url="https://community.example.com/", body="Members Only")
+
+    visited = []
+    def goto(url, wait_until=None):
+        visited.append(url)
+        page._inputs["email"] = FakeElement("email", page)  # the form exists there
+        page.url = url
+    page.goto = goto
+
+    d.sign_in(page, email="bot@example.com", password="pw", community_host="community.example.com")
+    assert visited == ["https://community.example.com/users/sign_in"]
+    assert ("email", "bot@example.com") in page.typed

@@ -40,6 +40,7 @@ UNKNOWN = "unknown"
 
 _JOIN_TEXTS = ("register for free", "join for free", "join now", "join the community", "join")
 _LOGIN_TEXTS = ("log in", "login", "sign in")
+_EMAIL_FIELDS = "input[type='email'], input[name='email'], #user_email"
 
 _SPACES_JS = """() => fetch('/internal_api/spaces',
     {headers: {'Accept': 'application/json'}, credentials: 'include'})
@@ -135,6 +136,20 @@ def classify(page) -> str:
     return UNKNOWN
 
 
+def assess(page) -> tuple[str, Membership]:
+    """The state to act on, with membership taking precedence over looks.
+
+    Measured 2026-09-25: a community we had already joined still rendered a
+    "Join" button, and a member view with no buttons at all classified as
+    UNKNOWN. Both would have sent a community we are already in to the agent.
+    The API answer decides; the DOM only matters when we are not a member.
+    """
+    member = membership(page)
+    if member.is_member:
+        return MEMBER, member
+    return classify(page), member
+
+
 def _has_text_button(page, texts: tuple[str, ...]) -> bool:
     try:
         labels = page.eval_on_selector_all(
@@ -171,7 +186,19 @@ def sign_in(page, *, email: str, password: str, community_host: str, timeout_ms:
         logger.warning("refusing to type credentials on %s", page.url)
         return EXTERNAL_LOGIN
 
-    _type_into(page, "input[type='email'], input[name='email'], #user_email", email)
+    # A community's home page carries no login form; Circle serves it at
+    # /users/sign_in, which then redirects to the central login when the
+    # community uses one. Measured on generouslifeapp, which greets a visitor
+    # with a join gate and no field to type into.
+    if page.query_selector(_EMAIL_FIELDS) is None:
+        page.goto(f"https://{community_host}/users/sign_in", wait_until="domcontentloaded")
+        page.wait_for_timeout(2000)
+        if not is_circle_host(page.url, community_host):
+            return EXTERNAL_LOGIN
+        if page.query_selector(_EMAIL_FIELDS) is None:
+            return UNKNOWN
+
+    _type_into(page, _EMAIL_FIELDS, email)
     _submit(page, ("sign in", "continue", "log in", "next"))
     page.wait_for_timeout(1500)
 
