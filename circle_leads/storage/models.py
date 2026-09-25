@@ -390,6 +390,11 @@ class JoinStatus(str, enum.Enum):
     # not Circle: it needs an account there, which is a person's decision. The
     # bot never types the Circle login into such a page.
     EXTERNAL_LOGIN = "external_login"
+    # The join itself is possible, but the community's form asks something the
+    # bot has no honest answer for -- icecampus wants a passport number and a
+    # date of birth. A person decides; the queue must stop spending visits on
+    # it in the meantime.
+    NEEDS_HUMAN = "needs_human"
 
 
 class ConnectionState(str, enum.Enum):
