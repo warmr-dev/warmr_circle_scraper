@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from urllib.parse import urlparse
@@ -40,6 +41,7 @@ UNKNOWN = "unknown"
 
 _JOIN_TEXTS = ("register for free", "join for free", "join now", "join the community", "join")
 _LOGIN_TEXTS = ("log in", "login", "sign in")
+_EMAIL_METHOD_TEXTS = ("sign in with an email", "sign in with email", "continue with email", "use email")
 _EMAIL_FIELDS = "input[type='email'], input[name='email'], #user_email"
 
 _SPACES_JS = """() => fetch('/internal_api/spaces',
@@ -192,11 +194,26 @@ def sign_in(page, *, email: str, password: str, community_host: str, timeout_ms:
     # with a join gate and no field to type into.
     if page.query_selector(_EMAIL_FIELDS) is None:
         page.goto(f"https://{community_host}/users/sign_in", wait_until="domcontentloaded")
-        page.wait_for_timeout(2000)
+        page.wait_for_timeout(1000)
         if not is_circle_host(page.url, community_host):
             return EXTERNAL_LOGIN
-        if page.query_selector(_EMAIL_FIELDS) is None:
-            return UNKNOWN
+        # The form is rendered by the app, not served in the HTML: on the
+        # droplet it was still missing a second after the navigation and an
+        # immediate query gave up on a page that was about to be fine.
+        try:
+            page.wait_for_selector(_EMAIL_FIELDS, timeout=timeout_ms)
+        except Exception:
+            # Circle's sign-in page can open on a choice of method with no
+            # fields at all ("Log in to your account / Sign in with an email").
+            # Measured on thefpahub from the droplet: zero <input> elements
+            # until that button is clicked.
+            if not _click_text(page, _EMAIL_METHOD_TEXTS):
+                return UNKNOWN
+            page.wait_for_timeout(1500)
+            try:
+                page.wait_for_selector(_EMAIL_FIELDS, timeout=timeout_ms)
+            except Exception:
+                return UNKNOWN
 
     _type_into(page, _EMAIL_FIELDS, email)
     _submit(page, ("sign in", "continue", "log in", "next"))
@@ -212,7 +229,15 @@ def sign_in(page, *, email: str, password: str, community_host: str, timeout_ms:
 
     _type_into(page, "input[type='password']", password)
     _submit(page, ("sign in", "log in", "continue"))
-    page.wait_for_load_state("networkidle", timeout=timeout_ms)
+    # Circle finishes the login asynchronously: measured on the droplet, the
+    # page was still the sign-in form when networkidle returned and only then
+    # swapped to /feed. Reporting a login_wall there costs a whole visit, so
+    # wait for the URL to actually leave the form.
+    deadline = time.monotonic() + timeout_ms / 1000
+    while time.monotonic() < deadline:
+        page.wait_for_timeout(1500)
+        if "sign_in" not in (page.url or ""):
+            break
     return classify(page)
 
 
@@ -252,6 +277,16 @@ def click_join(page, timeout_ms: int = 15000) -> str:
                 pass
             return classify(page)
     return UNKNOWN
+
+
+def _click_text(page, texts: tuple[str, ...]) -> bool:
+    """Click the first link or button whose label contains one of ``texts``."""
+    for text in texts:
+        element = page.query_selector(f"button:has-text('{text}'), a:has-text('{text}')")
+        if element:
+            element.click()
+            return True
+    return False
 
 
 def _type_into(page, selector: str, value: str) -> None:

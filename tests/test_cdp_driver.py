@@ -213,6 +213,7 @@ def test_sign_in_opens_the_login_page_when_the_current_one_has_no_field():
     visited = []
     def goto(url, wait_until=None):
         visited.append(url)
+        page._inputs["input[type='email'], input[name='email'], #user_email"] = FakeElement("email", page)
         page._inputs["email"] = FakeElement("email", page)  # the form exists there
         page.url = url
     page.goto = goto
@@ -220,3 +221,43 @@ def test_sign_in_opens_the_login_page_when_the_current_one_has_no_field():
     d.sign_in(page, email="bot@example.com", password="pw", community_host="community.example.com")
     assert visited == ["https://community.example.com/users/sign_in"]
     assert ("email", "bot@example.com") in page.typed
+
+
+def test_sign_in_clicks_through_a_method_chooser_that_has_no_fields():
+    """Measured on thefpahub from the droplet: /users/sign_in renders zero
+    <input> elements until "Sign in with an email" is clicked."""
+    page = FakePage(url="https://community.example.com/users/sign_in",
+                    buttons=["Sign in with an email"])
+    page.goto = lambda url, wait_until=None: None
+    waits = {"n": 0}
+
+    def wait_for_selector(selector, timeout=None):
+        waits["n"] += 1
+        if waits["n"] == 1:                      # before the click: nothing there
+            raise TimeoutError(selector)
+        page._inputs[selector] = FakeElement("email", page)   # after it: the form
+        return page._inputs[selector]
+    page.wait_for_selector = wait_for_selector
+
+    d.sign_in(page, email="bot@example.com", password="pw", community_host="community.example.com")
+    assert "Sign in with an email" in page.clicked
+    assert ("email", "bot@example.com") in page.typed
+
+
+def test_sign_in_waits_until_the_page_leaves_the_form():
+    """Circle swaps to /feed a beat after the submit; checking too early
+    reported a login wall on a login that had in fact succeeded."""
+    page = FakePage(url="https://community.example.com/sign_in#email",
+                    inputs=("email", "password"), body="Feed", buttons=[])
+    page.goto = lambda url, wait_until=None: None
+    page.wait_for_selector = lambda selector, timeout=None: FakeElement("f", page)
+    ticks = {"n": 0}
+
+    def wait_for_timeout(_ms):
+        ticks["n"] += 1
+        if ticks["n"] >= 2:
+            page.url = "https://community.example.com/feed"
+    page.wait_for_timeout = wait_for_timeout
+
+    d.sign_in(page, email="bot@example.com", password="pw", community_host="community.example.com")
+    assert page.url.endswith("/feed")
