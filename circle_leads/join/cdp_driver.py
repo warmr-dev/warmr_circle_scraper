@@ -39,7 +39,15 @@ EXTERNAL_LOGIN = "external_login"
 CLOUDFLARE = "cloudflare"
 UNKNOWN = "unknown"
 
-_JOIN_TEXTS = ("register for free", "join for free", "join now", "join the community", "join")
+# A label may match one of these anywhere inside it.
+_JOIN_PHRASES = ("register for free", "join for free", "join now", "join the community")
+# ...but a bare word has to be the whole label.
+_JOIN_EXACT = ("join", "register", "join community")
+# Circle puts a "Join a space" button on every space card once a visitor is
+# signed in. Measured on siliconslopes 2026-09-25: the home page carried five
+# of them and no community gate, and a substring match on "join" clicked one
+# and walked us into /s/agile -- which looks like progress and is not.
+_NOT_JOIN = ("space",)
 _LOGIN_TEXTS = ("log in", "login", "sign in")
 _EMAIL_METHOD_TEXTS = ("sign in with an email", "sign in with email", "continue with email", "use email")
 _EMAIL_FIELDS = "input[type='email'], input[name='email'], #user_email"
@@ -130,8 +138,8 @@ def classify(page) -> str:
     if "just a moment" in text or "checking your browser" in text:
         return CLOUDFLARE
     if any(t in text for t in ("members only", "this community is open for registered members")):
-        return JOIN_GATE if _has_text_button(page, _JOIN_TEXTS) else LOGIN_WALL
-    if _has_text_button(page, _JOIN_TEXTS):
+        return JOIN_GATE if _has_join_button(page) else LOGIN_WALL
+    if _has_join_button(page):
         return JOIN_GATE
     if _has_text_button(page, _LOGIN_TEXTS):
         return LOGIN_WALL
@@ -152,14 +160,32 @@ def assess(page) -> tuple[str, Membership]:
     return classify(page), member
 
 
-def _has_text_button(page, texts: tuple[str, ...]) -> bool:
+def _button_labels(page) -> list[str]:
+    """Every link and button label on the page, lowercased, in document order."""
     try:
-        labels = page.eval_on_selector_all(
+        return page.eval_on_selector_all(
             "a, button", "els => els.map(e => (e.textContent || '').trim().toLowerCase())"
         )
     except Exception:
+        return []
+
+
+def is_join_label(label: str) -> bool:
+    """Whether this label offers to join the community itself."""
+    label = (label or "").strip().lower()
+    if not label or any(hint in label for hint in _NOT_JOIN):
         return False
-    return any(any(t == label or t in label for t in texts) for label in labels)
+    if label in _JOIN_EXACT:
+        return True
+    return any(phrase in label for phrase in _JOIN_PHRASES)
+
+
+def _has_join_button(page) -> bool:
+    return any(is_join_label(label) for label in _button_labels(page))
+
+
+def _has_text_button(page, texts: tuple[str, ...]) -> bool:
+    return any(any(t == label or t in label for t in texts) for label in _button_labels(page))
 
 
 def membership(page) -> Membership:
@@ -288,18 +314,27 @@ def enter_code(page, code: str, timeout_ms: int = 15000) -> str:
 
 
 def click_join(page, timeout_ms: int = 15000) -> str:
-    """Click the community's join gate. Returns the state afterwards."""
-    for label in _JOIN_TEXTS:
-        button = page.query_selector(f"button:has-text('{label}'), a:has-text('{label}')")
-        if button:
-            button.click()
-            page.wait_for_timeout(2000)
-            try:
-                page.wait_for_load_state("networkidle", timeout=timeout_ms)
-            except Exception:
-                pass
-            return classify(page)
-    return UNKNOWN
+    """Click the community's join gate. Returns the state afterwards.
+
+    The button is found by reading every label once and picking the first that
+    ``is_join_label`` accepts, rather than by asking the page for a selector
+    that *contains* the word: ``:has-text('join')`` happily matches "Join a
+    space".
+    """
+    labels = _button_labels(page)
+    index = next((i for i, label in enumerate(labels) if is_join_label(label)), None)
+    if index is None:
+        return UNKNOWN
+    elements = page.query_selector_all("a, button")
+    if index >= len(elements):
+        return UNKNOWN
+    elements[index].click()
+    page.wait_for_timeout(2000)
+    try:
+        page.wait_for_load_state("networkidle", timeout=timeout_ms)
+    except Exception:
+        pass
+    return classify(page)
 
 
 def _click_text(page, texts: tuple[str, ...]) -> bool:

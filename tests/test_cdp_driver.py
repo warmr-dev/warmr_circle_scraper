@@ -41,6 +41,8 @@ class FakePage:
     def query_selector_all(self, selector):
         if "tel" in selector:
             return [FakeElement(f"otp{i}", self) for i in range(6)]
+        if "button" in selector:
+            return [FakeElement(label, self) for label in self._buttons]
         return []
 
     def evaluate(self, _script):
@@ -284,3 +286,45 @@ def test_a_redirect_to_a_third_party_login_is_still_refused():
     state = d.sign_in(page, email="bot@example.com", password="pw",
                       community_host="www.generouslifeapp.com")
     assert state == d.EXTERNAL_LOGIN and page.typed == []
+
+
+# --- the join gate, and the button that only looks like one ----------------
+#
+# Measured on siliconslopes 2026-09-25: signed in but not a member, the home
+# page carried five "Join a space" buttons and no community gate. Matching the
+# word "join" anywhere clicked one and navigated to /s/agile, and the run then
+# reported progress it had not made.
+
+
+@pytest.mark.parametrize(
+    "label, expected",
+    [
+        ("Join", True),
+        ("join now", True),
+        ("Register for Free", True),
+        ("Join the community", True),
+        ("Join a space", False),
+        ("Join space", False),
+        ("Members", False),
+        ("", False),
+    ],
+)
+def test_is_join_label(label, expected):
+    assert d.is_join_label(label) is expected
+
+
+def test_join_a_space_is_not_a_join_gate():
+    page = FakePage(body="silicon slopes feed", buttons=["Join a space", "Members"])
+    assert d.classify(page) != d.JOIN_GATE
+
+
+def test_click_join_skips_join_a_space():
+    page = FakePage(body="members only", buttons=["Join a space", "Register for free"])
+    d.click_join(page)
+    assert page.clicked == ["Register for free"]
+
+
+def test_click_join_refuses_when_only_spaces_offer_to_be_joined():
+    page = FakePage(body="silicon slopes feed", buttons=["Join a space", "Join a space"])
+    assert d.click_join(page) == d.UNKNOWN
+    assert page.clicked == []
