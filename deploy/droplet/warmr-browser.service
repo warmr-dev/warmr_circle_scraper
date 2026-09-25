@@ -1,0 +1,22 @@
+[Unit]
+Description=Warmr join browser: headed Chrome in a virtual display, CDP on localhost
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=warmr
+Group=warmr
+WorkingDirectory=/opt/warmr/browser-trial
+Environment=HOME=/var/lib/warmr
+Environment=CHROME_DEVEL_SANDBOX=/opt/warmr/browser-trial/ms-playwright/chromium-1243/chrome-linux64/chrome_sandbox
+# Headless is what Cloudflare stops (measured 2026-09-25: challenged on 3/3
+# communities, fine on 3/3 when the same binary runs in a virtual display).
+ExecStart=/usr/bin/xvfb-run -a --server-args="-screen 0 1280x900x24" /opt/warmr/browser-trial/ms-playwright/chromium-1243/chrome-linux64/chrome --user-data-dir=/opt/warmr/browser-trial/profile --remote-debugging-port=9222 --remote-debugging-address=127.0.0.1 --no-first-run --no-default-browser-check --disable-dev-shm-usage --window-size=1280,900 about:blank
+Restart=always
+RestartSec=5
+# The worker and the watcher share this 3.9 GB box and there is no swap.
+MemoryMax=1500M
+
+[Install]
+WantedBy=multi-user.target

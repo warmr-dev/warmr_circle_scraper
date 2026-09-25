@@ -7,6 +7,15 @@ defeating an access control, so the PoC stops there by design.
 
 Run date: 2026-09-07. Code: `circle_leads/remote_browser/`.
 
+> **Superseded in part, 2026-09-25.** This PoC tested a *headless* browser. On
+> the DigitalOcean droplet the same Chromium binary was challenged on 3 of 3
+> communities headless, and on 0 of 3 when it ran headed inside `xvfb-run` --
+> twice, hours apart. Nothing was defeated: a headed browser in a virtual
+> display is simply not what the challenge is aimed at. A server-hosted session
+> does hold, and it now drives joins; see [`joining.md`](joining.md). The
+> verdict above still stands for headless Chromium, and Railway itself was not
+> retested.
+
 ---
 
 ## What was proposed
