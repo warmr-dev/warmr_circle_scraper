@@ -107,3 +107,39 @@ def test_the_value_written_is_a_readable_timestamp(recorded):
         datetime.fromisoformat(recorded.writes[0][1])
     finally:
         cancel()
+
+
+# --- where the alert tells you to look ------------------------------------
+#
+# The watchdog's message used to name one droplet's IP and a systemctl command
+# in the source. The machine is being replaced; an alert that sends the reader
+# to a host that no longer exists is worse than no alert.
+
+
+def test_host_hint_comes_from_the_environment(monkeypatch):
+    from circle_leads.web import app as web_app
+
+    monkeypatch.setenv("WARMR_HOST_HINT", "supervisorctl status на openclaw-1")
+    assert web_app._host_hint() == "supervisorctl status на openclaw-1"
+
+
+def test_host_hint_falls_back_when_unset_or_blank(monkeypatch):
+    from circle_leads.web import app as web_app
+
+    monkeypatch.delenv("WARMR_HOST_HINT", raising=False)
+    assert web_app._host_hint() == web_app.DEFAULT_HOST_HINT
+    monkeypatch.setenv("WARMR_HOST_HINT", "   ")
+    assert web_app._host_hint() == web_app.DEFAULT_HOST_HINT
+
+
+def test_the_dead_droplet_is_not_named_in_the_source():
+    """The alert used to spell out one droplet's address; it outlived the box.
+
+    A loopback literal is fine -- the dashboard binds to 127.0.0.1 -- so this
+    pins the actual regression instead of banning every dotted quad.
+    """
+    from pathlib import Path
+
+    from circle_leads.web import app as web_app
+
+    assert "168.144.131.38" not in Path(web_app.__file__).read_text()
