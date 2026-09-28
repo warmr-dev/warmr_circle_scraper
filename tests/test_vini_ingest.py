@@ -86,6 +86,7 @@ def test_payload_shape(db):
         author = s.get(Author, post.author_id)
         payload = lead_to_ingest_payload(lead, post, community, author)
         fetched_at = post.scraped_at.strftime("%Y-%m-%dT%H:%M:%SZ")
+        classified_at = max(lead.created_at.strftime("%Y-%m-%dT%H:%M:%SZ"), fetched_at)
 
     assert payload == {
         "url": "https://acme.circle.so/c/jobs/1",
@@ -95,6 +96,7 @@ def test_payload_shape(db):
         "posted_at": "2026-09-07T10:00:00Z",
         "source_event_at": "2026-09-07T10:00:00Z",
         "fetched_at": fetched_at,
+        "classified_at": classified_at,
         "delivery_mode": "live",
         "intent_type": "explicit",
         "platform": "circle",
@@ -521,6 +523,47 @@ def test_a_fetched_at_hold_after_sending_it_is_not_retried(db, monkeypatch):
     assert result.sent == 1
     with db.session() as s:
         assert s.get(Lead, ids[0]).external_synced_at is not None
+
+
+# --- classified_at ---------------------------------------------------------
+
+def test_the_payload_carries_the_time_we_judged_the_post(db):
+    """{"status": "held", "decision": "invalid_timestamp",
+        "holdReason": "missing_or_invalid_classified_at"}, 2026-09-28."""
+    lead_id = _seed_lead(db)
+    with db.session() as s:
+        lead = s.get(Lead, lead_id)
+        post = s.get(Post, lead.post_id)
+        post.scraped_at = datetime(2026, 9, 28, 8, 4, 49)
+        lead.created_at = datetime(2026, 9, 28, 8, 5, 30)
+        payload = lead_to_ingest_payload(
+            lead, post, s.get(Community, post.community_id), s.get(Author, post.author_id))
+    assert payload["classified_at"] == "2026-09-28T08:05:30Z"
+
+
+def test_classified_at_never_falls_before_fetched_at(db):
+    """A post read again after its verdict has a later scraped_at."""
+    lead_id = _seed_lead(db)
+    with db.session() as s:
+        lead = s.get(Lead, lead_id)
+        post = s.get(Post, lead.post_id)
+        lead.created_at = datetime(2026, 9, 28, 8, 0, 0)
+        post.scraped_at = datetime(2026, 9, 28, 11, 0, 0)
+        payload = lead_to_ingest_payload(
+            lead, post, s.get(Community, post.community_id), s.get(Author, post.author_id))
+    assert payload["classified_at"] == payload["fetched_at"] == "2026-09-28T11:00:00Z"
+
+
+def test_a_classified_at_hold_on_a_body_without_it_is_sent_again(db, monkeypatch):
+    monkeypatch.setattr("circle_leads.notify.notify", lambda *a, **k: True)
+    hold = {"status": "held", "decision": "invalid_timestamp",
+            "holdReason": "missing_or_invalid_classified_at"}
+    with patch("circle_leads.export.vini_ingest.lead_to_ingest_payload",
+               return_value={"url": "u", "source_author_id": "42", "fetched_at": "x"}):
+        ids, result = _push_with(db, monkeypatch, [hold])
+    assert result.held and result.sent == 0
+    with db.session() as s:
+        assert s.get(Lead, ids[0]).external_synced_at is None
 
 
 def test_push_leads_resends_exactly_the_given_ids(tmp_path, monkeypatch):

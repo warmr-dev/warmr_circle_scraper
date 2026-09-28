@@ -84,7 +84,11 @@ AUTHOR_IDENTITY_HOLD = "missing_source_author_identity"
 FETCHED_AT_HOLD = "missing_or_invalid_fetched_at"
 # A hold the next push can clear, and the payload field that clears it. Sent
 # without that field, the lead stays unsynced so the fixed body goes out.
-FIXABLE_HOLDS = {AUTHOR_IDENTITY_HOLD: "source_author_id", FETCHED_AT_HOLD: "fetched_at"}
+# From later the same day: "missing_or_invalid_classified_at" -- when we
+# judged the post a lead.
+CLASSIFIED_AT_HOLD = "missing_or_invalid_classified_at"
+FIXABLE_HOLDS = {AUTHOR_IDENTITY_HOLD: "source_author_id", FETCHED_AT_HOLD: "fetched_at",
+                 CLASSIFIED_AT_HOLD: "classified_at"}
 # One-shot: leads stamped synced before the payload carried source_author_id.
 RESEND_WITH_AUTHOR_KEY = "vini_author_identity_resend"
 
@@ -173,6 +177,8 @@ def lead_to_ingest_payload(
     token = _message_token(post)
     external_id = _message_id(community, post)
     posted_at = _iso_utc(post.published_at) or _iso_utc(lead.created_at)
+    fetched_at = _iso_utc(post.scraped_at) or _iso_utc(utcnow())
+    classified_at = _iso_utc(lead.created_at) or fetched_at
     payload: dict[str, Any] = {
         "url": _post_url(url, token),
         "community": community_name,
@@ -183,7 +189,12 @@ def lead_to_ingest_payload(
         "source_event_at": posted_at,
         # When we read it. Without it the portal parks the lead
         # (missing_or_invalid_fetched_at).
-        "fetched_at": _iso_utc(post.scraped_at) or _iso_utc(utcnow()),
+        "fetched_at": fetched_at,
+        # When we judged it a lead. Without it the portal parks the lead
+        # (missing_or_invalid_classified_at, seen 2026-09-28). A post read
+        # again after it was judged has a later scraped_at, so the verdict
+        # time is never allowed to fall before the read time.
+        "classified_at": max(classified_at, fetched_at),
         "delivery_mode": "live",
         "intent_type": DEFAULT_INTENT_TYPE,
         "platform": PLATFORM,
