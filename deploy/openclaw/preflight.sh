@@ -101,11 +101,19 @@ cmd_start() {
   dd if=/dev/urandom of="$BLOB" bs=1M count=200 status=none 2>/dev/null \
     && sha256sum "$BLOB" > "$SUMS" && ok "200 MB written and checksummed"
   : > "$BEAT"
-  setsid nohup sh -c "while :; do date -u +%s >> '$BEAT'; sleep 10; done" \
-    >/dev/null 2>&1 </dev/null &
+  # setsid detaches it from this shell's session, which is what a web terminal
+  # closing would otherwise take down with it. Not every minimal image has it.
+  local beater="while :; do date -u +%s >> '$BEAT'; sleep 10; done"
+  if command -v setsid >/dev/null 2>&1; then
+    setsid nohup sh -c "$beater" >/dev/null 2>&1 </dev/null &
+  else
+    nohup sh -c "$beater" >/dev/null 2>&1 </dev/null &
+  fi
   disown 2>/dev/null || true
   sleep 11
-  ok "heartbeat started, $(wc -l < "$BEAT") ticks so far"
+  local ticks; ticks=$(wc -l < "$BEAT" | tr -d ' ')
+  if [ "${ticks:-0}" -ge 1 ]; then ok "heartbeat started, $ticks ticks so far"
+  else bad "the heartbeat never started -- the disconnect test cannot run"; fi
 
   cat <<'NEXT'
 
