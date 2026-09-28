@@ -1190,12 +1190,15 @@ def export_cmd(ctx, fmt, output, min_score, priority, community, extended):
               help="Max unsynced leads to send in one call.")
 @click.option("--force", is_flag=True,
               help="Resend even if already marked synced (by id selection only).")
+@click.option("--id", "lead_ids", type=int, multiple=True,
+              help="Send exactly these leads, even if marked synced. Repeatable.")
 @click.pass_context
-def push_leads_cmd(ctx, limit, force):
+def push_leads_cmd(ctx, limit, force, lead_ids):
     """POST unsynced LEADs to the production Vini ingest endpoint.
 
     Requires SUPABASE_ANON_KEY and VINI_API_SECRET. New leads are pushed
-    automatically after classify/triage; use this to retry failures.
+    automatically after classify/triage; use this to retry failures, or
+    ``--id`` to resend leads the portal parked before a payload fix.
     """
     cfg = load_vini_ingest_config()
     if not cfg.enabled:
@@ -1204,7 +1207,9 @@ def push_leads_cmd(ctx, limit, force):
         )
 
     with ctx.obj["db"].session() as s:
-        if force:
+        if lead_ids:
+            result = push_leads_by_ids(s, list(lead_ids), config=cfg, force=True)
+        elif force:
             ids = list(
                 s.scalars(
                     select(Lead.id)
