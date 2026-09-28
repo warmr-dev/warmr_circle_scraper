@@ -492,7 +492,13 @@ def classify_pending(
             lead.evidence_quote = result.evidence_quote
             lead.lead_score = score
             lead.priority = priority
-            lead.score_breakdown = breakdown
+            # The model's description the lead rule decided on rides along in
+            # the breakdown: it has no column, and a reviewer needs it to see
+            # why the post was filed.
+            lead.score_breakdown = (
+                {**breakdown, "described": result.described}
+                if result.described else breakdown
+            )
             lead.duplicate_of_id = duplicate_lead_id
 
             extracted = result.extracted or {}

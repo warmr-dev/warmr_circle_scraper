@@ -76,7 +76,7 @@ TECHNICAL_ROLE_PATTERN = (
     r"\b(?:developer|engineer|programmer|coder|devops|sre|architect|"
     r"full[- ]?stack|front[- ]?end|back[- ]?end|software|web\s+dev\w*|"
     r"mobile\s+dev\w*|cto|technical\s+co-?founder|technical\s+lead|"
-    r"tech\s+lead|data\s+scientist|data\s+engineer)\b"
+    r"tech\s+lead|data\s+scientist|data\s+engineer)s?\b"
     # Bare "dev" is a technical role in these communities, except in "business
     # dev" / "biz dev", which is sales.
     r"|(?<!business\s)(?<!biz\s)\bdevs?\b"
@@ -94,12 +94,14 @@ SOFTWARE_ARTIFACT = (
 )
 
 # A request to have that artifact made or worked on: "build our booking app",
-# "extend our plugin", "automate the onboarding flow".
+# "extend our plugin", "automate the onboarding flow" -- or the same work
+# named as a noun: "help with our app redesign", "a website build".
 SOFTWARE_BUILD_REQUEST = (
     r"\b(?:build|building|develop|developing|create|creating|code|coding|"
     r"design|designing|redesign|rebuild|rebuilding|revamp|migrate|migrating|"
     r"integrate|automate|maintain|extend|upgrade|fix|ship|launch)\s+"
-    rf"(?:(?:a|an|the|our|my|this|new|custom)\s+){{0,2}}(?:[\w-]+\s+){{0,2}}?{SOFTWARE_ARTIFACT}\b"
+    rf"(?:(?:a|an|the|our|my|this|new|custom)\s+){{0,2}}(?:[\w-]+\s+){{0,3}}?{SOFTWARE_ARTIFACT}\b"
+    rf"|\b{SOFTWARE_ARTIFACT}\s+(?:re)?(?:design|build|development|migration)\b"
 )
 
 # The vendor nouns, but only where the poster is looking for one. The qualifier
@@ -108,7 +110,8 @@ SOFTWARE_BUILD_REQUEST = (
 # not the thing being bought.
 SOFTWARE_VENDOR_SOUGHT = (
     r"\b(?:hire|hiring|need|needs|needed|looking\s+for|look\s+for|seeking|"
-    r"seek|find|finding|know|knows|recommend|engage|bring\s+on)\s+"
+    r"seek|searching\s+for|search\s+for|find|finding|know|knows|recommend|"
+    r"engage|bring\s+on)\s+"
     r"(?:(?:a|an|some|any|the|our|new|good|solid)\s+){0,2}"
     r"(?:(?!staffing|recruit\w*|talent|temp|temporary|placement|employment)"
     r"[\w-]+\s+){0,2}?"
@@ -449,7 +452,8 @@ def requests_software_work(text: str) -> bool:
 
     Three independent shapes count: a technical role is named, something we
     build is asked for, or a vendor is being sought. Any one of them means the
-    back-office rule must keep its hands off the post.
+    back-office rule must keep its hands off the post. It is also what a lead
+    filed by the rules alone must show (lead_classifier.classify).
     """
     return bool(
         _TECHNICAL_ROLE.search(text)
