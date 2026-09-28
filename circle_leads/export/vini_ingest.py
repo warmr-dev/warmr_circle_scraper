@@ -78,6 +78,13 @@ LANDED_STATUSES = frozenset(
 # "holdReason": "missing_source_author_identity"}.
 HELD_STATUS = "held"
 AUTHOR_IDENTITY_HOLD = "missing_source_author_identity"
+# Seen from 2026-09-28: {"status": "held", "decision": "invalid_timestamp",
+# "holdReason": "missing_or_invalid_fetched_at"}. The portal wants the time we
+# read the post, not only the time it was written.
+FETCHED_AT_HOLD = "missing_or_invalid_fetched_at"
+# A hold the next push can clear, and the payload field that clears it. Sent
+# without that field, the lead stays unsynced so the fixed body goes out.
+FIXABLE_HOLDS = {AUTHOR_IDENTITY_HOLD: "source_author_id", FETCHED_AT_HOLD: "fetched_at"}
 # One-shot: leads stamped synced before the payload carried source_author_id.
 RESEND_WITH_AUTHOR_KEY = "vini_author_identity_resend"
 
@@ -174,6 +181,9 @@ def lead_to_ingest_payload(
         # The portal files a missing event time as invalid_timestamp, and
         # refuses one older than 48 hours. This is the post's own time.
         "source_event_at": posted_at,
+        # When we read it. Without it the portal parks the lead
+        # (missing_or_invalid_fetched_at).
+        "fetched_at": _iso_utc(post.scraped_at) or _iso_utc(utcnow()),
         "delivery_mode": "live",
         "intent_type": DEFAULT_INTENT_TYPE,
         "platform": PLATFORM,
@@ -339,13 +349,14 @@ def push_leads_by_ids(
                 if item.get(k)
             )
             result.held.append((lead.id, reason[:300]))
-            sent_identity = bool((payloads[index] or {}).get("source_author_id"))
-            if AUTHOR_IDENTITY_HOLD in reason and not sent_identity:
+            sent = payloads[index] or {}
+            if any(hold in reason and not sent.get(field_name)
+                   for hold, field_name in FIXABLE_HOLDS.items()):
                 # The body can still be fixed. Leave it unsynced so the next
-                # push sends source_author_id instead of parking it again.
+                # push sends the missing field instead of parking it again.
                 continue
-            # Any other hold, or this one after we already sent the id: a
-            # retry of the same body will not clear it.
+            # Any other hold, or one of these after we already sent the
+            # field: a retry of the same body will not clear it.
             lead.external_synced_at = synced_at
             result.sent += 1
             continue

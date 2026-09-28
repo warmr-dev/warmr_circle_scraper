@@ -85,6 +85,7 @@ def test_payload_shape(db):
         community = s.get(Community, post.community_id)
         author = s.get(Author, post.author_id)
         payload = lead_to_ingest_payload(lead, post, community, author)
+        fetched_at = post.scraped_at.strftime("%Y-%m-%dT%H:%M:%SZ")
 
     assert payload == {
         "url": "https://acme.circle.so/c/jobs/1",
@@ -93,6 +94,7 @@ def test_payload_shape(db):
         "name": "Dana Ops",
         "posted_at": "2026-09-07T10:00:00Z",
         "source_event_at": "2026-09-07T10:00:00Z",
+        "fetched_at": fetched_at,
         "delivery_mode": "live",
         "intent_type": "explicit",
         "platform": "circle",
@@ -480,3 +482,68 @@ def test_a_held_lead_is_not_retried_forever(db, monkeypatch):
         with db.session() as s:
             push_unsynced_leads(s)
         mock_post.assert_not_called()
+
+
+# --- fetched_at ------------------------------------------------------------
+
+def test_the_payload_carries_the_time_we_read_the_post(db):
+    """The portal parks a lead with no read time:
+    {"status": "held", "decision": "invalid_timestamp",
+     "holdReason": "missing_or_invalid_fetched_at"}."""
+    lead_id = _seed_lead(db)
+    with db.session() as s:
+        lead = s.get(Lead, lead_id)
+        post = s.get(Post, lead.post_id)
+        post.scraped_at = datetime(2026, 9, 28, 8, 4, 49)
+        payload = lead_to_ingest_payload(
+            lead, post, s.get(Community, post.community_id), s.get(Author, post.author_id))
+    assert payload["fetched_at"] == "2026-09-28T08:04:49Z"
+
+
+def test_a_fetched_at_hold_on_a_body_without_it_is_sent_again(db, monkeypatch):
+    """A body that lacked fetched_at can still be fixed, so it stays unsynced."""
+    monkeypatch.setattr("circle_leads.notify.notify", lambda *a, **k: True)
+    hold = {"status": "held", "decision": "invalid_timestamp",
+            "holdReason": "missing_or_invalid_fetched_at"}
+    with patch("circle_leads.export.vini_ingest.lead_to_ingest_payload",
+               return_value={"url": "u", "source_author_id": "42"}):
+        ids, result = _push_with(db, monkeypatch, [hold])
+    assert result.held and result.sent == 0
+    with db.session() as s:
+        assert s.get(Lead, ids[0]).external_synced_at is None
+
+
+def test_a_fetched_at_hold_after_sending_it_is_not_retried(db, monkeypatch):
+    monkeypatch.setattr("circle_leads.notify.notify", lambda *a, **k: True)
+    ids, result = _push_with(db, monkeypatch, [{
+        "status": "held", "decision": "invalid_timestamp",
+        "holdReason": "missing_or_invalid_fetched_at"}])
+    assert result.sent == 1
+    with db.session() as s:
+        assert s.get(Lead, ids[0]).external_synced_at is not None
+
+
+def test_push_leads_resends_exactly_the_given_ids(tmp_path, monkeypatch):
+    """``push-leads --id`` resends leads the portal parked before a fix,
+    even though they are stamped synced, and touches no other lead."""
+    from click.testing import CliRunner
+
+    from circle_leads.cli.main import cli
+
+    url = f"sqlite:///{tmp_path}/cli.db"
+    db = Database(url)
+    first = _seed_lead(db)
+    second, third = _seed_sibling_leads(db, first, 2)
+    with db.session() as s:
+        for i in (first, second, third):
+            s.get(Lead, i).external_synced_at = datetime(2026, 9, 28)
+    monkeypatch.setenv("SUPABASE_ANON_KEY", "anon")
+    monkeypatch.setenv("VINI_API_SECRET", "secret")
+    with patch("circle_leads.export.vini_ingest.post_leads_to_vini") as mock_post:
+        mock_post.return_value = [{"status": "inserted"}, {"status": "inserted"}]
+        out = CliRunner().invoke(
+            cli, ["--db", url, "push-leads", "--id", str(first), "--id", str(third)])
+    assert out.exit_code == 0, out.output
+    sent = mock_post.call_args.args[0]
+    assert [p["external_id"] for p in sent] == [
+        "circle:acme:lead:post-1", "circle:acme:lead:post-extra-1"]
