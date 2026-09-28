@@ -30,9 +30,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
 import requests
-from sqlalchemy import or_, select
+from sqlalchemy import and_, or_, select
 
-from circle_leads.reach import readable
+from circle_leads.reach import has_session as session_stored, readable, real_host
 from circle_leads.storage.database import Database
 from circle_leads.storage.heartbeat import start_heartbeat
 from circle_leads.storage.models import (
@@ -150,13 +150,22 @@ def ensure_watch_rows(db: Database, *, quiet_days: int = 14) -> int:
             # row older than the platform column -- among them the seven
             # busiest communities we hold a session for. And no paid
             # community without a login.
-            .where(readable())
             .where(
                 or_(
-                    Community.watching.is_(True),
-                    Community.icp_flag.is_(True),
-                    Community.relevant.is_(True),
-                    Community.join_status == JoinStatus.JOINED.value,
+                    and_(
+                        readable(),
+                        or_(
+                            Community.watching.is_(True),
+                            Community.icp_flag.is_(True),
+                            Community.relevant.is_(True),
+                            Community.join_status == JoinStatus.JOINED.value,
+                        ),
+                    ),
+                    # A stored member session is proof enough: the extension
+                    # and the join bot only store one for a Circle community
+                    # we belong to. Exit Five (a custom domain, no platform
+                    # recorded) had a session and no watch row at all.
+                    and_(real_host(), session_stored()),
                 )
             )
         ).all()
@@ -170,6 +179,7 @@ def ensure_watch_rows(db: Database, *, quiet_days: int = 14) -> int:
                 .distinct()
             ).all()
         )
+        members = _member_ids(s)
         for community_id, host, _slug in rows:
             if community_id in known:
                 continue
@@ -178,17 +188,80 @@ def ensure_watch_rows(db: Database, *, quiet_days: int = 14) -> int:
                     community_id=community_id,
                     host=host,
                     mode=WatchMode.ANON.value,
-                    tier="fast" if community_id in recently_posted else "slow",
+                    tier="fast" if community_id in recently_posted | members else "slow",
                     next_check_at=_now(),
                     recent_ids=[],
                 )
             )
             created += 1
+        # A community we belong to stays on the fast tier, whatever its
+        # history. Rows made before this rule sat on the slow tier (or off)
+        # for weeks after the bot had joined.
+        for row in s.scalars(select(WatchState).where(WatchState.community_id.in_(members))):
+            row.tier = "fast"
+            if row.mode == WatchMode.OFF.value and row.host in has_session:
+                row.mode = WatchMode.COOKIE.value
+                row.next_check_at = _now()
         # Nothing is read with a session it does not have.
         for row in s.scalars(select(WatchState).where(WatchState.mode == WatchMode.COOKIE.value)):
             if row.host not in has_session:
                 row.mode = WatchMode.ANON.value
     return created
+
+
+def _member_ids(s) -> set[int]:
+    """Communities we belong to: the bot joined, or a member session is stored."""
+    return set(s.scalars(
+        select(Community.id).where(
+            or_(Community.join_status == JoinStatus.JOINED.value,
+                and_(real_host(), session_stored()))
+        )
+    ).all())
+
+
+def _is_member(s, row: WatchState) -> bool:
+    community = s.get(Community, row.community_id)
+    if community is not None and community.join_status == JoinStatus.JOINED.value:
+        return True
+    return s.scalar(select(ReplaySession.id).where(ReplaySession.host == row.host)) is not None
+
+
+def watch_member_now(db: Database, host: str) -> int | None:
+    """Put a community we just became a member of on the 2-minute tier, now.
+
+    Called when the join bot gets in and when a session is stored (the
+    extension, the dashboard). Waiting for the half-hourly resync cost up to
+    30 minutes, and the resync alone put a community with no posts in our
+    database on the 15-minute tier. Returns the community id.
+    """
+    from circle_leads.discovery.discover_communities import unique_slug_for_host
+    from circle_leads.storage.database import get_or_create_community
+
+    host = (host or "").strip().lower().strip(".")
+    if not host:
+        return None
+    with db.session() as s:
+        community = s.scalar(
+            select(Community).where(Community.host == host).order_by(Community.id)
+        ) or get_or_create_community(s, slug=unique_slug_for_host(host),
+                                     url=f"https://{host}")
+        community.watching = True
+        has_session = s.scalar(
+            select(ReplaySession.id).where(ReplaySession.host == host)) is not None
+        row = s.scalar(select(WatchState).where(WatchState.community_id == community.id))
+        if row is None:
+            row = WatchState(community_id=community.id, host=host,
+                             mode=WatchMode.ANON.value, recent_ids=[])
+            s.add(row)
+        if row.mode == WatchMode.OFF.value:
+            # The anonymous feed already refused us; the session is what reads it.
+            row.mode = WatchMode.COOKIE.value if has_session else WatchMode.ANON.value
+        row.host = host
+        row.tier = "fast"
+        row.consecutive_errors = 0
+        row.next_check_at = _now()
+        s.flush()
+        return community.id
 
 
 def due_states(db: Database, limit: int = 500) -> list[dict]:
@@ -436,7 +509,7 @@ def _finish(db: Database, state: dict, outcome: WatchOutcome, tuning: WatchTunin
                 row.tier = "fast"
         elif outcome.status in ("ok", "not_modified"):
             quiet_since = row.last_new_at or row.created_at or now
-            if now - quiet_since > timedelta(days=tuning.quiet_days):
+            if now - quiet_since > timedelta(days=tuning.quiet_days) and not _is_member(s, row):
                 row.tier = "slow"
 
         # A feed that refuses us anonymously may still answer with the session

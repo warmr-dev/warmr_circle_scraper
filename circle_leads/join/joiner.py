@@ -41,6 +41,7 @@ from circle_leads.storage.database import Database
 from circle_leads.storage.models import (
     CircleConnection, Community, JoinStatus, ReplaySession, utcnow,
 )
+from circle_leads.watch.poller import watch_member_now
 from circle_leads.web.replay_store import connect_host
 
 logger = logging.getLogger(__name__)
@@ -317,6 +318,14 @@ def _persist_terminal_outcome(db: Database, community_id: int, status: str, deta
         community.join_attempts += 1
         if status == JoinStatus.JOINED.value:
             community.joined_at = utcnow()
+        host = community.host
+    if status == JoinStatus.JOINED.value and host:
+        # Joined without a captured session still gets the 2-minute watch;
+        # connect_host() already did this when cookies came back.
+        try:
+            watch_member_now(db, host)
+        except Exception:  # noqa: BLE001 - the join itself is already recorded
+            logger.exception("could not put %s on the 2-minute watch", host)
 
 
 def _dead_host_reason(url: str) -> str | None:

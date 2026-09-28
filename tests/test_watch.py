@@ -616,3 +616,95 @@ def test_the_loop_survives_its_own_five_minute_reload(db, monkeypatch):
 
     poller.run_watch(db, once=True)          # must not raise
     assert reloads, "the reload branch never ran, so this test proves nothing"
+
+
+# --- members are read every 2 minutes ---------------------------------------
+
+def test_storing_a_session_puts_the_community_on_the_fast_tier_now(db):
+    """Exit Five: a custom domain, no platform recorded, a session stored from
+    the extension -- and no watch row at all, so nothing read it quickly."""
+    from circle_leads.web.replay_store import connect_host
+    with db.session() as s:
+        c = get_or_create_community(s, slug="community.exitfive.com",
+                                    url="https://community.exitfive.com")
+        s.flush()
+        cid = c.id
+
+    connect_host(db, "community.exitfive.com", [{"name": "_circle_session", "value": "x"}])
+
+    row = read_row(db, cid)
+    assert row.tier == "fast"
+    assert row.next_check_at <= datetime.utcnow()
+
+
+def test_a_session_for_a_host_we_have_never_seen_creates_its_row(db):
+    from circle_leads.web.replay_store import connect_host
+    connect_host(db, "new.example.com", [{"name": "_circle_session", "value": "x"}])
+    with db.session() as s:
+        from sqlalchemy import select
+        c = s.scalar(select(Community).where(Community.host == "new.example.com"))
+        assert c is not None and c.watching
+        cid = c.id
+    assert read_row(db, cid).tier == "fast"
+
+
+def test_a_joined_community_with_no_posts_starts_fast(db):
+    from circle_leads.storage.models import JoinStatus
+    with db.session() as s:
+        c = get_or_create_community(s, slug="joined", url="https://joined.circle.so",
+                                    platform="circle",
+                                    join_status=JoinStatus.JOINED.value)
+        s.flush()
+        cid = c.id
+    ensure_watch_rows(db, quiet_days=14)
+    assert read_row(db, cid).tier == "fast"
+
+
+def test_the_resync_lifts_a_member_left_on_the_slow_tier_or_off(db, community):
+    from circle_leads.web.replay_store import store_session
+    from sqlalchemy import select
+    ensure_watch_rows(db)
+    with db.session() as s:
+        row = s.scalar(select(WatchState).where(WatchState.community_id == community))
+        row.tier, row.mode = "slow", WatchMode.OFF.value
+    # store_session alone: the row predates the rule, nothing lifted it yet.
+    store_session(db, HOST, [{"name": "_circle_session", "value": "x"}])
+
+    ensure_watch_rows(db)
+    row = read_row(db, community)
+    assert row.tier == "fast"
+    assert row.mode == WatchMode.COOKIE.value
+
+
+def test_a_quiet_member_stays_on_the_fast_tier(db, community, monkeypatch):
+    from circle_leads.web.replay_store import connect_host
+    from sqlalchemy import select
+    connect_host(db, HOST, [{"name": "_circle_session", "value": "x"}])
+    monkeypatch.setattr("circle_leads.triage.pipeline.triage_records", triage_spy([]))
+    tuning = WatchTuning(quiet_days=14)
+    check_community(db, state_for(db, community), Requirements(),
+                    session=FakeSession([feed([make_record(30)])]), tuning=tuning)
+    with db.session() as s:
+        row = s.scalar(select(WatchState).where(WatchState.community_id == community))
+        row.created_at = datetime(2026, 1, 1)
+        row.last_new_at = None
+
+    check_community(db, state_for(db, community), Requirements(),
+                    session=FakeSession([feed([make_record(30)])]), tuning=tuning)
+    assert read_row(db, community).tier == "fast"
+
+
+def test_a_join_puts_the_community_on_the_fast_tier(db):
+    from circle_leads.join.joiner import _persist_terminal_outcome
+    from circle_leads.storage.models import JoinStatus
+    with db.session() as s:
+        c = get_or_create_community(s, slug="fresh", url="https://fresh.circle.so",
+                                    platform="circle", icp_flag=True)
+        s.flush()
+        cid = c.id
+
+    _persist_terminal_outcome(db, cid, JoinStatus.JOINED.value, "joined")
+
+    row = read_row(db, cid)
+    assert row.tier == "fast"
+    assert row.next_check_at <= datetime.utcnow()
