@@ -10,6 +10,7 @@ with database access. Set CIRCLE_CRED_KEY to encrypt at rest instead.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from datetime import datetime, timezone
 
@@ -18,6 +19,8 @@ from sqlalchemy import select
 from circle_leads.connector.credentials import decrypt, encrypt
 from circle_leads.storage.database import Database
 from circle_leads.storage.models import CircleConnection, ConnectionState, ReplaySession
+
+logger = logging.getLogger(__name__)
 
 # Marks a blob stored without encryption, so load knows not to decrypt.
 _PLAINTEXT_PREFIX = "plain:"
@@ -80,7 +83,18 @@ def connect_host(db: Database, host: str, cookies: list[dict],
     with db.session() as s:
         if s.scalar(select(CircleConnection).where(CircleConnection.host == host)) is None:
             s.add(CircleConnection(host=host, state=ConnectionState.NOT_CONNECTED.value))
+    _watch_now(db, host)
     return result
+
+
+def _watch_now(db: Database, host: str) -> None:
+    """A stored session means we are a member: read the feed every 2 minutes
+    from now on. A failure here must not lose the session just stored."""
+    from circle_leads.watch.poller import watch_member_now
+    try:
+        watch_member_now(db, host)
+    except Exception:  # noqa: BLE001
+        logger.exception("could not put %s on the 2-minute watch", host)
 
 
 def load_cookies(db: Database, host: str) -> list[dict] | None:
