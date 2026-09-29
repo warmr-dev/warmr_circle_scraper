@@ -18,6 +18,9 @@ dependencies = [
     "python-multipart>=0.0.9",
     "itsdangerous>=2.1",
     "psycopg[binary]>=3.1",
+    # Session cookies are encrypted at rest once CIRCLE_CRED_KEY is set, and
+    # the dashboard stores and reads them: Vercel installs only this list.
+    "cryptography>=42.0",
 ]
 
 [project.optional-dependencies]

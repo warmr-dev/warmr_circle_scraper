@@ -54,6 +54,8 @@ const WATCH_STATUS_WORDS = {
   ratelimited: 'лимит (429)',
   challenge: 'Cloudflare',
   notfound: 'не найдено (404)',
+  moved: 'переехало',
+  tls_error: 'домен не обслуживается (SSL)',
   error: 'ошибка',
 };
 

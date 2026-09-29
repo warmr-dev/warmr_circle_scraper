@@ -53,7 +53,8 @@ systemctl is-active warmr-worker warmr-watcher warmr-browser
 readlink -f /opt/warmr/current
 journalctl -u warmr-worker -u warmr-watcher --since '-1 min' --no-pager | tail -15
 echo
-echo "join timer: $(systemctl is-enabled warmr-join.timer 2>/dev/null || echo disabled)"
+# is-enabled prints the state itself and exits non-zero when it is not enabled.
+echo "join timer: $(systemctl is-enabled warmr-join.timer 2>/dev/null || true)"
 cat <<'NEXT'
 One community, by hand, first (replace <slug>) -- the same environment the timer uses:
   systemd-run --wait --pipe --collect -p User=warmr -p WorkingDirectory=/var/lib/warmr \

@@ -108,6 +108,41 @@ def test_store_encrypts_and_round_trips(monkeypatch):
     assert "encrypted_cookies" not in meta  # never exposed
 
 
+@pytest.mark.skipif(
+    __import__("importlib").util.find_spec("cryptography") is None,
+    reason="cryptography not installed",
+)
+def test_plaintext_sessions_are_encrypted_in_place(monkeypatch):
+    """44 sessions sat in plaintext until the key was set (2026-09-30)."""
+    from sqlalchemy import select
+
+    from circle_leads.storage.models import ReplaySession
+    from circle_leads.web.replay_store import (
+        ReplayKeyMissing, encrypt_plaintext_sessions, load_cookies, store_session,
+    )
+
+    db = _db()
+    cookies = parse_cookies(json.dumps(SAMPLE))
+    monkeypatch.delenv("CIRCLE_CRED_KEY", raising=False)
+    store_session(db, "a.circle.so", cookies, member_label="4")
+    store_session(db, "b.circle.so", cookies)
+    with pytest.raises(ReplayKeyMissing):
+        encrypt_plaintext_sessions(db)
+    with db.session() as s:
+        before = {r.host: r.updated_at for r in s.scalars(select(ReplaySession))}
+
+    monkeypatch.setenv("CIRCLE_CRED_KEY", "a-strong-key")
+    assert encrypt_plaintext_sessions(db) == 2
+    assert encrypt_plaintext_sessions(db) == 0
+    with db.session() as s:
+        for row in s.scalars(select(ReplaySession)):
+            assert not row.encrypted_cookies.startswith("plain:")
+            assert "_circle_session" not in row.encrypted_cookies
+            assert row.updated_at == before[row.host]
+    assert load_cookies(db, "a.circle.so") == cookies
+    assert load_cookies(db, "b.circle.so") == cookies
+
+
 def _label(db, host):
     from circle_leads.web.replay_store import list_sessions
     return next(m["member_label"] for m in list_sessions(db) if m["host"] == host)

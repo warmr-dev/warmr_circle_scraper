@@ -24,6 +24,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import and_, delete, func, select
 from sqlalchemy.orm import Session
 
+from circle_leads.join.accounts import is_retired
 from circle_leads.reach import JOIN_QUEUE_STATUSES, has_session, on_circle
 from circle_leads.storage.heartbeat import HEARTBEAT_LIMITS_S
 from circle_leads.storage.models import (
@@ -242,7 +243,11 @@ def _accounts_by_host(ctx: Ctx) -> dict[str, str]:
 
 
 def _refresh_as(account: str | None) -> str:
-    return f" — обновить под аккаунтом {account}" if account else " — аккаунт не записан"
+    if not account:
+        return " — аккаунт не записан"
+    if is_retired(account):
+        return f" — вход был аккаунтом {account}, он больше не используется: нужен новый вход"
+    return f" — обновить под аккаунтом {account}"
 
 
 def _sessions(ctx: Ctx, *, cloudflare: bool) -> list[dict]:
@@ -290,27 +295,58 @@ def _sessions(ctx: Ctx, *, cloudflare: bool) -> list[dict]:
 
 
 def _watch_cookie_feed(ctx: Ctx) -> list[dict]:
-    """The feed refuses our session while the cookie scan reads with it.
+    """The watcher cannot read a session the cookie scan reads with.
 
     Seen on 2026-09-29: onstartups, talentcollective, future-of-saas and
     engage.techsoup were read by the scan that morning, while the watcher's
     home_page_posts request with the same cookies had got 401 280 times in a
     row. Refreshing the cookies would not help; the cause is on our side.
+    Since then the watcher reads such members space by space, so this fires
+    only when that fails too. A scan that read no space at all is another
+    case (session_reads_nothing): there is nothing for the watcher to read.
     """
     rows = ctx.s.execute(select(
         WatchState.community_id, WatchState.host, WatchState.consecutive_errors,
-        WatchState.last_checked_at, CircleConnection.last_sync_at, CircleConnection.state_detail,
+        WatchState.last_checked_at, WatchState.last_detail,
+        CircleConnection.last_sync_at, CircleConnection.state_detail,
     ).join(CircleConnection, CircleConnection.host == WatchState.host).where(
         WatchState.mode == "cookie", WatchState.last_status == "unauthorized",
         CircleConnection.state == ConnectionState.CONNECTED.value,
+        CircleConnection.spaces_readable > 0,
     ).order_by(WatchState.consecutive_errors.desc())).all()
     return [_item(f"watchfeed:{r.community_id}", fingerprint("unauthorized"),
                   f"{r.host}: лента по сессии отвечает «нет доступа» уже "
                   f"{_plural(r.consecutive_errors, 'раз', 'раза', 'раз')} подряд, "
                   f"а полный проход по этой же сессии читает",
-                  detail=f"Полный проход по сессии {_ago(ctx.now, r.last_sync_at)}: "
-                         f"{r.state_detail or '—'}",
+                  detail=f"Наблюдатель: {r.last_detail or '—'}. Полный проход по сессии "
+                         f"{_ago(ctx.now, r.last_sync_at)}: {r.state_detail or '—'}",
                   at=r.last_checked_at, link=_community_link(r.community_id)) for r in rows]
+
+
+def _session_reads_nothing(ctx: Ctx) -> list[dict]:
+    """A live session that opens no space with posts in it.
+
+    onstartups, 2026-09-29: the cookie scan got in, saw 2 spaces and read
+    nothing from either. Fresh cookies would change nothing; what the member
+    can see has to be looked at by a person.
+    """
+    accounts = _accounts_by_host(ctx)
+    rows = ctx.s.execute(select(
+        CircleConnection.host, CircleConnection.community_id, CircleConnection.spaces_total,
+        CircleConnection.state_detail, CircleConnection.last_sync_at,
+    ).where(
+        CircleConnection.state == ConnectionState.CONNECTED.value,
+        CircleConnection.spaces_total > 0,
+        CircleConnection.spaces_readable == 0,
+        CircleConnection.priority != ConnectionPriority.PAUSED.value,
+    ).order_by(CircleConnection.host)).all()
+    return [_item(f"empty:{r.host}", fingerprint(r.spaces_total),
+                  f"{r.host}: сессия живая, но не читается ни один из разделов "
+                  f"({r.spaces_total})"
+                  + (f", аккаунт {accounts[r.host]}" if accounts.get(r.host) else ""),
+                  detail=r.state_detail, at=r.last_sync_at,
+                  link=_community_link(r.community_id)
+                  or {"section": "monitoring", "q": r.host}) for r in rows]
 
 
 def _session_dead(ctx: Ctx) -> list[dict]:
@@ -584,12 +620,17 @@ RULES: list[Rule] = [
     Rule("session_dead", "warn", "Сессия сообщества умерла",
          "Войди в сообщество под указанным аккаунтом и сохрани свежую сессию через "
          "расширение (или вставь куки в карточке). Под другим аккаунтом не выйдет: "
-         "он там не участник. Аккаунт не записан — укажи его в карточке сообщества.",
+         "он там не участник. Аккаунт не записан — укажи его в карточке сообщества. "
+         "Аккаунт больше не используется — вступи заново действующим аккаунтом бота.",
          _session_dead),
+    Rule("session_reads_nothing", "warn", "Сессия живая, но ничего не читает",
+         "Куки обновлять не надо. Зайди в сообщество под этим аккаунтом и посмотри "
+         "разделы: пустые, закрытые или в них надо вступить отдельно (Join space).",
+         _session_reads_nothing),
     Rule("watch_cookie_feed", "warn", "Лента по сессии не читается, а сессия живая",
-         "Куки обновлять не надо: по ним же читает полный проход. Не работает запрос "
-         "ленты наблюдателя — это наша ошибка, нужна проверка кода опроса. Пока лента "
-         "молчит, новые посты отсюда приходят только раз в 6 ч.",
+         "Куки обновлять не надо: по ним же читает полный проход. Наблюдатель не "
+         "прочитал ни ленту, ни разделы по отдельности — это наша ошибка, текст ниже. "
+         "Пока так, новые посты отсюда приходят только раз в 6 ч.",
          _watch_cookie_feed),
     Rule("watch_failing", "warn", "Опрос сообщества падает",
          "Пять и больше ошибок подряд. Открой сообщество: жив ли адрес, не сменился ли домен.",

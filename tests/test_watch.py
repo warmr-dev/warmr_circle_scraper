@@ -743,3 +743,214 @@ def test_a_join_puts_the_community_on_the_fast_tier(db):
     row = read_row(db, cid)
     assert row.tier == "fast"
     assert row.next_check_at <= datetime.utcnow()
+
+
+# --- members the home feed refuses: read space by space ------------------------
+
+class RoutedSession:
+    """Answers by URL: the home feed, the spaces list, one space's posts.
+
+    ``routes`` maps a marker -- "feed", "spaces", or a space id as a string --
+    to a response, or to a list of responses served in turn.
+    """
+
+    def __init__(self, routes):
+        self.routes = routes
+        self.calls = []
+        self.headers = {}
+
+    def get(self, url, headers=None, cookies=None, timeout=None, allow_redirects=None):
+        if "home_page_posts" in url:
+            key = "feed"
+        elif "/posts" in url:
+            key = url.split("/internal_api/spaces/")[1].split("/")[0]
+        else:
+            key = "spaces"
+        self.calls.append({"key": key, "cookies": cookies})
+        answer = self.routes[key]
+        if isinstance(answer, list):
+            return answer.pop(0) if len(answer) > 1 else answer[0]
+        return answer
+
+
+def spaces(*pairs):
+    return FakeResponse(200, [{"id": sid, "slug": slug} for sid, slug in pairs])
+
+
+@pytest.fixture(autouse=True)
+def _forget_member_spaces():
+    from circle_leads.watch import poller
+    poller._member_spaces.clear()
+    yield
+    poller._member_spaces.clear()
+
+
+def _member_row(db, community):
+    from circle_leads.web.replay_store import connect_host
+    from sqlalchemy import select
+    ensure_watch_rows(db)
+    connect_host(db, HOST, [{"name": "_circle_session", "value": "x"}], member_label="4")
+    with db.session() as s:
+        s.scalar(select(WatchState).where(WatchState.community_id == community)).mode = (
+            WatchMode.COOKIE.value)
+
+
+def test_a_member_the_feed_refuses_is_read_space_by_space(db, community, monkeypatch):
+    """onstartups, talentcollective, future-of-saas and engage.techsoup: the
+    home feed said 401 to sessions that read their spaces (2026-09-29)."""
+    _member_row(db, community)
+    calls = []
+    monkeypatch.setattr("circle_leads.triage.pipeline.triage_records", triage_spy(calls))
+    session = RoutedSession({
+        "feed": FakeResponse(401),
+        "spaces": spaces((1, "general"), (2, "locked"), (3, "jobs")),
+        "1": feed([make_record(101, space="general")]),
+        "2": FakeResponse(401),
+        "3": feed([make_record(103, space="jobs")]),
+    })
+
+    out = check_community(db, state_for(db, community), Requirements(),
+                          session=session, tuning=WatchTuning())
+    assert out.status == "ok"
+    assert "2 of 3" in out.detail
+    assert not calls                      # the first pass only sets the watermark
+    assert read_row(db, community).last_post_id == 103
+
+    session.routes.update({
+        "1": feed([make_record(101, space="general")]),
+        "3": feed([make_record(104, space="jobs"), make_record(103, space="jobs")]),
+    })
+    session.calls.clear()
+    out = check_community(db, state_for(db, community), Requirements(),
+                          session=session, tuning=WatchTuning())
+    assert out.status == "ok" and out.new_posts == 1
+    assert [c["key"] for c in session.calls] == ["1", "3"]   # no feed, no relisting
+    assert all(c["cookies"] for c in session.calls)
+    (post,) = calls[0]["records"]
+    assert post["source_content_id"] == "104"
+    assert post["url"] == f"https://{HOST}/c/jobs/post-104"
+    assert post["permission_reference"] == "member_session"
+    row = read_row(db, community)
+    assert row.last_post_id == 104
+    assert row.consecutive_errors == 0
+    assert row.mode == WatchMode.COOKIE.value
+
+
+def test_a_member_no_space_opens_for_reads_nothing(db, community, monkeypatch):
+    _member_row(db, community)
+    monkeypatch.setattr("circle_leads.triage.pipeline.triage_records", triage_spy([]))
+    session = RoutedSession({
+        "feed": FakeResponse(401),
+        "spaces": spaces((1, "a"), (2, "b")),
+        "1": FakeResponse(401),
+        "2": FakeResponse(401),
+    })
+    out = check_community(db, state_for(db, community), Requirements(),
+                          session=session, tuning=WatchTuning())
+    assert out.status == "unauthorized"
+    assert "none of the 2" in out.detail
+    assert read_row(db, community).last_post_id is None
+
+
+def _post_in(db, community, space_slug, pid):
+    from circle_leads.storage.models import Post
+    with db.session() as s:
+        s.add(Post(community_id=community, source_content_id=str(pid), content="x",
+                   url=f"https://{HOST}/c/{space_slug}/post-{pid}", dedup_hash=f"h{pid}"))
+
+
+def test_the_spaces_we_have_read_are_tried_first_and_are_enough(db, community, monkeypatch):
+    """TechSoup lists 222 spaces to a member who can read one of them: the
+    one our stored posts came from is tried first, and once it opens the
+    other 221 are left to the cookie scan."""
+    _member_row(db, community)
+    _post_in(db, community, "jobs", 5)
+    monkeypatch.setattr("circle_leads.triage.pipeline.triage_records", triage_spy([]))
+    session = RoutedSession({
+        "feed": FakeResponse(401),
+        "spaces": spaces((1, "general"), (2, "random"), (3, "jobs")),
+        "1": FakeResponse(401),
+        "2": feed([make_record(102, space="random")]),
+        "3": feed([make_record(103, space="jobs")]),
+    })
+    out = check_community(db, state_for(db, community), Requirements(),
+                          session=session, tuning=WatchTuning())
+    assert out.status == "ok"
+    assert "1 of 3" in out.detail
+    assert [c["key"] for c in session.calls] == ["feed", "spaces", "3"]
+
+
+def test_when_no_space_we_have_read_opens_the_others_are_tried(db, community, monkeypatch):
+    _member_row(db, community)
+    _post_in(db, community, "jobs", 5)
+    monkeypatch.setattr("circle_leads.triage.pipeline.triage_records", triage_spy([]))
+    session = RoutedSession({
+        "feed": FakeResponse(401),
+        "spaces": spaces((1, "general"), (3, "jobs")),
+        "1": feed([make_record(101, space="general")]),
+        "3": FakeResponse(401),
+    })
+    out = check_community(db, state_for(db, community), Requirements(),
+                          session=session, tuning=WatchTuning())
+    assert out.status == "ok"
+    assert [c["key"] for c in session.calls] == ["feed", "spaces", "3", "1"]
+
+
+def test_a_space_that_closes_makes_the_next_check_learn_again(db, community, monkeypatch):
+    _member_row(db, community)
+    monkeypatch.setattr("circle_leads.triage.pipeline.triage_records", triage_spy([]))
+    session = RoutedSession({
+        "feed": FakeResponse(401),
+        "spaces": spaces((3, "jobs")),
+        "3": [feed([make_record(103, space="jobs")]), FakeResponse(401)],
+    })
+    check_community(db, state_for(db, community), Requirements(),
+                    session=session, tuning=WatchTuning())
+    out = check_community(db, state_for(db, community), Requirements(),
+                          session=session, tuning=WatchTuning())
+    assert out.status == "unauthorized"
+
+    session.calls.clear()
+    check_community(db, state_for(db, community), Requirements(),
+                    session=session, tuning=WatchTuning())
+    assert [c["key"] for c in session.calls][:2] == ["feed", "spaces"]
+
+
+# --- addresses that stopped working for good ----------------------------------
+
+def _redirect(location):
+    resp = FakeResponse(301)
+    resp.headers["location"] = location
+    return resp
+
+
+def test_a_domain_that_redirects_elsewhere_is_parked_after_five_tries(db, community, monkeypatch):
+    """community.hailerz.com -> www.hailerz.com: 150 retries in a week."""
+    ensure_watch_rows(db)
+    monkeypatch.setattr("circle_leads.triage.pipeline.triage_records", triage_spy([]))
+    session = FakeSession([_redirect("https://www.example.com/")])
+    for attempt in range(1, 6):
+        out = check_community(db, state_for(db, community), Requirements(),
+                              session=session, tuning=WatchTuning())
+        assert out.status == "moved"
+        assert out.detail == "HTTP 301 -> https://www.example.com/"
+        expected = WatchMode.OFF.value if attempt == 5 else WatchMode.ANON.value
+        assert read_row(db, community).mode == expected
+
+
+def test_a_domain_circle_no_longer_serves_is_parked_after_five_tries(db, community, monkeypatch):
+    """network.expa.com: still a CNAME to Circle, no certificate there."""
+    ensure_watch_rows(db)
+    monkeypatch.setattr("circle_leads.triage.pipeline.triage_records", triage_spy([]))
+
+    class DeadCertificate(FakeSession):
+        def get(self, *args, **kwargs):
+            raise requests.exceptions.SSLError("sslv3 alert handshake failure")
+
+    for _ in range(5):
+        out = check_community(db, state_for(db, community), Requirements(),
+                              session=DeadCertificate([]), tuning=WatchTuning())
+    assert out.status == "tls_error"
+    row = read_row(db, community)
+    assert row.mode == WatchMode.OFF.value
+    assert row.next_check_at - row.last_checked_at > timedelta(hours=12)

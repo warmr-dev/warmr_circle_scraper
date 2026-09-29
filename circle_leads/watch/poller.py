@@ -11,6 +11,10 @@ row and one lead, not two. That only holds because every reader flattens a post
 with the same code (``scraper/public_reader.normalize_public_post``, which
 prefers the full ``tiptap_body`` over Circle's 255-character preview).
 
+Some communities refuse that feed to a member whose session reads their spaces
+fine. Those members are read space by space instead (``_check_member_spaces``):
+one request per space the session opens.
+
 What this deliberately does not do:
 
 - It does not read comments. A hiring ask buried in a comment thread is the
@@ -25,6 +29,7 @@ from __future__ import annotations
 
 import logging
 import random
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -56,6 +61,28 @@ MAX_PAGES = 5
 # How many ids to remember. Circle can publish an id below the newest one when
 # a draft is released, so "greater than the watermark" is not enough on its own.
 RECENT_IDS_KEPT = 200
+
+# A member the home feed refuses is read space by space. Seen on 2026-09-29:
+# onstartups, talentcollective, future-of-saas and engage.techsoup answered
+# home_page_posts with 401 "You cannot perform this action." to sessions that
+# read their spaces fine.
+SPACES_PATH = "/internal_api/spaces"
+SPACE_POSTS_PATH = "/internal_api/spaces/{space_id}/posts?sort=latest&page=1&per_page={per_page}"
+# Which spaces open for a session is learnt by trying them, then trusted this
+# long -- as long as the cookie scan waits before it reads everything again.
+MEMBER_SPACES_TTL_S = 6 * 3600
+# Spaces tried per learning pass, and read per check. TechSoup lists 222 spaces
+# to a member who can read one of them.
+MAX_SPACES_TRIED = 40
+MAX_SPACES_READ = 8
+
+# Failures a retry does not fix: the domain now answers with a redirect
+# elsewhere, or Circle no longer serves a certificate for it. Nine such rows
+# retried hourly for a week (2026-09-23..29) and filled the attention page.
+# After PARK_AFTER in a row a row goes to the daily check (mode off), which
+# switches it back on by itself if the feed ever answers again.
+PERMANENT_FAILURES = ("moved", "tls_error")
+PARK_AFTER = 5
 
 CHALLENGE_MARKERS = ("__cf_chl_", "cf-chl-", "<title>just a moment", "verifying you are a human")
 
@@ -116,6 +143,8 @@ def _classify(resp: requests.Response) -> str:
         return "not_modified"
     if resp.status_code == 200:
         return "ok"
+    if resp.status_code in (301, 302, 303, 307, 308):
+        return "moved"
     if resp.status_code in (401, 403):
         return "unauthorized"
     if resp.status_code == 404:
@@ -331,18 +360,20 @@ def check_community(
     use_llm: bool = False,
 ) -> WatchOutcome:
     """One feed check. Reads, triages anything new, then updates the row."""
-    from circle_leads.scraper.public_reader import normalize_public_post
-    from circle_leads.triage.pipeline import triage_records
     from circle_leads.web.replay_store import load_cookies
 
     host = state["host"]
-    community_url = f"https://{host}"
     cookies = None
     if state["mode"] == WatchMode.COOKIE.value:
         cookies = {c["name"]: c["value"] for c in (load_cookies(db, host) or [])}
         if not cookies:
             return _finish(db, state, WatchOutcome(host, "unauthorized",
                                                    detail="no stored session"), tuning)
+        if _spaces_known(host):
+            # The feed refused this member a few hours ago at most; asking it
+            # again every two minutes only buys another 401.
+            return _check_member_spaces(db, state, requirements, session=session,
+                                        tuning=tuning, cookies=cookies, use_llm=use_llm)
 
     seen = set(state["recent_ids"] or [])
     watermark = state["last_post_id"] or 0
@@ -354,20 +385,25 @@ def check_community(
     fresh: list[dict] = []
     seen_now: list[int] = []
     etag_value = state["etag"]
-    newest_published: datetime | None = None
 
     for page in range(1, tuning.max_pages + 1):
         try:
             resp = _fetch(session, host, page, tuning, cookies, etag_value if page == 1 else None)
+        except requests.exceptions.SSLError:
+            # Circle stops serving a certificate for a custom domain its owner
+            # removed; the name still points at Circle, so this never heals.
+            return _finish(db, state, WatchOutcome(host, "tls_error", detail="SSLError"), tuning)
         except requests.RequestException as exc:
             return _finish(db, state, WatchOutcome(host, "error", detail=type(exc).__name__), tuning)
 
         status = _classify(resp)
         if status == "not_modified":
             return _finish(db, state, WatchOutcome(host, status), tuning)
+        if status == "unauthorized" and cookies:
+            return _check_member_spaces(db, state, requirements, session=session,
+                                        tuning=tuning, cookies=cookies, use_llm=use_llm)
         if status != "ok":
-            return _finish(db, state, WatchOutcome(host, status,
-                                                   detail=f"HTTP {resp.status_code}"), tuning)
+            return _finish(db, state, WatchOutcome(host, status, detail=_http_detail(resp)), tuning)
         if page == 1:
             etag_value = resp.headers.get("etag") or etag_value
 
@@ -409,16 +445,45 @@ def check_community(
         if not data.get("has_next_page"):
             break
 
+    return _take_new(db, state, requirements, fresh=fresh, seen_now=seen_now,
+                     seeding=seeding, tuning=tuning, use_llm=use_llm,
+                     member=cookies is not None, etag=etag_value)
+
+
+def _http_detail(resp: requests.Response) -> str:
+    """The status code, and for a redirect where it points: the new address
+    is what a person needs to fix the row."""
+    location = resp.headers.get("location") or resp.headers.get("Location")
+    if resp.status_code in (301, 302, 303, 307, 308) and location:
+        return f"HTTP {resp.status_code} -> {location[:200]}"
+    return f"HTTP {resp.status_code}"
+
+
+def _take_new(db: Database, state: dict, requirements, *, fresh: list[dict],
+              seen_now: list, seeding: bool, tuning: WatchTuning, use_llm: bool,
+              member: bool, etag: str | None = None, detail: str = "") -> WatchOutcome:
+    """Triage what a check found new and move the watermark past it.
+
+    The one place both readers -- the home feed and a member's spaces --
+    store posts, so the watermark rules cannot drift apart between them.
+    """
+    from circle_leads.scraper.public_reader import normalize_public_post
+    from circle_leads.triage.pipeline import triage_records
+
+    host = state["host"]
+    community_url = f"https://{host}"
     if seeding:
-        return _finish(db, state, WatchOutcome(host, "ok", detail="watermark set"),
-                       tuning, seen_ids=seen_now, etag=etag_value, seeded=True)
+        return _finish(db, state, WatchOutcome(
+            host, "ok", detail=f"{detail}; watermark set" if detail else "watermark set"),
+            tuning, seen_ids=seen_now, etag=etag, seeded=True)
 
     if not fresh:
-        return _finish(db, state, WatchOutcome(host, "ok"), tuning, etag=etag_value)
+        return _finish(db, state, WatchOutcome(host, "ok", detail=detail), tuning, etag=etag)
 
     # Oldest first, so the stored order matches how they were published.
     fresh.sort(key=lambda r: r.get("id") or 0)
     normalized = []
+    newest_published: datetime | None = None
     for rec in fresh:
         norm = normalize_public_post(
             rec,
@@ -427,6 +492,9 @@ def check_community(
             space_slug=rec.get("space_slug"),
         )
         if norm:
+            if member:
+                # Read with a member's session, the way the cookie scan labels it.
+                norm["permission_reference"] = "member_session"
             normalized.append(norm)
             if norm.get("published_at"):
                 published = norm["published_at"]
@@ -448,10 +516,195 @@ def check_community(
     if newest_published is not None:
         lag = (_now() - newest_published).total_seconds()
 
-    outcome = WatchOutcome(host, "ok", new_posts=len(normalized), leads=leads, lag_s=lag,
-                           lead_payloads=lead_payloads)
+    outcome = WatchOutcome(host, "ok", new_posts=len(normalized), leads=leads, detail=detail,
+                           lag_s=lag, lead_payloads=lead_payloads)
     return _finish(db, state, outcome, tuning,
-                   seen_ids=[r.get("id") for r in fresh], etag=etag_value)
+                   seen_ids=[r.get("id") for r in fresh], etag=etag)
+
+
+# --- members the home feed refuses ---------------------------------------------
+
+@dataclass
+class _MemberSpaces:
+    """The spaces one session opens, learnt by trying them."""
+
+    learned_at: float
+    spaces: list[dict]
+    listed: int
+
+
+# host -> _MemberSpaces. Memory only: after a restart one refused feed request
+# and one learning pass rebuild it.
+_member_spaces: dict[str, _MemberSpaces] = {}
+
+
+def _spaces_known(host: str) -> bool:
+    known = _member_spaces.get(host)
+    return known is not None and time.monotonic() - known.learned_at < MEMBER_SPACES_TTL_S
+
+
+def _member_get(session: requests.Session, host: str, path: str,
+                cookies: dict) -> requests.Response:
+    return session.get(f"https://{host}{path}", headers={"Accept": "application/json"},
+                       cookies=cookies, timeout=25, allow_redirects=False)
+
+
+def _records(resp: requests.Response) -> list[dict] | None:
+    """The records of a JSON list answer; None when it is not one."""
+    try:
+        data = resp.json()
+    except ValueError:
+        return None
+    if isinstance(data, dict):
+        data = data.get("records") or []
+    if not isinstance(data, list):
+        return None
+    return [r for r in data if isinstance(r, dict)]
+
+
+def _space_records(batch: list[dict], space: dict) -> list[dict]:
+    return [dict(r, space_slug=r.get("space_slug") or space["slug"]) for r in batch]
+
+
+def _slugs_we_have_read(db: Database, community_id: int) -> list[str]:
+    """Space slugs in the links of the posts we hold, newest first. The cookie
+    scan found those spaces readable, so a learning pass tries them first:
+    tried in listed order, TechSoup's one readable space could sit past
+    MAX_SPACES_TRIED."""
+    from circle_leads.storage.models import Post
+
+    with db.session() as s:
+        urls = s.scalars(
+            select(Post.url).where(Post.community_id == community_id, Post.url.like("%/c/%"))
+            .order_by(Post.id.desc()).limit(500)
+        ).all()
+    slugs: list[str] = []
+    for url in urls:
+        match = re.search(r"/c/([^/?#]+)", url or "")
+        if match and match.group(1) not in slugs:
+            slugs.append(match.group(1))
+    return slugs
+
+
+def _learn_member_spaces(
+    db: Database, state: dict, *, session: requests.Session, tuning: WatchTuning, cookies: dict,
+) -> tuple[_MemberSpaces | None, list[dict], WatchOutcome | None]:
+    """List the spaces the session sees and try each, the ones we have read first.
+
+    Returns what opened and the records the tries fetched on the way (the
+    first check reads nothing twice) -- or the outcome that stopped the pass.
+    """
+    host = state["host"]
+    try:
+        resp = _member_get(session, host, SPACES_PATH, cookies)
+    except requests.RequestException as exc:
+        return None, [], WatchOutcome(host, "error", detail=type(exc).__name__)
+    status = _classify(resp)
+    if status != "ok":
+        detail = f"spaces list: {_http_detail(resp)}"
+        if resp.status_code == 400:
+            # "Please confirm before proceeding": the new-member profile step is open.
+            return None, [], WatchOutcome(host, "unauthorized", detail=f"{detail} (profile step open)")
+        return None, [], WatchOutcome(host, status, detail=detail)
+
+    listed = [sp for sp in (_records(resp) or []) if sp.get("id") is not None]
+    rank = {slug: i for i, slug in enumerate(_slugs_we_have_read(db, state["community_id"]))}
+    listed.sort(key=lambda sp: rank.get(str(sp.get("slug") or ""), len(rank)))
+
+    opened: list[dict] = []
+    empty: list[dict] = []
+    records: list[dict] = []
+    for sp in listed[:MAX_SPACES_TRIED]:
+        space = {"id": str(sp["id"]), "slug": str(sp.get("slug") or "")}
+        if rank and (opened or empty) and space["slug"] not in rank:
+            # The spaces we have posts from are open. One that opened only
+            # lately shows up in the cookie scan within six hours; trying all
+            # 222 of TechSoup's here for it is not worth the budget.
+            break
+        path = SPACE_POSTS_PATH.format(space_id=space["id"], per_page=tuning.per_page)
+        try:
+            resp = _member_get(session, host, path, cookies)
+        except requests.RequestException:
+            continue
+        status = _classify(resp)
+        if status in ("ratelimited", "challenge"):
+            return None, [], WatchOutcome(
+                host, status, detail=f"space {space['slug'] or space['id']}: {_http_detail(resp)}")
+        batch = _records(resp) if status == "ok" else None
+        if batch is None:
+            continue
+        # An empty space that opens is kept too, behind the busy ones: a
+        # post there is as much a lead as anywhere else.
+        (opened if batch else empty).append(space)
+        records.extend(_space_records(batch, space))
+        if len(opened) >= MAX_SPACES_READ:
+            break
+
+    learned = _MemberSpaces(time.monotonic(), (opened + empty)[:MAX_SPACES_READ], len(listed))
+    _member_spaces[host] = learned
+    return learned, records, None
+
+
+def _check_member_spaces(db: Database, state: dict, requirements, *,
+                         session: requests.Session, tuning: WatchTuning, cookies: dict,
+                         use_llm: bool) -> WatchOutcome:
+    """Read a member the home feed refuses: page one of each space the session
+    opens, merged. Post ids are global on Circle, so one watermark still
+    covers every space. A burst bigger than a page is left to the cookie scan."""
+    host = state["host"]
+    records: list[dict] | None = None
+    if _spaces_known(host):
+        learned = _member_spaces[host]
+    else:
+        learned, records, stopped = _learn_member_spaces(
+            db, state, session=session, tuning=tuning, cookies=cookies)
+        if stopped is not None:
+            return _finish(db, state, stopped, tuning)
+
+    if not learned.spaces:
+        return _finish(db, state, WatchOutcome(
+            host, "unauthorized",
+            detail=f"feed refused; none of the {learned.listed} space(s) this session "
+                   "sees opens"), tuning)
+
+    if records is None:
+        records = []
+        for space in learned.spaces:
+            path = SPACE_POSTS_PATH.format(space_id=space["id"], per_page=tuning.per_page)
+            try:
+                resp = _member_get(session, host, path, cookies)
+            except requests.RequestException as exc:
+                return _finish(db, state, WatchOutcome(host, "error", detail=type(exc).__name__),
+                               tuning)
+            status = _classify(resp)
+            batch = _records(resp) if status == "ok" else None
+            if batch is None:
+                if status not in ("ratelimited", "challenge"):
+                    # A space closed or the session died: learn afresh next
+                    # time rather than guess which.
+                    _member_spaces.pop(host, None)
+                return _finish(db, state, WatchOutcome(
+                    host, "error" if status == "ok" else status,
+                    detail=f"space {space['slug'] or space['id']}: {_http_detail(resp)}"), tuning)
+            records.extend(_space_records(batch, space))
+
+    seen = set(state["recent_ids"] or [])
+    watermark = state["last_post_id"] or 0
+    seeding = watermark == 0 and not seen
+    fresh: list[dict] = []
+    seen_now: list = []
+    for rec in records:
+        rid = rec.get("id")
+        if rid is None or rid in seen_now:
+            continue
+        seen_now.append(rid)
+        if not seeding and rid not in seen and rid > watermark:
+            fresh.append(rec)
+
+    return _take_new(db, state, requirements, fresh=fresh, seen_now=seen_now, seeding=seeding,
+                     tuning=tuning, use_llm=use_llm, member=True,
+                     detail=f"read space by space: {len(learned.spaces)} of {learned.listed} "
+                            "open to this session")
 
 
 def _drain_unsynced_leads(db: Database) -> None:
@@ -520,6 +773,8 @@ def _finish(db: Database, state: dict, outcome: WatchOutcome, tuning: WatchTunin
             )
             row.mode = WatchMode.COOKIE.value if has_session else WatchMode.OFF.value
         elif outcome.status == "notfound":
+            row.mode = WatchMode.OFF.value
+        elif outcome.status in PERMANENT_FAILURES and row.consecutive_errors >= PARK_AFTER:
             row.mode = WatchMode.OFF.value
         elif outcome.status in ("ok", "not_modified") and row.mode == WatchMode.OFF.value:
             # Switched off because it refused us, and now the feed answers
