@@ -169,6 +169,14 @@ because a community we had already joined still rendered a "Join" button.
 
 ## Where it runs
 
+> **Nowhere, since 2026-09-29.** The droplet below is powered off and the host
+> that replaced it cannot run the browser: its container refuses to create the
+> namespaces Chrome's sandbox needs, and the setuid helper that solved this on
+> the droplet does not help, because what is blocked is namespace creation
+> itself. `--no-sandbox` stays refused for a browser that opens strangers'
+> pages. Joins are paused until there is a host with the right capabilities;
+> everything below describes the droplet, which a snapshot can bring back.
+
 DigitalOcean droplet `warmr-1`, Ubuntu 24.04.4, 3.9 GB RAM, no swap.
 
 | thing | path |

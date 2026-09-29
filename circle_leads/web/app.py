@@ -47,6 +47,17 @@ REVIEW_STATUSES = {"pending_review", "contacted", "replied", "rejected", "won"}
 OVERVIEW_TTL_SECONDS = 120
 
 
+# Where to look when a service goes quiet. It used to be one droplet's IP and a
+# systemctl line spelled out in the alert; the alert then outlived the machine.
+# Set WARMR_HOST_HINT on the dashboard to whatever is true today.
+DEFAULT_HOST_HINT = "<code>systemctl status warmr-worker warmr-watcher</code> на warmr-1"
+
+
+def _host_hint() -> str:
+    """The one line an alert adds to say where the silent service lives."""
+    return (os.environ.get("WARMR_HOST_HINT") or "").strip() or DEFAULT_HOST_HINT
+
+
 def _parse_day(value: str | None, name: str) -> datetime | None:
     """A ``YYYY-MM-DD`` query param as midnight UTC; 400 on anything else."""
     if not value:
@@ -1492,8 +1503,7 @@ def create_app(
         if stale:
             notify(
                 "Warmr: служба молчит",
-                "\n".join(stale) + "\n\nПроверить: <code>systemctl status warmr-worker "
-                "warmr-watcher</code> на 168.144.131.38",
+                "\n".join(stale) + "\n\nПроверить: " + _host_hint(),
                 level="error",
                 # One message per hour per distinct problem, not one per cron tick.
                 dedup_key="watchdog:" + "|".join(sorted(stale)),
