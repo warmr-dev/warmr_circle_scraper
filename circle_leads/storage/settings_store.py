@@ -168,10 +168,46 @@ def mark_harvest_run(db: Database, *, now: datetime | None = None) -> None:
     set_setting(db, KEY_LAST_RUN, now.isoformat())
 
 
-def mark_harvest_finished(db: Database, *, now: datetime | None = None) -> None:
+def mark_harvest_finished(db: Database, *, now: datetime | None = None,
+                          result: dict | None = None) -> None:
     """Record that a harvest reached the end. Only then does it count as done."""
+    record_stage_finish(db, "harvest", now=now, result=result)
+
+
+# --- How each scheduled stage ended ------------------------------------------
+#
+# The *_last_run keys are stamped when a stage STARTS, so a crash loop cannot
+# hammer the schedule. That also made a stage that crashed look exactly like
+# one that worked: the only trace of the error was the exception's class name
+# in the worker's stdout, on a host the dashboard cannot read. These keys say
+# how the last run ended. <stage>_last_finish stays a plain ISO string because
+# is_harvest_due parses harvest_last_finish.
+
+def record_stage_finish(db: Database, stage: str, *, now: datetime | None = None,
+                        result: dict | None = None) -> None:
+    """A stage reached its end: ``<stage>_last_finish``, plus what it did."""
+    import json
+
     now = now or datetime.now(timezone.utc).replace(tzinfo=None)
-    set_setting(db, KEY_LAST_FINISH, now.isoformat())
+    set_setting(db, f"{stage}_last_finish", now.isoformat())
+    if result is not None:
+        set_setting(db, f"{stage}_last_result", json.dumps(result, default=str)[:4000])
+
+
+def record_stage_error(db: Database, stage: str, exc: BaseException, *,
+                       step: str | None = None, now: datetime | None = None) -> None:
+    """A stage failed: ``<stage>_last_error`` = {at, error}. Never raises."""
+    import json
+
+    now = now or datetime.now(timezone.utc).replace(tzinfo=None)
+    error = f"{type(exc).__name__}: {exc}"
+    if step:
+        error = f"{step}: {error}"
+    try:
+        set_setting(db, f"{stage}_last_error",
+                    json.dumps({"at": now.isoformat(), "error": error[:500]}))
+    except Exception:  # noqa: BLE001 - the database may be the thing that failed
+        pass
 
 
 # --- Discovery (web-search) sub-schedule ----------------------------------

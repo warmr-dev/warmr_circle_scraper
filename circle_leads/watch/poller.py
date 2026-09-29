@@ -593,7 +593,8 @@ def run_watch(
     # Beside the work, not inside it: a batch of overdue communities can take
     # longer than the watchdog's patience, and a busy poller that looks dead
     # trains the person to ignore the alert channel.
-    cancel_beat = start_heartbeat(db, "watcher_heartbeat")
+    cancel_beat = start_heartbeat(db, "watcher_heartbeat",
+                                  runtime_key="watcher_runtime", service="watcher")
     try:
         _run_watch_loop(db, session, requirements, reloaded_at, tuning,
                         use_llm=use_llm, once=once, stop=stop, on_outcome=on_outcome)
