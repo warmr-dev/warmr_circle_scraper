@@ -1122,3 +1122,104 @@ def test_an_emailed_verification_code_leaves_the_join_pending(monkeypatch):
         row = s.scalar(select(Community).where(Community.slug == "a"))
         assert row.join_status == JoinStatus.PROFILE_PENDING.value
         assert "verification code" in row.join_status_detail
+
+
+# --- What the dashboard can see of a join run ---------------------------------
+#
+# Every visit used to be recorded only in data/join_attempts.log, a file on the
+# machine that ran the batch. "The join did not work and nobody knows why" was
+# the literal state of a handoff: the row stayed not_attempted, with nothing
+# on it, and the dashboard (which reads only the database) showed nothing.
+
+def _join_rows(db):
+    from circle_leads.storage.models import ActivityLog
+
+    with db.session() as s:
+        return [(a.community, a.level, a.detail["status"]) for a in s.scalars(
+            select(ActivityLog).where(ActivityLog.kind == "join").order_by(ActivityLog.id))]
+
+
+def test_a_handoff_says_why_on_the_row_and_stays_in_the_queue(monkeypatch):
+    from circle_leads.storage.models import JOIN_HANDOFF_PREFIX
+
+    db = _db()
+    _seed(db, "a", icp_score=20)
+    monkeypatch.setattr(joiner, "open_join_space", lambda name, **kw: 7)
+    monkeypatch.setattr(joiner, "attempt_join", lambda space_id, url, **kw: EgoJoinResult(
+        status="challenge_stop", detail="Cloudflare challenge on the login page"))
+    monkeypatch.setattr(joiner, "sleep_between_attempts", lambda pacing: None)
+
+    joiner.run_auto_join(db)
+
+    with db.session() as s:
+        row = s.scalar(select(Community).where(Community.slug == "a"))
+        assert row.join_status == JoinStatus.NOT_ATTEMPTED.value
+        assert row.join_status_detail.startswith(
+            f"{JOIN_HANDOFF_PREFIX} challenge_stop — Cloudflare challenge on the login page (")
+        assert row.join_attempts == 1
+        # The daily cap and the queue's "last moved" read this as a terminal
+        # outcome; a handoff is not one.
+        assert row.join_attempted_at is None
+    assert _join_rows(db) == [("a", "warning", "challenge_stop")]
+    assert [c["slug"] for c in joiner.select_join_candidates(db)] == ["a"]
+
+
+def test_a_handoff_without_detail_still_says_something(monkeypatch):
+    db = _db()
+    _seed(db, "a")
+    monkeypatch.setattr(joiner, "open_join_space", lambda name, **kw: 7)
+    monkeypatch.setattr(joiner, "attempt_join",
+                        lambda space_id, url, **kw: EgoJoinResult(status="unclear", detail=""))
+    monkeypatch.setattr(joiner, "sleep_between_attempts", lambda pacing: None)
+
+    joiner.run_auto_join(db)
+
+    with db.session() as s:
+        detail = s.scalar(select(Community.join_status_detail).where(Community.slug == "a"))
+    assert "unclear — the driver gave no detail" in detail
+
+
+def test_every_visit_lands_in_the_activity_log(monkeypatch):
+    db = _db()
+    _seed(db, "a", icp_score=20)
+    _seed(db, "b", icp_score=10)
+    outcomes = {
+        "https://a.circle.so": EgoJoinResult(status="joined", detail="ok"),
+        "https://b.circle.so": EgoJoinResult(status="paid_skip", detail="checkout page"),
+    }
+    monkeypatch.setattr(joiner, "open_join_space", lambda name, **kw: 7)
+    monkeypatch.setattr(joiner, "attempt_join", lambda space_id, url, **kw: outcomes[url])
+    monkeypatch.setattr(joiner, "sleep_between_attempts", lambda pacing: None)
+
+    joiner.run_auto_join(db)
+
+    assert _join_rows(db) == [("a", "success", "joined"), ("b", "info", "paid_skip")]
+
+
+def test_a_dead_host_is_logged_without_a_visit(monkeypatch):
+    db = _db()
+    _seed(db, "gone")
+    monkeypatch.setattr(joiner, "_dead_host_reason", lambda url: "Host no longer resolves")
+    monkeypatch.setattr(joiner, "open_join_space", lambda name, **kw: 7)
+    monkeypatch.setattr(joiner, "sleep_between_attempts", lambda pacing: None)
+
+    joiner.run_auto_join(db)
+
+    assert _join_rows(db) == [("gone", "info", "dead_host")]
+
+
+def test_a_broken_bridge_is_logged_as_an_error(monkeypatch):
+    db = _db()
+    _seed(db, "a")
+
+    def broken(*_a, **_kw):
+        raise EgoBrowserError("ego-browser exited 1")
+
+    monkeypatch.setattr(joiner, "open_join_space", lambda name, **kw: 7)
+    monkeypatch.setattr(joiner, "attempt_join", broken)
+    monkeypatch.setattr(joiner, "sleep_between_attempts", lambda pacing: None)
+
+    result = joiner.run_auto_join(db)
+
+    assert result.stopped_for == "a"
+    assert _join_rows(db) == [("a", "error", "bridge_error")]
