@@ -432,26 +432,10 @@ def _triage_posts(
     result.leads.sort(key=lambda x: x["lead_score"], reverse=True)
 
     if pending_external_ids:
+        # The push records Vini's answer per lead and writes the export row
+        # to the activity log itself, whoever calls it.
         with db.session() as s:
-            push = push_leads_by_ids(s, pending_external_ids)
-            if push.sent or push.errors:
-                log_activity(
-                    s,
-                    kind="export",
-                    level="error" if push.errors else "success",
-                    community=community,
-                    summary=(
-                        f"Vini ingest: sent {push.sent}/{push.attempted} lead(s)"
-                        + (f" — {push.errors[0]}" if push.errors else "")
-                    ),
-                    detail={
-                        "sent": push.sent,
-                        "attempted": push.attempted,
-                        "skipped": push.skipped,
-                        "errors": "; ".join(push.errors[:3]),
-                    },
-                    leads_found=push.sent,
-                )
+            push_leads_by_ids(s, pending_external_ids)
 
     with db.session() as s:
         log_activity(
