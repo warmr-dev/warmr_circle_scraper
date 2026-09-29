@@ -108,6 +108,39 @@ def test_store_encrypts_and_round_trips(monkeypatch):
     assert "encrypted_cookies" not in meta  # never exposed
 
 
+def _label(db, host):
+    from circle_leads.web.replay_store import list_sessions
+    return next(m["member_label"] for m in list_sessions(db) if m["host"] == host)
+
+
+def test_a_refresh_that_names_no_account_keeps_the_one_on_record(monkeypatch):
+    """The extension sends cookies without saying whose they are, and every
+    refresh used to erase the account the bot had written."""
+    monkeypatch.delenv("CIRCLE_CRED_KEY", raising=False)
+    from circle_leads.web.replay_store import store_session
+    db = _db()
+    cookies = parse_cookies(json.dumps(SAMPLE))
+    store_session(db, "x.circle.so", cookies, member_label="test")
+    store_session(db, "x.circle.so", cookies)
+    assert _label(db, "x.circle.so") == "test"
+    store_session(db, "x.circle.so", cookies, member_label="main")
+    assert _label(db, "x.circle.so") == "main"
+
+
+def test_a_new_session_takes_the_account_the_community_was_joined_with(monkeypatch):
+    monkeypatch.delenv("CIRCLE_CRED_KEY", raising=False)
+    from circle_leads.storage.database import get_or_create_community
+    from circle_leads.web.replay_store import store_session
+    db = _db()
+    with db.session() as s:
+        c = get_or_create_community(s, slug="x", url="https://x.circle.so")
+        c.host, c.join_account = "x.circle.so", "test"
+    store_session(db, "x.circle.so", parse_cookies(json.dumps(SAMPLE)))
+    assert _label(db, "x.circle.so") == "test"
+    store_session(db, "y.circle.so", parse_cookies(json.dumps(SAMPLE)))
+    assert _label(db, "y.circle.so") is None
+
+
 # The /api/replay/* routes that used to be tested here (built by the now-
 # deleted circle_leads/web/remote_browser_api.py) were removed outright: the
 # "Session replay experiment (Version B)" panel was explicitly labeled an

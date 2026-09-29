@@ -18,7 +18,9 @@ from sqlalchemy import select
 
 from circle_leads.connector.credentials import decrypt, encrypt
 from circle_leads.storage.database import Database
-from circle_leads.storage.models import CircleConnection, ConnectionState, ReplaySession
+from circle_leads.storage.models import (
+    CircleConnection, Community, ConnectionState, ReplaySession,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +57,13 @@ def _deserialize(blob: str) -> list[dict]:
 
 def store_session(db: Database, host: str, cookies: list[dict],
                   *, member_label: str | None = None) -> dict:
-    """Upsert a session for ``host`` (encrypted if a key is set, else plaintext)."""
+    """Upsert a session for ``host`` (encrypted if a key is set, else plaintext).
+
+    ``member_label`` is the account the cookies belong to. A caller that does
+    not know it -- the Chrome extension, a pasted cookie -- keeps the one on
+    record: it used to be wiped on every refresh. With none on record, the
+    account the community was joined with is the best guess there is.
+    """
     blob = _serialize(cookies)
     with db.session() as s:
         row = s.scalar(select(ReplaySession).where(ReplaySession.host == host))
@@ -64,7 +72,14 @@ def store_session(db: Database, host: str, cookies: list[dict],
             s.add(row)
         row.encrypted_cookies = blob
         row.cookie_count = len(cookies)
-        row.member_label = member_label
+        if member_label:
+            row.member_label = member_label
+        elif not row.member_label:
+            row.member_label = s.scalar(
+                select(Community.join_account)
+                .where(Community.host == host, Community.join_account.is_not(None))
+                .limit(1)
+            )
         row.last_result = None
         row.last_detail = "Stored; not yet tested from the server."
         rid = row.id

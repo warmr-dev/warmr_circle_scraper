@@ -362,7 +362,16 @@ def select_join_candidates(
     return candidates
 
 
-def _persist_terminal_outcome(db: Database, community_id: int, status: str, detail: str) -> None:
+# Outcomes after which one of our accounts is inside, or asked to be: the row
+# remembers which account (Community.join_account). Only that account can
+# refresh the session later -- another one is not a member.
+_MEMBER_STATUSES = (
+    JoinStatus.JOINED.value, JoinStatus.PROFILE_PENDING.value, JoinStatus.PENDING_APPROVAL.value,
+)
+
+
+def _persist_terminal_outcome(db: Database, community_id: int, status: str, detail: str,
+                              *, account: str | None = None) -> None:
     with db.session() as s:
         community = s.get(Community, community_id)
         if community is None:
@@ -373,6 +382,8 @@ def _persist_terminal_outcome(db: Database, community_id: int, status: str, deta
         community.join_attempts += 1
         if status == JoinStatus.JOINED.value:
             community.joined_at = utcnow()
+        if account and status in _MEMBER_STATUSES:
+            community.join_account = account
         host = community.host
     if status == JoinStatus.JOINED.value and host:
         # Joined without a captured session still gets the 2-minute watch;
@@ -560,7 +571,8 @@ def run_auto_join(
             # The membership exists; only the profile step is open. Recorded so
             # the dashboard shows it and the queue brings the bot back to it.
             _persist_terminal_outcome(
-                db, candidate["id"], JoinStatus.PROFILE_PENDING.value, outcome.detail
+                db, candidate["id"], JoinStatus.PROFILE_PENDING.value, outcome.detail,
+                account=acct.key,
             )
             result.handoffs[candidate["slug"]] = f"{outcome.status}: {outcome.detail}"
         elif outcome.status not in _TERMINAL_STATUS_MAP:
@@ -594,7 +606,8 @@ def run_auto_join(
                         candidate["slug"],
                     )
             _persist_terminal_outcome(
-                db, candidate["id"], _TERMINAL_STATUS_MAP[outcome.status], detail
+                db, candidate["id"], _TERMINAL_STATUS_MAP[outcome.status], detail,
+                account=acct.key,
             )
 
         sleep_between_attempts(pacing)

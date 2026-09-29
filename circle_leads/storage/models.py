@@ -137,6 +137,12 @@ class Community(Base):
     join_attempted_at: Mapped[datetime | None] = mapped_column(DateTime)
     joined_at: Mapped[datetime | None] = mapped_column(DateTime)
     join_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    # Which of our Circle accounts got us in: an account key from
+    # circle_leads/join/accounts.py (main, test, 3..10) or the name a person
+    # gave (client). A session can only be refreshed as the account that is the
+    # member, and 16 of the 42 joined communities had no session to carry the
+    # label. NULL = not recorded (joins before 2026-09-29 with no log).
+    join_account: Mapped[str | None] = mapped_column(String(32))
 
     access_status: Mapped[str] = mapped_column(
         String(32), default=AccessState.NOT_VISITED.value, index=True

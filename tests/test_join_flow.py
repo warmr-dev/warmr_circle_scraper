@@ -1223,3 +1223,43 @@ def test_a_broken_bridge_is_logged_as_an_error(monkeypatch):
 
     assert result.stopped_for == "a"
     assert _join_rows(db) == [("a", "error", "bridge_error")]
+
+
+# --- Which account got us in ----------------------------------------------------
+#
+# The user, 2026-09-29: keep which account joined, so its cookies can be
+# refreshed as that account. 16 of the 42 joined communities had no session,
+# the only place an account label lived.
+
+def _account_of(db, slug):
+    with db.session() as s:
+        return s.scalar(select(Community.join_account).where(Community.slug == slug))
+
+
+@pytest.mark.parametrize("status,expected", [
+    ("joined", "test"),
+    ("pending_approval", "test"),
+    ("email_code_needed", "test"),   # profile_pending: the membership exists
+    ("paid_skip", None),
+    ("invite_skip", None),
+])
+def test_the_account_is_kept_when_it_got_in_or_asked_to(monkeypatch, status, expected):
+    db = _db()
+    _seed(db, "a", icp_score=10)
+    monkeypatch.setattr(joiner, "open_join_space", lambda name, **kw: 1)
+    monkeypatch.setattr(joiner, "attempt_join",
+                        lambda sid, url, **kw: EgoJoinResult(status=status, detail="d"))
+    monkeypatch.setattr(joiner, "sleep_between_attempts", lambda pacing: None)
+    joiner.run_auto_join(db, account="test")
+    assert _account_of(db, "a") == expected
+
+
+def test_a_handoff_does_not_claim_an_account(monkeypatch):
+    db = _db()
+    _seed(db, "a", icp_score=10)
+    monkeypatch.setattr(joiner, "open_join_space", lambda name, **kw: 1)
+    monkeypatch.setattr(joiner, "attempt_join",
+                        lambda sid, url, **kw: EgoJoinResult(status="unclear", detail="?"))
+    monkeypatch.setattr(joiner, "sleep_between_attempts", lambda pacing: None)
+    joiner.run_auto_join(db, account="test")
+    assert _account_of(db, "a") is None

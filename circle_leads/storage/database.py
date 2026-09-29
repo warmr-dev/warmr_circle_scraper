@@ -180,6 +180,8 @@ class Database:
             ("communities", "join_attempted_at", "TIMESTAMP"),
             ("communities", "joined_at", "TIMESTAMP"),
             ("communities", "join_attempts", "INTEGER DEFAULT 0"),
+            # p29: which of our accounts got us in.
+            ("communities", "join_account", "VARCHAR(32)"),
             ("replay_sessions", "source", "VARCHAR(16) DEFAULT 'extension'"),
             # Why join_type landed where it did -- "unknown" alone doesn't say
             # whether a host is dead, timed out, or returned something odd;
