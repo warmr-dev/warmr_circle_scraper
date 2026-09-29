@@ -6,7 +6,7 @@ test_connector.py.
 The old manual "to join" list (/api/join-queue's ``to_join``) was removed
 outright -- superseded by the auto-join bot (circle_leads/join/, built
 separately) -- so its tests went with it; only the "cookies to refresh"
-behaviour survives, now under /api/connections/to-refresh.
+behaviour survives, now as the "session_dead" rule of the attention list.
 """
 from __future__ import annotations
 
@@ -58,6 +58,12 @@ def test_pasting_a_cookie_for_a_brand_new_host_auto_creates_the_connection(clien
     assert row["state"] == ConnectionState.NOT_CONNECTED.value
 
 
+def _dead_session_hosts(client) -> set[str]:
+    rules = client.get("/api/dash/attention").json()["rules"]
+    rule = next(r for r in rules if r["key"] == "session_dead")
+    return {item["key"].split(":", 1)[1] for item in rule["items"]}
+
+
 def test_to_refresh_lists_only_broken_connections(client):
     client.post("/api/connections/add", json={"host": "ok.circle.so"})
     client.post("/api/connections/add", json={"host": "expired.circle.so"})
@@ -72,8 +78,7 @@ def test_to_refresh_lists_only_broken_connections(client):
         s.scalar(select(CircleConnection).where(CircleConnection.host == "denied.circle.so")
                  ).state = ConnectionState.ACCESS_DENIED.value
 
-    hosts = {r["host"] for r in client.get("/api/connections/to-refresh").json()["to_refresh"]}
-    assert hosts == {"expired.circle.so", "denied.circle.so"}
+    assert _dead_session_hosts(client) == {"expired.circle.so", "denied.circle.so"}
 
 
 def test_to_refresh_drops_a_broken_connection_for_a_community_that_left_circle(client):
@@ -92,8 +97,7 @@ def test_to_refresh_drops_a_broken_connection_for_a_community_that_left_circle(c
         s.scalar(select(CircleConnection).where(CircleConnection.host == "still-circle.circle.so")
                  ).state = ConnectionState.SESSION_EXPIRED.value
 
-    hosts = {r["host"] for r in client.get("/api/connections/to-refresh").json()["to_refresh"]}
-    assert hosts == {"still-circle.circle.so"}
+    assert _dead_session_hosts(client) == {"still-circle.circle.so"}
 
 
 # --- EXTENSION_API_TOKEN: the cookie-grabber extension's auth --------------
@@ -146,5 +150,6 @@ def test_extension_token_is_scoped_to_the_session_route_only(monkeypatch):
     """The token must not open up the rest of the dashboard -- it can store a
     cookie for a host of the caller's choosing, nothing else."""
     anon = _anon_client(monkeypatch, extension_token="shh-secret")
-    r = anon.get("/api/connections/to-refresh", headers={"X-Extension-Token": "shh-secret"})
-    assert r.status_code == 401
+    for path in ("/api/dash/attention", "/api/dash/leads", "/api/connections"):
+        r = anon.get(path, headers={"X-Extension-Token": "shh-secret"})
+        assert r.status_code == 401, path

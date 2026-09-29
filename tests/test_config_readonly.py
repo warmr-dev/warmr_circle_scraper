@@ -49,29 +49,23 @@ def readonly_config():
 
 def test_saving_config_works_when_the_file_is_read_only(app_client, readonly_config):
     c = app_client()
-    cfg = c.get("/api/config").json()
-    cfg["target_roles"] = ["Backend Developer", "C++ Engineer"]
-    r = c.post("/api/config", json=cfg)
+    r = c.post("/api/dash/config", json={"target_roles": ["Backend Developer", "C++ Engineer"]})
     assert r.status_code == 200, r.text  # used to be Errno 30
     assert r.json()["config"]["target_roles"] == ["Backend Developer", "C++ Engineer"]
 
 
 def test_saved_config_survives_a_restart(app_client, readonly_config):
     c = app_client()
-    cfg = c.get("/api/config").json()
-    cfg["minimum_confidence"] = 0.77
-    assert c.post("/api/config", json=cfg).status_code == 200
+    assert c.post("/api/dash/config", json={"minimum_confidence": 0.77}).status_code == 200
 
     # A fresh app instance on the same DB must read the override back.
     c2 = app_client()
-    assert c2.get("/api/config").json()["minimum_confidence"] == 0.77
+    assert c2.get("/api/dash/config").json()["config"]["minimum_confidence"] == 0.77
 
 
 def test_invalid_config_is_rejected_without_writing(app_client):
     c = app_client()
-    cfg = c.get("/api/config").json()
-    cfg["minimum_confidence"] = "not a number"
-    r = c.post("/api/config", json=cfg)
+    r = c.post("/api/dash/config", json={"minimum_confidence": "not a number"})
     assert r.status_code == 400
     assert "Invalid config" in r.json()["detail"]
 
@@ -86,11 +80,9 @@ def test_override_round_trips_in_the_store():
 def test_locked_safety_fields_are_not_overwritten(app_client, readonly_config):
     """excluded_content and rate_limit stay server-controlled even via save."""
     c = app_client()
-    cfg = c.get("/api/config").json()
-    before = cfg["excluded_content"]
-    cfg["excluded_content"] = []            # attempt to clear the safety allowlist
-    cfg["target_roles"] = ["Engineer"]
-    r = c.post("/api/config", json=cfg)
+    before = c.get("/api/dash/config").json()["config"]["excluded_content"]
+    # An attempt to clear the safety allowlist, riding along with a real edit.
+    r = c.post("/api/dash/config", json={"excluded_content": [], "target_roles": ["Engineer"]})
     assert r.status_code == 200
     assert r.json()["config"]["excluded_content"] == before  # unchanged
 

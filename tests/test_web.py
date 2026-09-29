@@ -1,4 +1,7 @@
-"""Tests for the dashboard: auth gate, API surface, and activity logging."""
+"""The dashboard's gate and the routes other clients call: sign-in, the
+extension's session route scope, the tick pinger, the activity log.
+
+The six sections have their own tests (tests/test_dash_*.py)."""
 
 import pytest
 
@@ -81,7 +84,10 @@ def test_short_password_is_rejected(monkeypatch):
 
 @pytest.mark.parametrize(
     "path",
-    ["/api/leads", "/api/stats", "/api/activity", "/api/communities", "/api/config"],
+    ["/api/dash/analytics", "/api/dash/monitoring", "/api/dash/leads",
+     "/api/dash/communities", "/api/dash/attention", "/api/dash/activity",
+     "/api/dash/runtime", "/api/dash/schedule", "/api/dash/config",
+     "/api/connections"],
 )
 def test_api_requires_authentication(client, path):
     """The database holds other people's posts; nothing is open by default."""
@@ -99,12 +105,12 @@ def test_wrong_password_is_rejected(client):
 def test_correct_password_sets_a_session(client):
     response = client.post("/login", data={"password": PASSWORD})
     assert response.status_code == 200
-    assert client.get("/api/stats").status_code == 200
+    assert client.get("/api/dash/analytics").status_code == 200
 
 
 def test_logout_ends_the_session(auth_client):
     auth_client.post("/logout")
-    assert auth_client.get("/api/leads").status_code == 401
+    assert auth_client.get("/api/dash/leads").status_code == 401
 
 
 def test_verify_password_rejects_empty(monkeypatch):
@@ -113,198 +119,7 @@ def test_verify_password_rejects_empty(monkeypatch):
     assert verify_password("") is False
 
 
-# --- Leads ------------------------------------------------------------------
-
-
-def test_leads_endpoint_returns_triaged_leads(auth_client):
-    data = auth_client.get("/api/leads").json()
-    assert data["count"] >= 1
-    lead = data["leads"][0]
-    assert lead["classification"] == "LEAD"
-    assert "reply_draft" not in lead
-    assert lead["review_status"] == "pending_review"
-
-
-def test_leads_can_be_filtered_by_skill(auth_client):
-    data = auth_client.get("/api/leads?skills=Flutter").json()
-    assert all("Flutter" in lead["skills"] for lead in data["leads"])
-
-
-def test_leads_search_matches_post_text_and_author(auth_client):
-    assert auth_client.get("/api/leads").json()["leads"]
-
-    by_text = auth_client.get("/api/leads?q=ios AND").json()["leads"]
-    assert by_text and all("ios and" in lead["content"].lower() for lead in by_text)
-
-    by_author = auth_client.get("/api/leads?q=dana").json()["leads"]
-    assert by_author and all(lead["author"] == "Dana Ops" for lead in by_author)
-
-    assert auth_client.get("/api/leads?q=nothing-like-this").json()["count"] == 0
-    # "%" and "_" are literal, not wildcards.
-    assert auth_client.get("/api/leads?q=%25").json()["count"] == 0
-
-
-def test_leads_time_window(auth_client):
-    lead = auth_client.get("/api/leads").json()["leads"][0]
-    assert lead["found_at"]
-
-    # Found just now: inside "last day", outside a window that ended long ago.
-    assert auth_client.get("/api/leads?days=1&date_field=found").json()["count"] >= 1
-    old = auth_client.get("/api/leads?until=2000-01-01&date_field=found").json()
-    assert old["count"] == 0
-    today = lead["found_at"][:10]
-    same_day = auth_client.get(
-        f"/api/leads?since={today}&until={today}&date_field=found"
-    ).json()
-    assert any(x["id"] == lead["id"] for x in same_day["leads"])
-
-
-def test_leads_rejects_bad_filters(auth_client):
-    assert auth_client.get("/api/leads?since=yesterday").status_code == 400
-    assert auth_client.get("/api/leads?days=0").status_code == 400
-    assert auth_client.get("/api/leads?date_field=edited").status_code == 400
-    assert auth_client.get("/api/leads?sort=random").status_code == 400
-
-
-def test_leads_sort_newest_found_first(auth_client):
-    leads = auth_client.get("/api/leads?sort=found").json()["leads"]
-    found = [x["found_at"] for x in leads]
-    assert found == sorted(found, reverse=True)
-
-
-def test_review_status_persists(auth_client):
-    lead_id = auth_client.get("/api/leads").json()["leads"][0]["id"]
-    response = auth_client.post(f"/api/leads/{lead_id}/status", json={"status": "contacted"})
-    assert response.status_code == 200
-
-    updated = auth_client.get("/api/leads").json()["leads"]
-    assert next(x for x in updated if x["id"] == lead_id)["review_status"] == "contacted"
-
-
-def test_invalid_review_status_is_rejected(auth_client):
-    lead_id = auth_client.get("/api/leads").json()["leads"][0]["id"]
-    assert auth_client.post(
-        f"/api/leads/{lead_id}/status", json={"status": "nonsense"}
-    ).status_code == 400
-
-
-def test_status_on_missing_lead_is_404(auth_client):
-    assert auth_client.post(
-        "/api/leads/999999/status", json={"status": "contacted"}
-    ).status_code == 404
-
-
-# --- Triage -----------------------------------------------------------------
-
-
-def test_triage_endpoint_finds_leads(auth_client):
-    response = auth_client.post("/api/triage", json={
-        "text": "Marco · 1h ago\nWe are hiring a React Native developer. Budget $30k.",
-        "community": "mobile-founders",
-    })
-    data = response.json()
-    assert data["total_posts"] == 1
-    assert len(data["leads"]) == 1
-    assert data["leads"][0]["budget"] == "Budget $30k"
-
-
-def test_triage_rejects_empty_text(auth_client):
-    assert auth_client.post("/api/triage", json={"text": "   "}).status_code == 400
-
-
-def test_triage_requires_auth(client):
-    assert client.post("/api/triage", json={"text": "hi"}).status_code == 401
-
-
-# --- Stats and activity -----------------------------------------------------
-
-
-def test_stats_summarize_the_database(auth_client):
-    stats = auth_client.get("/api/stats").json()
-    assert stats["leads"] >= 1
-    assert stats["posts"] >= 2
-    assert len(stats["timeline"]) == 14
-    assert stats["decided_by"]
-
-
-def _seed_funnel_communities(db_path):
-    """Seed one ICP-fit row per platform, all un-attempted, plus one already read."""
-    from circle_leads.storage.database import Database, get_or_create_community
-    from circle_leads.storage.models import JoinStatus
-    from circle_leads.storage.database import utcnow
-
-    db = Database(f"sqlite:///{db_path}")
-    with db.session() as s:
-        for slug, platform in [
-            ("real-circle", "circle"),
-            ("card-one", "discover"),
-            ("card-two", "discover"),
-            ("landing", "other"),
-            ("no-platform", None),
-        ]:
-            c = get_or_create_community(
-                s, slug=slug, url=f"https://{slug}.example.com"
-            )
-            c.icp_flag = True
-            c.platform = platform
-            c.join_status = JoinStatus.NOT_ATTEMPTED.value
-        already_read = get_or_create_community(
-            s, slug="read-once", url="https://read-once.circle.so"
-        )
-        already_read.icp_flag = True
-        already_read.platform = "circle"
-        already_read.join_status = JoinStatus.NOT_ATTEMPTED.value
-        already_read.last_synced_at = utcnow()
-
-
-def test_scraper_queue_counts_only_communities_on_a_real_circle_host(
-    tmp_path, monkeypatch
-):
-    """The queue card must not count Discover cards or non-Circle landing pages.
-
-    They carry no community host, so harvest and the joiner both skip them --
-    counting them made the workable backlog look ~9x deeper than it was.
-    """
-    monkeypatch.setenv("DASHBOARD_PASSWORD", PASSWORD)
-    monkeypatch.setenv("DASHBOARD_SECRET_KEY", "test-signing-key")
-    db_path = tmp_path / "funnel.db"
-    Database(f"sqlite:///{db_path}")
-    _seed_funnel_communities(db_path)
-
-    from circle_leads.web.app import create_app
-
-    import shutil
-    test_cfg = tmp_path / "requirements.yaml"
-    shutil.copy(_DEV_CONFIG, test_cfg)
-    client = TestClient(
-        create_app(db_url=f"sqlite:///{db_path}", config_path=str(test_cfg))
-    )
-    client.post("/login", data={"password": PASSWORD})
-
-    funnel = client.get("/api/stats").json()["funnel"]
-    # real-circle + read-once are on a Circle host; read-once still counts as
-    # queued because "read once" and "attempted" are different things.
-    assert funnel["queued_for_scraper"] == 2
-    # 2 Discover cards + 1 non-Circle landing + 1 with no platform recorded.
-    # The NULL row must not vanish from both sides of the split.
-    assert funnel["queued_unresolved"] == 4
-
-
-def test_activity_records_what_was_checked_and_decided(auth_client):
-    events = auth_client.get("/api/activity").json()["activity"]
-    kinds = {e["kind"] for e in events}
-    assert "triage" in kinds
-    assert "classify" in kinds
-
-    triage = next(e for e in events if e["kind"] == "triage")
-    assert triage["community"] == "flutter-devs"
-    assert triage["items_seen"] == 2
-
-
-def test_activity_can_be_filtered_by_kind(auth_client):
-    events = auth_client.get("/api/activity?kind=classify").json()["activity"]
-    assert events
-    assert all(e["kind"] == "classify" for e in events)
+# --- Activity log -------------------------------------------------------------
 
 
 def test_activity_never_stores_credentials(tmp_path):
@@ -322,180 +137,6 @@ def test_activity_never_stores_credentials(tmp_path):
     assert "token" not in detail
     assert "access_token" not in detail
     assert detail["community"] == "acme"
-
-
-def test_communities_endpoint_shows_permission_state(auth_client):
-    rows = auth_client.get("/api/communities").json()["communities"]
-    assert rows
-    # Triage must never imply an operator approved ingestion.
-    assert all(c["permission_status"] != "approved" for c in rows)
-
-
-def test_communities_icp_only_filters_server_side(tmp_path, monkeypatch):
-    """The table can run into the thousands (bulk discovery imports) -- icp_only
-    must actually narrow what the server sends, not just what the UI shows."""
-    monkeypatch.setenv("DASHBOARD_PASSWORD", PASSWORD)
-    monkeypatch.setenv("DASHBOARD_SECRET_KEY", "test-signing-key")
-
-    from circle_leads.storage.database import get_or_create_community
-
-    db_path = tmp_path / "web.db"
-    db = Database(f"sqlite:///{db_path}")
-    with db.session() as s:
-        fit = get_or_create_community(s, slug="fit", url="https://fit.circle.so")
-        fit.icp_flag = True
-        get_or_create_community(s, slug="not-fit", url="https://not-fit.circle.so")
-
-    from circle_leads.web.app import create_app
-    client = TestClient(create_app(db_url=f"sqlite:///{db_path}", config_path=_DEV_CONFIG))
-    client.post("/login", data={"password": PASSWORD})
-
-    everything = client.get("/api/communities").json()
-    assert everything["total"] == 2
-    assert len(everything["communities"]) == 2
-
-    flagged_only = client.get("/api/communities?icp_only=true").json()
-    assert flagged_only["total"] == 1
-    assert [c["slug"] for c in flagged_only["communities"]] == ["fit"]
-
-
-# --- Triggered jobs ---------------------------------------------------------
-
-
-def test_read_job_requires_host_and_space(auth_client):
-    assert auth_client.post("/api/jobs/read", json={"host": "x.circle.so"}).status_code == 400
-
-
-def test_jobs_require_auth(client):
-    assert client.get("/api/jobs").status_code == 401
-    assert client.post("/api/jobs/harvest", json={}).status_code == 401
-
-
-def test_job_status_404_for_unknown(auth_client):
-    assert auth_client.get("/api/jobs/nope").status_code == 404
-
-
-def test_discover_directory_job_starts_and_is_listed(auth_client, monkeypatch):
-    # Stub the crawl so no browser/network call happens.
-    import circle_leads.discovery.circle_directory as cd
-
-    class FakeResult:
-        goals = []
-        listings = []
-        errors = []
-
-    class FakePersisted:
-        new_count = 0
-        updated = []
-        unchanged = 0
-
-    monkeypatch.setattr(cd, "crawl_directory", lambda *a, **k: FakeResult())
-    monkeypatch.setattr(cd, "persist_crawl_result", lambda *a, **k: FakePersisted())
-    resp = auth_client.post("/api/jobs/discover-directory")
-    assert resp.status_code == 200
-    job_id = resp.json()["job"]["id"]
-
-    import time
-    for _ in range(20):
-        j = auth_client.get(f"/api/jobs/{job_id}").json()["job"]
-        if j["state"] != "running":
-            break
-        time.sleep(0.1)
-    assert j["state"] in ("done", "error")
-    assert any(x["id"] == job_id for x in auth_client.get("/api/jobs").json()["jobs"])
-
-
-def test_harvest_job_starts(auth_client, monkeypatch):
-    import circle_leads.harvest as h
-    from circle_leads.harvest import HarvestResult
-
-    monkeypatch.setattr(h, "harvest", lambda *a, **k: HarvestResult())
-    resp = auth_client.post("/api/jobs/harvest", json={"only_new": True})
-    assert resp.status_code == 200
-    job_id = resp.json()["job"]["id"]
-
-    import time
-    for _ in range(20):
-        j = auth_client.get(f"/api/jobs/{job_id}").json()["job"]
-        if j["state"] != "running":
-            break
-        time.sleep(0.1)
-    assert j["state"] in ("done", "error")
-
-
-def test_harvest_job_requires_auth(client):
-    assert client.post("/api/jobs/harvest", json={}).status_code == 401
-
-
-# --- Config editor ----------------------------------------------------------
-
-
-def test_config_read_returns_full_shape(auth_client):
-    c = auth_client.get("/api/config").json()
-    assert "target_roles" in c and "target_skills" in c
-    assert "keywords" in c and "scoring" in c
-    assert "llm_available" in c
-
-
-def test_config_save_updates_and_takes_effect(auth_client, tmp_path, monkeypatch):
-    # Point the app at a temp config file so the test doesn't edit the real one.
-    import circle_leads.web.app as appmod
-    from circle_leads.config.settings import load_requirements, requirements_to_dict, save_requirements
-
-    cfg = tmp_path / "req.yaml"
-    save_requirements(requirements_to_dict(load_requirements()), cfg)
-    # monkeypatch the module-level default so create_app writes here
-    monkeypatch.setattr("circle_leads.config.settings.DEFAULT_CONFIG_PATH", cfg)
-
-    # Save a new config via the API
-    body = auth_client.get("/api/config").json()
-    body["target_roles"] = ["Flutter Developer"]
-    resp = auth_client.post("/api/config", json=body)
-    assert resp.status_code == 200
-    # The change is reflected on the next read
-    assert auth_client.get("/api/config").json()["target_roles"] == ["Flutter Developer"]
-
-
-def test_config_save_rejects_invalid(auth_client):
-    body = auth_client.get("/api/config").json()
-    body["minimum_confidence"] = 5.0  # out of range 0..1
-    assert auth_client.post("/api/config", json=body).status_code == 400
-
-
-def test_config_save_locks_excluded_content(auth_client):
-    """A dashboard save must not weaken privacy exclusions."""
-    body = auth_client.get("/api/config").json()
-    before = set(body.get("excluded_content", []))
-    body["excluded_content"] = []  # attempt to clear it
-    resp = auth_client.post("/api/config", json=body)
-    assert resp.status_code == 200
-    after = set(resp.json()["config"]["excluded_content"])
-    assert after == before  # unchanged despite the attempt
-
-
-def test_config_requires_auth(client):
-    assert client.get("/api/config").status_code == 401
-    assert client.post("/api/config", json={}).status_code == 401
-
-
-def test_config_includes_harvest_settings(auth_client):
-    c = auth_client.get("/api/config").json()
-    assert "harvest_recency_days" in c
-    assert "harvest_all_spaces" in c
-
-
-def test_config_save_harvest_recency(auth_client, tmp_path, monkeypatch):
-    from circle_leads.config.settings import load_requirements, requirements_to_dict, save_requirements
-    cfg = tmp_path / "req.yaml"
-    save_requirements(requirements_to_dict(load_requirements()), cfg)
-    monkeypatch.setattr("circle_leads.config.settings.DEFAULT_CONFIG_PATH", cfg)
-    body = auth_client.get("/api/config").json()
-    body["harvest_recency_days"] = 7
-    body["harvest_all_spaces"] = True
-    assert auth_client.post("/api/config", json=body).status_code == 200
-    got = auth_client.get("/api/config").json()
-    assert got["harvest_recency_days"] == 7
-    assert got["harvest_all_spaces"] is True
 
 
 # --- /api/tick (free-tier external scheduler) -------------------------------
