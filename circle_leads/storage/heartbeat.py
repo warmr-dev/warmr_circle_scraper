@@ -25,6 +25,10 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_INTERVAL_S = 60.0
 
+# How old a beat may get before the service counts as silent. The same numbers
+# as /api/watchdog's; the dashboard's attention list reads these.
+HEARTBEAT_LIMITS_S = {"worker_heartbeat": 1800, "watcher_heartbeat": 900}
+
 
 def start_heartbeat(db, key: str, *, interval_s: float = DEFAULT_INTERVAL_S,
                     runtime_key: str | None = None,

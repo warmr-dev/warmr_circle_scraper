@@ -1,4 +1,10 @@
-"""Dashboard for reviewing leads.
+"""The dashboard: sign-in, the page, and the routes the page and the tools use.
+
+The six sections of the page have their own modules (circle_leads/web/sections,
+under /api/dash); circle_leads/web/ui.py serves the page itself. What stays here
+is what other clients call: the local connector, the browser extension that
+stores sessions, the per-community session actions, the watchdog cron and the
+tick pinger.
 
 Local-first: binds to 127.0.0.1 unless told otherwise, and requires a password
 from the environment. The database holds other people's posts, so the default
@@ -8,25 +14,16 @@ posture is closed.
 from __future__ import annotations
 
 import os
-import time
-from collections import Counter
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
-from sqlalchemy import func, or_, select
+from sqlalchemy import select
 
-from circle_leads.config.settings import (
-    load_requirements, requirements_to_dict,
-)
-from circle_leads.export.exporters import query_leads
-from circle_leads.storage.activity import log_activity, recent_activity
+from circle_leads.config.settings import load_requirements
+from circle_leads.storage.activity import log_activity
 from circle_leads.storage.database import Database
-from circle_leads.storage.models import Community, JoinStatus, Lead, Post
-from circle_leads.triage.pipeline import triage_text
-from circle_leads.web.jobs import JobRegistry
 from circle_leads.web.auth import (
     COOKIE_NAME,
     SESSION_MAX_AGE,
@@ -37,25 +34,6 @@ from circle_leads.web.auth import (
 )
 
 STATIC_DIR = Path(__file__).parent / "static"
-REVIEW_STATUSES = {"pending_review", "contacted", "replied", "rejected", "won"}
-
-
-# How long one computed /api/overview is served before it is recomputed. The
-# funnel moves at the pace of the worker's slowest stage (hourly at best), and
-# the page is the first thing a client opens: 11 aggregate queries per view
-# bought nothing between two views a minute apart.
-OVERVIEW_TTL_SECONDS = 120
-
-
-def _parse_day(value: str | None, name: str) -> datetime | None:
-    """A ``YYYY-MM-DD`` query param as midnight UTC; 400 on anything else."""
-    if not value:
-        return None
-    try:
-        day = datetime.strptime(value, "%Y-%m-%d")
-    except ValueError:
-        raise HTTPException(400, f"{name} must be a date like 2026-09-21") from None
-    return day.replace(tzinfo=timezone.utc)
 
 
 def create_app(
@@ -71,8 +49,6 @@ def create_app(
     # Render/Railway start does not open a second SQLAlchemy pool against
     # the same Supabase session-mode cap.
     db = db or Database(db_url or os.environ.get("CIRCLE_LEADS_DB") or None)
-    requirements_holder = {"req": load_requirements(config_path)}
-    config_file = config_path
 
     def _load_effective_requirements():
         """Packaged defaults, with any DB-stored dashboard edits merged on top.
@@ -95,13 +71,22 @@ def create_app(
 
     requirements_holder = {"req": _load_effective_requirements()}
     sessions = SessionManager()
-    jobs = JobRegistry()
 
-    def _is_serverless() -> bool:
-        """True on Vercel/Lambda, where background threads die after the
-        response returns (so long work must run inline within the request)."""
-        return bool(os.environ.get("VERCEL")
-                    or os.environ.get("AWS_LAMBDA_FUNCTION_NAME"))
+    # What the section routers (circle_leads/web/sections) reach for.
+    app.state.db = db
+    app.state.sessions = sessions
+    app.state.config_path = config_path
+    app.state.requirements_holder = requirements_holder
+    app.state.cache = {}
+
+    @app.middleware("http")
+    async def _forget_cached_numbers_on_writes(request: Request, call_next):
+        # A change made on the page (a session pasted, an item marked as seen)
+        # must show on the next load, not once the cache runs out.
+        response = await call_next(request)
+        if request.method != "GET" and request.url.path.startswith("/api/"):
+            app.state.cache.clear()
+        return response
 
     def requirements():
         return requirements_holder["req"]
@@ -179,110 +164,6 @@ def create_app(
         resp = JSONResponse({"ok": True})
         resp.delete_cookie(COOKIE_NAME)
         return resp
-
-    # --- Pages ------------------------------------------------------------
-
-    @app.get("/", response_class=HTMLResponse)
-    def index(request: Request) -> HTMLResponse:
-        if not sessions.valid(request.cookies.get(COOKIE_NAME)):
-            return RedirectResponse("/login", status_code=303)
-        return HTMLResponse((STATIC_DIR / "index.html").read_text(encoding="utf-8"))
-
-    # --- Leads ------------------------------------------------------------
-
-    @app.get("/api/leads")
-    def api_leads(
-        request: Request,
-        role: str | None = None,
-        skills: str | None = None,
-        community: str | None = None,
-        priority: str | None = None,
-        status: str | None = None,
-        q: str | None = None,
-        days: int | None = None,
-        since: str | None = None,
-        until: str | None = None,
-        date_field: str = "published",
-        sort: str = "score",
-        min_score: int = 0,
-        limit: int = 200,
-        _: None = Depends(require_auth),
-    ) -> dict[str, Any]:
-        """Leads for the dashboard.
-
-        Time window: ``days`` (the last N days) or ``since``/``until`` as
-        inclusive ``YYYY-MM-DD`` dates; ``date_field`` picks the post date
-        (``published``) or the date the lead was found (``found``).
-        """
-        skill_list = [s.strip() for s in skills.split(",")] if skills else None
-        start = _parse_day(since, "since")
-        end = _parse_day(until, "until")
-        if end is not None:
-            end += timedelta(days=1)  # inclusive: the whole "until" day
-        if days is not None:
-            if days < 1:
-                raise HTTPException(400, "days must be at least 1")
-            start = datetime.now(timezone.utc) - timedelta(days=days)
-        try:
-            with db.session() as s:
-                rows = query_leads(
-                    s, role=role, skills=skill_list, community=community,
-                    priority=priority, min_score=min_score, review_status=status,
-                    search=q, since=start, until=end, date_field=date_field,
-                    sort=sort, limit=limit,
-                )
-        except ValueError as exc:
-            raise HTTPException(400, str(exc)) from exc
-        return {"leads": rows, "count": len(rows)}
-
-    @app.post("/api/leads/{lead_id}/status")
-    def set_status(
-        lead_id: int, payload: dict, _: None = Depends(require_auth)
-    ) -> dict[str, Any]:
-        new_status = str(payload.get("status", "")).strip()
-        if new_status not in REVIEW_STATUSES:
-            raise HTTPException(400, f"status must be one of {sorted(REVIEW_STATUSES)}")
-        with db.session() as s:
-            lead = s.get(Lead, lead_id)
-            if lead is None:
-                raise HTTPException(404, "Lead not found")
-            lead.review_status = new_status
-            log_activity(
-                s,
-                kind="review",
-                summary=f"Lead {lead_id} marked {new_status}",
-                detail={"job_title": lead.job_title, "score": lead.lead_score},
-            )
-        return {"ok": True, "status": new_status}
-
-    @app.post("/api/communities/{slug}/visited")
-    def mark_visited(slug: str, payload: dict, _: None = Depends(require_auth)) -> dict[str, Any]:
-        from circle_leads.storage.models import AccessState
-        new_state = payload.get("state", AccessState.JOINED.value)
-        with db.session() as s:
-            c = s.scalar(select(Community).where(Community.slug == slug))
-            if c is None:
-                raise HTTPException(404, "Community not found")
-            c.access_status = new_state
-            log_activity(s, kind="review", community=slug,
-                         summary=f"Community {slug} marked {new_state}")
-        return {"ok": True, "state": new_state}
-
-    @app.post("/api/communities/{slug}/watch")
-    def set_watch(slug: str, payload: dict, _: None = Depends(require_auth)) -> dict[str, Any]:
-        """Subscribe/unsubscribe a community. Watched ones are polled first on
-        the fast (5-min) harvest lane, so their new posts surface within minutes."""
-        watching = bool(payload.get("watching", True))
-        with db.session() as s:
-            c = s.scalar(select(Community).where(Community.slug == slug))
-            if c is None:
-                raise HTTPException(404, "Community not found")
-            c.watching = watching
-            log_activity(
-                s, kind="review", community=slug,
-                summary=f"Community {slug} {'subscribed (watching)' if watching else 'unsubscribed'}",
-            )
-        return {"ok": True, "watching": watching}
 
     @app.post("/api/communities/add")
     def add_community(payload: dict, _: None = Depends(require_auth)) -> dict[str, Any]:
@@ -662,129 +543,6 @@ def create_app(
         return {"ok": True, "host": host, "cookies": len(cookies),
                 "missing": missing}
 
-    def _scan_cookie_host(host: str, *, max_pages: int = 5,
-                          time_budget: float | None = None) -> dict[str, Any]:
-        """Read one community over HTTP with its stored session cookie and
-        ingest posts. Returns a summary; updates the connection state. No
-        browser. Shared by the single-scan endpoint and the VIP-first batch.
-
-        ``time_budget`` (seconds) stops the scan early so it fits a serverless
-        function timeout; ``partial`` in the result flags an unfinished run.
-        """
-        import time as _time
-        from circle_leads.web.replay_store import load_cookies
-        from circle_leads.scraper.member_api_reader import (
-            MemberApiReader, SessionInvalid, ChallengeHit, fetch_space_posts,
-        )
-        from circle_leads.storage.models import CircleConnection, ConnectionState
-        from circle_leads.triage.pipeline import triage_records
-
-        started = _time.time()
-        cookie_list = load_cookies(db, host) or []
-        cookies = {c["name"]: c["value"] for c in cookie_list}
-        state = ConnectionState.CONNECTED
-        detail = ""
-        total = 0
-        readable = 0
-        spaces_total = 0
-        leads = 0
-        partial = False
-        try:
-            # Lower the inter-page pause on serverless (we're time-bounded and
-            # do few pages anyway). list_spaces doubles as the session check --
-            # it raises SessionInvalid on a bad cookie -- so we skip a separate
-            # check_session round-trip.
-            pause = 0.2 if _is_serverless() else 0.7
-            reader = MemberApiReader(host, cookies=cookies, request_pause=pause)
-            try:
-                spaces = reader.list_spaces()
-            except SessionInvalid:
-                state = ConnectionState.SESSION_EXPIRED
-                detail = "Session cookie invalid or expired -- refresh it."
-                spaces = None
-            if spaces is not None:
-                spaces_total = len(spaces)
-                for sp in spaces:
-                    if time_budget and (_time.time() - started) > time_budget:
-                        partial = True    # ran out of time; stop cleanly
-                        break
-                    try:
-                        # Pull comments+replies too (hiring intent often lives
-                        # there). On the tight serverless budget, cap how many
-                        # posts we fetch comments for so a scan still fits.
-                        cap = 8 if time_budget else 25
-                        recs = fetch_space_posts(
-                            reader, sp["id"], max_pages=max_pages,
-                            with_comments=True, max_comment_posts=cap,
-                            space_slug=sp.get("slug"))
-                    except SessionInvalid:
-                        # A single space may deny access; don't fail the whole scan.
-                        continue
-                    if not recs:
-                        continue
-                    readable += 1
-                    total += len(recs)
-                    # Share ONE DB connection across this space's per-post writes
-                    # instead of a pooler checkout per post -- the big win over a
-                    # network pooler (Supabase).
-                    with db.shared_session():
-                        res = triage_records(
-                            db, recs, requirements(), community=host.split(".")[0],
-                            source_url=f"https://{host}",
-                            use_llm=bool(os.environ.get("OPENAI_API_KEY")),
-                        )
-                    leads += len(res.leads)
-                suffix = " (partial — press scan again to continue)" if partial else ""
-                if total:
-                    detail = f"{total} post(s), {leads} lead(s) from {readable}/{spaces_total} space(s){suffix}"
-                else:
-                    detail = f"No readable posts ({spaces_total} space(s) visible){suffix}."
-        except SessionInvalid:
-            state = ConnectionState.SESSION_EXPIRED
-            detail = "Session rejected -- refresh the cookie."
-        except ChallengeHit as exc:
-            state = ConnectionState.ERROR
-            detail = str(exc)
-        except Exception as exc:  # noqa: BLE001 - one bad host must not stop a batch
-            state = ConnectionState.ERROR
-            detail = f"{exc.__class__.__name__}: {exc}"
-        with db.session() as s:
-            conn = s.scalar(select(CircleConnection).where(CircleConnection.host == host))
-            if conn is None:
-                conn = CircleConnection(host=host)
-                s.add(conn)
-            conn.state = state.value
-            conn.state_detail = detail or None
-            conn.spaces_readable = readable
-            conn.spaces_total = spaces_total
-            import datetime as _sdt
-            conn.last_sync_at = _sdt.datetime.utcnow()
-        log_activity_holder(
-            kind="ingest",
-            level="warning" if state != ConnectionState.CONNECTED else ("success" if leads else "info"),
-            community=host.split(".")[0],
-            summary=(f"HTTP scan of {host}: {total} post(s), {leads} lead(s) from "
-                     f"{readable} space(s)" + (f" — {detail}" if state != ConnectionState.CONNECTED else "")),
-            items_seen=total, leads_found=leads,
-        )
-        return {"host": host, "state": state.value, "posts": total,
-                "spaces_readable": readable, "leads": leads, "detail": detail,
-                "partial": partial}
-
-    def _cookie_hosts_vip_first() -> list[str]:
-        """Communities that have a stored session cookie, VIP first, paused
-        excluded -- the scan order for every harvest."""
-        from circle_leads.storage.models import (
-            CircleConnection, ConnectionPriority, ReplaySession, SCAN_ORDER,
-        )
-        with db.session() as s:
-            with_cookie = {r.host for r in s.scalars(select(ReplaySession)).all()}
-            rows = [c for c in s.scalars(select(CircleConnection)).all()
-                    if c.host in with_cookie
-                    and c.priority != ConnectionPriority.PAUSED.value]
-            rows.sort(key=lambda c: (SCAN_ORDER.get(c.priority, 1), c.host))
-            return [c.host for c in rows]
-
     @app.post("/api/connections/{host}/scan")
     def scan_connection_http(
         host: str, _: None = Depends(require_auth)
@@ -813,19 +571,14 @@ def create_app(
     @app.post("/api/connections/scan-all")
     def scan_all_cookie_hosts(_: None = Depends(require_auth)) -> dict[str, Any]:
         """Enqueue a VIP-first scan of every cookie-backed community."""
+        from circle_leads.scanning import cookie_hosts_vip_first
         from circle_leads.storage.job_queue import enqueue
-        hosts = _cookie_hosts_vip_first()
+        hosts = cookie_hosts_vip_first(db)
         if not hosts:
             raise HTTPException(400, "No communities have a session cookie yet.")
         job_id = enqueue(db, "scan_all", priority=0)
         return {"ok": True, "queued": True, "job_id": job_id, "hosts": hosts,
                 "note": "Queued — the worker will scan them VIP-first."}
-
-    @app.get("/api/scan-jobs")
-    def list_scan_jobs(_: None = Depends(require_auth)) -> dict[str, Any]:
-        """Recent scan-queue jobs (queued/running/done) for the dashboard."""
-        from circle_leads.storage.job_queue import recent
-        return {"jobs": recent(db, limit=20)}
 
     @app.post("/api/connections/{host}/priority")
     def set_connection_priority(
@@ -887,554 +640,6 @@ def create_app(
         log_activity_holder(kind="review", community=host.split(".")[0],
                             summary=f"Session cookie cleared for {host}")
         return {"ok": True, "host": host}
-
-    # --- Triage -----------------------------------------------------------
-
-    @app.post("/api/triage")
-    def api_triage(payload: dict, _: None = Depends(require_auth)) -> dict[str, Any]:
-        text = str(payload.get("text") or "")
-        if not text.strip():
-            raise HTTPException(400, "No text supplied.")
-        result = triage_text(
-            db, text, requirements(),
-            community=str(payload.get("community") or "manual").strip() or "manual",
-            space=payload.get("space") or None,
-            source_url=payload.get("url") or None,
-            use_llm=bool(payload.get("use_llm")),
-        )
-        return {
-            "total_posts": result.total_posts,
-            "leads": result.leads,
-            "not_leads": result.not_leads,
-            "filtered": result.filtered,
-            "duplicates": result.duplicates,
-            "already_seen": result.already_seen,
-        }
-
-    # --- Triggered jobs (search / read) -----------------------------------
-
-    @app.post("/api/jobs/discover-directory")
-    def start_discover_directory(_: None = Depends(require_auth)) -> dict[str, Any]:
-        """Bulk-crawl Circle's own discovery marketplace (discover.circle.so)
-        and persist the results. This is the Communities tab's "Sync directory
-        now" button.
-
-        Deviation note: the plan (§7) suggested wiring this through the durable
-        ScanJob queue like /api/connections/*/scan, so the always-on Railway
-        worker (which will carry the Playwright/Chromium image) runs it instead
-        of the dashboard process. That queue's worker loop lives outside
-        circle_leads/web/ (out of scope here) and today only dispatches
-        scan/scan_all/harvest kinds, so a queued "discover_directory" job would
-        never be claimed. Per the plan's own fallback allowance, this instead
-        reuses the JobRegistry background-thread pattern already used by
-        /api/jobs/harvest -- same UI polling shape, no worker-side change
-        needed. `crawl_directory` requires Playwright/Chromium (not installed
-        on a serverless/Vercel dashboard); it already raises a clear error in
-        that case, which surfaces here as the job's error detail.
-        """
-        def run(job):
-            from circle_leads.discovery.circle_directory import (
-                crawl_directory, persist_crawl_result,
-            )
-
-            job.detail = "Crawling discover.circle.so (this can take a while)..."
-            result = crawl_directory()
-            persisted = persist_crawl_result(db, result)
-            job.result = {
-                "goals": len(result.goals), "listings": len(result.listings),
-                "new": persisted.new_count, "updated": len(persisted.updated),
-                "unchanged": persisted.unchanged,
-                "errors": result.errors,
-            }
-            job.detail = (
-                f"{len(result.goals)} goal(s), {len(result.listings)} listing(s) -- "
-                f"{persisted.new_count} new, {len(persisted.updated)} updated."
-            )
-            log_activity_holder(
-                kind="discover", level="success" if persisted.new_count else "info",
-                summary=(f"Directory sync: {persisted.new_count} new, "
-                         f"{len(persisted.updated)} updated community/communities"),
-            )
-
-        job = jobs.start("discover_directory", "Sync Circle directory", run)
-        return {"job": job.as_dict()}
-
-    @app.post("/api/jobs/read")
-    def start_read(payload: dict, _: None = Depends(require_auth)) -> dict[str, Any]:
-        host = str(payload.get("host") or "").strip()
-        space_ids = payload.get("space_ids") or []
-        slug = str(payload.get("slug") or (host.split(".")[0] if host else "")).strip()
-        if not host or not space_ids:
-            raise HTTPException(400, "Give a community host and at least one space id.")
-
-        def run(job):
-            from circle_leads.scraper.browser_reader import (
-                BrowserFeedReader, NotLoggedIn, fetch_space_posts,
-            )
-            from circle_leads.triage.pipeline import triage_text
-
-            reader = BrowserFeedReader(host)
-            if not reader.status():
-                job.state = "error"
-                job.detail = (
-                    f"Not signed into {host}. In a terminal run: "
-                    f"circle-leads read-feed {host} --login"
-                )
-                return
-            records = []
-            for sid in space_ids:
-                try:
-                    records.extend(
-                        fetch_space_posts(reader, sid,
-                                          excluded_content=requirements().excluded_content)
-                    )
-                except NotLoggedIn:
-                    job.state = "error"
-                    job.detail = "Session expired mid-read; re-run --login."
-                    return
-            if not records:
-                job.detail = "No posts read."
-                return
-            text = "\n\n---\n\n".join(
-                (r["title"] + "\n" + r["content"]) if r.get("title") else r["content"]
-                for r in records
-            )
-            result = triage_text(
-                db, text, requirements(), community=slug, source_url=reader.base,
-            )
-            job.result = {"leads": len(result.leads), "posts": result.total_posts,
-                          "seen": result.already_seen}
-            job.detail = f"{len(result.leads)} lead(s) from {result.total_posts} post(s)."
-
-        job = jobs.start("read", f"Read: {host}", run)
-        return {"job": job.as_dict()}
-
-    @app.post("/api/jobs/harvest")
-    def start_harvest(payload: dict, _: None = Depends(require_auth)) -> dict[str, Any]:
-        niches = payload.get("niches") or None  # list, or None for defaults
-        only_new = bool(payload.get("only_new", True))
-        no_search = bool(payload.get("no_search", False))
-
-        # Default AI on whenever an OpenAI key is present, so ambiguous hiring
-        # posts (e.g. "Forward Deployed Engineer x3, looking for...") escalate
-        # to the LLM instead of being dropped by the rule classifier. The
-        # "Use AI" checkbox can still explicitly force it on or off.
-        _llm_default = bool(os.environ.get("OPENAI_API_KEY"))
-        use_llm = bool(payload.get("use_llm", _llm_default))
-        include_comments = bool(payload.get("include_comments", False))
-        recency_days = int(payload.get("recency_days", requirements().harvest_recency_days))
-        all_spaces = bool(payload.get("all_spaces", requirements().harvest_all_spaces))
-        # "Re-check communities already read" (only_new=False) means: read the
-        # ones already synced too, so bypass the recent-recheck skip window.
-        force_recheck = bool(payload.get("force_recheck", not only_new))
-
-        def run(job):
-            from circle_leads.harvest import harvest
-
-            log_activity_holder(
-                kind="harvest", level="info",
-                summary="Harvest started (dashboard)",
-                detail={"only_new": only_new, "search": not no_search,
-                        "use_llm": use_llm, "all_spaces": all_spaces,
-                        "recency_days": recency_days},
-            )
-            # VIP first: scan cookie-backed private communities before the
-            # public harvest, in priority order (paused excluded).
-            priv_hosts = _cookie_hosts_vip_first()
-            priv_leads = 0
-            for i, h in enumerate(priv_hosts, 1):
-                job.detail = f"Scanning private communities (VIP first) {i}/{len(priv_hosts)}: {h}"
-                priv_leads += _scan_cookie_host(h).get("leads", 0)
-
-            job.detail = "Discovering + reading public communities..."
-            res = harvest(
-                db, requirements(), niches=niches, search=not no_search,
-                only_new=only_new, verbose_log=True, use_llm=use_llm,
-                include_comments=include_comments, recency_days=recency_days,
-                all_spaces=all_spaces, force_recheck=force_recheck,
-            )
-            job.result = {
-                "new_communities": res.new_communities,
-                "communities_read": res.communities_read,
-                "public_spaces": res.public_spaces,
-                "posts_read": res.posts_read,
-                "leads": res.leads_found,
-            }
-            job.detail = (
-                f"{res.new_communities} new, read {res.communities_read} "
-                f"community/communities, {res.leads_found} lead(s)."
-            )
-            log_activity_holder(
-                kind="harvest",
-                level="success" if res.leads_found else "info",
-                summary=(
-                    f"Harvest finished: {res.new_communities} new communities, "
-                    f"read {res.communities_read}, {res.leads_found} lead(s)"
-                ),
-                items_seen=res.posts_read, leads_found=res.leads_found,
-            )
-
-        job = jobs.start("harvest", "Harvest", run)
-        return {"job": job.as_dict()}
-
-    @app.post("/api/jobs/reclassify")
-    def start_reclassify(payload: dict, _: None = Depends(require_auth)) -> dict[str, Any]:
-        def run(job):
-            from circle_leads.pipeline import classify_pending
-            from circle_leads.storage.models import Post
-            from sqlalchemy import update
-            # Mark everything unclassified so the new rules re-decide it.
-            with db.session() as s:
-                s.execute(update(Post).values(classified=False))
-            stats = classify_pending(db, requirements())
-            job.result = stats
-            job.detail = (
-                f"Re-classified {stats.get('classified', 0)}: "
-                f"{stats.get('leads', 0)} lead(s)."
-            )
-        job = jobs.start("reclassify", "Re-classify with new rules", run)
-        return {"job": job.as_dict()}
-
-    @app.get("/api/jobs")
-    def list_jobs(_: None = Depends(require_auth)) -> dict[str, Any]:
-        return {"jobs": jobs.list(),
-                "read_running": jobs.active("read"),
-                "harvest_running": jobs.active("harvest"),
-                "discover_directory_running": jobs.active("discover_directory")}
-
-    @app.get("/api/jobs/{job_id}")
-    def job_status(job_id: str, _: None = Depends(require_auth)) -> dict[str, Any]:
-        job = jobs.get(job_id)
-        if job is None:
-            raise HTTPException(404, "Job not found")
-        return {"job": job.as_dict()}
-
-    # --- Stats and activity ----------------------------------------------
-
-    # One computed overview per warm instance, see OVERVIEW_TTL_SECONDS. Two
-    # requests racing past an expired entry both compute it; that costs one
-    # extra query batch and nothing else, so there is no lock.
-    overview_cache: dict[str, Any] = {"at": 0.0, "value": None}
-
-    @app.get("/api/overview")
-    def api_overview(_: None = Depends(require_auth)) -> dict[str, Any]:
-        """The client-facing funnel -- see web/overview.py for definitions."""
-        from circle_leads.web.overview import build_overview
-
-        started = time.monotonic()
-        if (overview_cache["value"] is not None
-                and started - overview_cache["at"] < OVERVIEW_TTL_SECONDS):
-            return overview_cache["value"]
-        with db.session() as s:
-            value = build_overview(s, datetime.now(timezone.utc).replace(tzinfo=None))
-        overview_cache.update(at=started, value=value)
-        return value
-
-    @app.get("/api/stats")
-    def api_stats(_: None = Depends(require_auth)) -> dict[str, Any]:
-        now = datetime.now(timezone.utc).replace(tzinfo=None)
-        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        # Every figure below used to be its own COUNT query -- 21 round trips
-        # per Overview load, each one a trip to the database. They're folded
-        # into a handful of conditional aggregates (COUNT(*) FILTER (WHERE ..))
-        # so the page costs ~5 queries on one connection.
-        c = Community
-        not_attempted = c.join_status == JoinStatus.NOT_ATTEMPTED.value
-        joined = c.join_status == JoinStatus.JOINED.value
-
-        def n(*conds):
-            return func.count().filter(*conds)
-
-        with db.session() as s:
-            comm = s.execute(
-                select(
-                    func.count().label("communities"),
-                    n(c.icp_flag.is_(True)).label("icp_flagged"),
-                    n(joined).label("joined_count"),
-                    n(joined, c.join_attempted_at >= today_start).label("joined_today"),
-                    # Mirrors classify_icp_pending's own join-queue gate
-                    # (icp_flag AND circle AND free_join/paid AND not_attempted).
-                    n(c.icp_flag.is_(True), c.platform == "circle",
-                      c.join_type.in_(["free_join", "paid"]),
-                      not_attempted).label("free_join_backlog"),
-                    # The community-scraping funnel: found (persisted) ->
-                    # analyzed (ICP scored) -> queued for the scraper (ICP-fit,
-                    # on a real Circle host, not attempted yet) -> actually on
-                    # the scraper (harvest.py has synced it at least once).
-                    n(c.discovered_at >= today_start).label("found_today"),
-                    n(c.icp_checked_at.is_not(None)).label("analyzed_total"),
-                    n(c.icp_checked_at >= today_start).label("analyzed_today"),
-                    # Only a real Circle host can be read or joined; unfiltered
-                    # this also counted discover.circle.so marketing cards and
-                    # non-Circle landing pages, overstating the backlog ~9x.
-                    n(c.icp_flag.is_(True), c.platform == "circle",
-                      not_attempted).label("queued_for_scraper"),
-                    # ICP-fit but stuck *before* the queue (mostly unresolved
-                    # Discover cards) -- reported so the drop stays visible.
-                    n(c.icp_flag.is_(True),
-                      or_(c.platform != "circle", c.platform.is_(None)),
-                      not_attempted).label("queued_unresolved"),
-                    n(c.last_synced_at.is_not(None)).label("on_scraper_total"),
-                    # Communities *read* today, not newly added: harvest re-reads
-                    # its head of the list every run, so this is throughput.
-                    n(c.last_synced_at >= today_start).label("on_scraper_today"),
-                    select(func.count()).select_from(Post)
-                    .scalar_subquery().label("posts"),
-                )
-            ).one()._mapping
-            by_platform = dict(
-                s.execute(select(c.platform, func.count()).group_by(c.platform)).all()
-            )
-
-            # One grouped pass over leads gives the three breakdowns and the
-            # LEAD totals together.
-            is_lead = Lead.classification == "LEAD"
-            by_priority: Counter = Counter()
-            by_status: Counter = Counter()
-            decided: Counter = Counter()
-            leads = leads_today = 0
-            for prio, status, who, total, lead_n, lead_today_n in s.execute(
-                select(
-                    Lead.priority, Lead.review_status, Lead.decided_by,
-                    func.count(), n(is_lead),
-                    n(is_lead, Lead.created_at >= today_start),
-                ).group_by(Lead.priority, Lead.review_status, Lead.decided_by)
-            ).all():
-                by_priority[prio] += total
-                by_status[status] += total
-                decided[who] += total
-                leads += lead_n
-                leads_today += lead_today_n
-
-            # Leads and communities per day for the last fortnight (drives the
-            # Overview growth chart), counted in the database.
-            cutoff = now - timedelta(days=14)
-
-            def per_day(col) -> dict[str, int]:
-                day = func.date(col)
-                return {
-                    str(d)[:10]: cnt
-                    for d, cnt in s.execute(
-                        select(day, func.count()).where(col >= cutoff).group_by(day)
-                    ).all()
-                    if d is not None
-                }
-
-            lead_days = per_day(Lead.created_at)
-            community_days = per_day(c.discovered_at)
-
-        communities = comm["communities"]
-        posts = comm["posts"] or 0
-
-        def daily_timeline(counts: dict[str, int]) -> list[dict[str, Any]]:
-            today = datetime.now(timezone.utc).date()
-            return [
-                {"date": d, "count": counts.get(d, 0)}
-                for d in (
-                    (today - timedelta(days=i)).isoformat() for i in range(13, -1, -1)
-                )
-            ]
-
-        leads_timeline = daily_timeline(lead_days)
-        communities_timeline = daily_timeline(community_days)
-
-        return {
-            "communities": communities,
-            "posts": posts,
-            "leads": leads,
-            "leads_today": leads_today,
-            "by_priority": dict(by_priority),
-            "by_status": dict(by_status),
-            "decided_by": dict(decided),
-            "by_platform": by_platform,
-            "icp_flagged": comm["icp_flagged"],
-            "joined_count": comm["joined_count"],
-            "joined_today": comm["joined_today"],
-            "free_join_backlog": comm["free_join_backlog"],
-            # The scraping pipeline funnel: found -> analyzed -> queued for the
-            # scraper -> actually on the scraper. See api_stats for definitions.
-            "funnel": {
-                "found_today": comm["found_today"],
-                "found_total": communities,
-                "analyzed_today": comm["analyzed_today"],
-                "analyzed_total": comm["analyzed_total"],
-                "queued_for_scraper": comm["queued_for_scraper"],
-                "queued_unresolved": comm["queued_unresolved"],
-                "on_scraper_today": comm["on_scraper_today"],
-                "on_scraper_total": comm["on_scraper_total"],
-            },
-            # "timeline" kept for backward compatibility with older clients;
-            # new dashboards should use leads_timeline / communities_timeline.
-            "timeline": leads_timeline,
-            "leads_timeline": leads_timeline,
-            "communities_timeline": communities_timeline,
-        }
-
-    @app.get("/api/activity")
-    def api_activity(
-        limit: int = 100, kind: str | None = None, _: None = Depends(require_auth)
-    ) -> dict[str, Any]:
-        with db.session() as s:
-            return {"activity": recent_activity(s, limit=limit, kind=kind)}
-
-    @app.get("/api/communities")
-    def api_communities(
-        icp_only: bool = False, limit: int = 1000, _: None = Depends(require_auth)
-    ) -> dict[str, Any]:
-        # The bulk discovery sources (directory crawl, DNS/BuiltWith imports)
-        # pushed this table past 12k rows -- shipping it unfiltered on every
-        # dashboard load stopped being viable. icp_only/limit let the frontend
-        # default to "what's actually actionable" instead; total (pre-limit)
-        # is returned separately so the UI can say how much is being hidden.
-        with db.session() as s:
-            query = select(Community).order_by(Community.icp_score.desc())
-            if icp_only:
-                query = query.where(Community.icp_flag.is_(True))
-            total = s.scalar(
-                select(func.count()).select_from(query.order_by(None).subquery())
-            )
-            rows = s.scalars(query.limit(limit)).all()
-            return {
-                "total": total,
-                "icp_only": icp_only,
-                "communities": [
-                    {
-                        "slug": c.slug,
-                        "name": c.name,
-                        "url": c.url,
-                        "platform": c.platform,
-                        "icp_score": c.icp_score,
-                        "icp_flag": bool(c.icp_flag),
-                        "join_type": c.join_type,
-                        "join_type_detail": c.join_type_detail,
-                        "join_status": c.join_status,
-                        "join_status_detail": c.join_status_detail,
-                        "discovery_source": c.discovery_source,
-                        "discovered_at": (
-                            c.discovered_at.isoformat() if c.discovered_at else None
-                        ),
-                        "watching": bool(c.watching),
-                        "access_status": c.access_status,
-                        "permission_status": c.permission_status,
-                        "last_synced_at": (
-                            c.last_synced_at.isoformat() if c.last_synced_at else None
-                        ),
-                    }
-                    for c in rows
-                ]
-            }
-
-    @app.get("/api/new-communities")
-    def api_new_communities(limit: int = 50, _: None = Depends(require_auth)) -> dict[str, Any]:
-        from circle_leads.discovery.persist import new_since
-        return {"communities": new_since(db, limit=limit)}
-
-    @app.get("/api/connections/to-refresh")
-    def api_connections_to_refresh(_: None = Depends(require_auth)) -> dict[str, Any]:
-        """Connections whose stored session cookie has lapsed or been rejected
-        and needs re-pasting. Lives under Circle Connector (relocated from the
-        old Join Queue tab's "cookies to refresh" list) since that's where the
-        cookie-paste flow already is; the rest of the old Join Queue -- the
-        manual "to join" list -- is superseded by the auto-join bot
-        (circle_leads/join/, built separately) and has been removed outright.
-        """
-        from circle_leads.storage.models import CircleConnection, ConnectionState
-        from circle_leads.web.overview import connection_bucket
-
-        broken = {
-            ConnectionState.SESSION_EXPIRED.value,
-            ConnectionState.ACCESS_DENIED.value,
-            ConnectionState.ERROR.value,
-        }
-        with db.session() as s:
-            # A community can migrate off Circle after we already had a
-            # session for it; there's no Circle login left to refresh, so
-            # exclude it rather than showing a permanently-broken row. Only the
-            # url column of non-Circle rows is needed -- loading every
-            # Community object (12k+) made this the slowest request.
-            non_circle_hosts: set[str] = set()
-            for (url,) in s.execute(
-                select(Community.url).where(
-                    Community.platform.is_not(None), Community.platform != "circle"
-                )
-            ).all():
-                try:
-                    non_circle_hosts.add(_clean_host(url))
-                except HTTPException:
-                    pass
-            to_refresh = sorted(
-                (
-                    {
-                        "host": c.host, "name": c.name or c.host,
-                        "member_label": c.member_label,
-                        "state": c.state, "state_detail": c.state_detail,
-                        "last_sync_at": (
-                            c.last_sync_at.isoformat() if c.last_sync_at else None
-                        ),
-                    }
-                    for c in s.scalars(select(CircleConnection)).all()
-                    if c.state in broken and c.host not in non_circle_hosts
-                    # A Cloudflare challenge on the cloud worker is not a dead
-                    # cookie -- the same cookies read fine from a home IP, so a
-                    # fresh paste would change nothing. Listed on the overview
-                    # instead, as a cloud-side block.
-                    and connection_bucket(c.state, c.state_detail) != "cloudflare_blocked"
-                ),
-                key=lambda r: r["host"],
-            )
-        return {"to_refresh": to_refresh}
-
-    @app.get("/api/join-activity")
-    def api_join_activity(_: None = Depends(require_auth)) -> dict[str, Any]:
-        """Monitoring view for the auto-join bot (circle_leads/join/, built as
-        a separate milestone): counts of communities by join_status, and the
-        most recent attempts. This is what replaced the old Join Queue tab's
-        role -- a report of what the bot has done, not a list of things to
-        click (that manual workflow is gone; see api_connections_to_refresh
-        for the one bit of it that's still relevant).
-        """
-        now = datetime.now(timezone.utc).replace(tzinfo=None)
-        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        week_start = now - timedelta(days=7)
-        with db.session() as s:
-            by_status = dict(
-                s.execute(
-                    select(Community.join_status, func.count()).group_by(Community.join_status)
-                ).all()
-            )
-            attempted_today = s.scalar(
-                select(func.count()).select_from(Community).where(
-                    Community.join_attempted_at.is_not(None),
-                    Community.join_attempted_at >= today_start,
-                )
-            ) or 0
-            attempted_week = s.scalar(
-                select(func.count()).select_from(Community).where(
-                    Community.join_attempted_at.is_not(None),
-                    Community.join_attempted_at >= week_start,
-                )
-            ) or 0
-            recent_rows = s.execute(
-                select(Community.slug, Community.name, Community.url,
-                       Community.join_status, Community.join_status_detail,
-                       Community.join_attempted_at)
-                .where(Community.join_attempted_at.is_not(None))
-                .order_by(Community.join_attempted_at.desc())
-                .limit(20)
-            ).all()
-        recent = []
-        for slug, name, url, status, detail, attempted_at in recent_rows:
-            try:
-                host = _clean_host(url)
-            except HTTPException:
-                host = url
-            recent.append({
-                "slug": slug, "name": name or slug, "host": host,
-                "join_status": status, "join_status_detail": detail,
-                "join_attempted_at": attempted_at.isoformat() if attempted_at else None,
-            })
-        return {"by_status": by_status, "attempted_today": attempted_today,
-                "attempted_week": attempted_week, "recent": recent}
 
     @app.get("/api/watchdog")
     def api_watchdog(request: Request) -> dict[str, Any]:
@@ -1503,166 +708,31 @@ def create_app(
     @app.post("/api/tick")
     @app.get("/api/tick")
     def api_tick(request: Request) -> dict[str, Any]:
-        """Wake-up endpoint for an external cron pinger (free-tier scheduling).
+        """Wake-up endpoint for an external cron pinger.
 
-        Runs a harvest only if the dashboard-set schedule says it is due, in a
-        background thread so the ping returns immediately. Auth: either a signed
-        session, or the TICK_TOKEN secret as ?token= (so a pinger can call it).
+        Queues a harvest for the worker when the dashboard-set schedule says
+        one is due. Auth: a signed session, or the TICK_TOKEN secret as
+        ?token= (so a pinger can call it).
         """
-        import os as _os
+        from circle_leads.storage.job_queue import enqueue
         from circle_leads.storage.settings_store import is_harvest_due, mark_harvest_run
 
         token = request.query_params.get("token", "")
-        tick_token = _os.environ.get("TICK_TOKEN", "")
+        tick_token = os.environ.get("TICK_TOKEN", "")
         authed = sessions.valid(request.cookies.get(COOKIE_NAME)) or (
             tick_token and token == tick_token
         )
         if not authed:
             raise HTTPException(401, "Not authenticated")
-
         if not is_harvest_due(db):
             return {"ran": False, "reason": "not due yet"}
-        if jobs.active("harvest"):
-            return {"ran": False, "reason": "already running"}
-
         mark_harvest_run(db)
-
-        # On a fast (sub-hourly) schedule, run a light "read only" lane: don't
-        # web-search every few minutes (slow + Exa cost), just re-read known
-        # communities for new posts. Conditional 304s make that nearly free.
-        # Bypass the re-check skip window so a 5-minute tick actually re-reads.
-        # A full discovery search still runs on the first tick and about once a
-        # day, so new communities are still found.
-        from circle_leads.storage.settings_store import (
-            _schedule_minutes, get_schedule, get_setting, set_setting,
-        )
-        import datetime as _dt
-
-        minutes = _schedule_minutes(get_schedule(db)) or 999999
-        fast_lane = minutes < 60
-        do_search = True
-        if fast_lane:
-            last_search = get_setting(db, "harvest_last_search")
-            do_search = not last_search
-            if last_search:
-                try:
-                    prev = _dt.datetime.fromisoformat(last_search)
-                    do_search = (_dt.datetime.utcnow() - prev) >= _dt.timedelta(hours=24)
-                except ValueError:
-                    do_search = True
-
-        def run(job):
-            from circle_leads.harvest import harvest
-            # VIP first: private cookie-backed communities before the public run.
-            for h in _cookie_hosts_vip_first():
-                _scan_cookie_host(h)
-            res = harvest(
-                db, requirements(), verbose_log=True,
-                use_llm=bool(_os.environ.get("OPENAI_API_KEY")),
-                search=do_search,
-                force_recheck=fast_lane,   # fast lane ignores the 6h skip window
-            )
-            if do_search:
-                set_setting(db, "harvest_last_search", _dt.datetime.utcnow().isoformat())
-            job.result = {"new": res.new_communities, "read": res.communities_read,
-                          "leads": res.leads_found}
-            lane = "fast read" if fast_lane else "full"
-            job.detail = f"Scheduled harvest ({lane}): {res.leads_found} lead(s)"
-
-        # The tick just ENQUEUES a harvest job; the always-on worker runs it.
-        # No heavy work in the request -- so this is instant and works on
-        # serverless too. (The worker also checks the schedule itself, so this
-        # is belt-and-suspenders for a cron pinger.)
-        from circle_leads.storage.job_queue import enqueue
+        # The tick only ENQUEUES; the always-on worker runs the harvest. (The
+        # worker also checks the schedule itself, so this is belt-and-braces
+        # for a cron pinger.)
         job_id = enqueue(db, "harvest", priority=1)
         return {"ran": True, "queued": True, "job_id": job_id,
                 "note": "Harvest queued for the worker."}
-
-    @app.get("/api/schedule")
-    def api_schedule(_: None = Depends(require_auth)) -> dict[str, Any]:
-        from circle_leads.storage.models import Setting
-        from circle_leads.storage.settings_store import (
-            SCHEDULE_INTERVALS, DEFAULT_SCHEDULE, DEFAULT_DISCOVERY,
-            KEY_SCHEDULE, KEY_LAST_RUN, KEY_DISCOVERY, KEY_DISCOVERY_LAST_RUN,
-        )
-        # One query for all four settings instead of a get_setting() each.
-        keys = (KEY_SCHEDULE, KEY_LAST_RUN, KEY_DISCOVERY, KEY_DISCOVERY_LAST_RUN)
-        with db.session() as s:
-            vals = dict(s.execute(
-                select(Setting.key, Setting.value).where(Setting.key.in_(keys))
-            ).all())
-        return {
-            "schedule": vals.get(KEY_SCHEDULE) or DEFAULT_SCHEDULE,
-            "options": list(SCHEDULE_INTERVALS.keys()),
-            "last_run": vals.get(KEY_LAST_RUN),
-            # Second schedule: how often the harvest's web-search (discovery)
-            # phase runs. Reading known communities always runs; searching for
-            # new ones is metered, so it runs less often.
-            "discovery_schedule": vals.get(KEY_DISCOVERY) or DEFAULT_DISCOVERY,
-            "discovery_options": ["every_run", "every_6h", "every_12h",
-                                  "daily", "weekly", "off"],
-            "last_search": vals.get(KEY_DISCOVERY_LAST_RUN),
-        }
-
-    @app.post("/api/schedule")
-    def api_schedule_save(payload: dict, _: None = Depends(require_auth)) -> dict[str, Any]:
-        from circle_leads.storage.settings_store import (
-            set_schedule, get_schedule, set_discovery_schedule, get_discovery_schedule,
-        )
-        try:
-            if payload.get("schedule"):
-                set_schedule(db, str(payload["schedule"]))
-            if payload.get("discovery_schedule"):
-                set_discovery_schedule(db, str(payload["discovery_schedule"]))
-        except ValueError as exc:
-            raise HTTPException(400, str(exc))
-        log_activity_holder(
-            kind="review",
-            summary=(f"Harvest schedule {get_schedule(db)}, "
-                     f"discovery {get_discovery_schedule(db)}"))
-        return {"ok": True, "schedule": get_schedule(db),
-                "discovery_schedule": get_discovery_schedule(db)}
-
-    @app.get("/api/config")
-    def api_config(_: None = Depends(require_auth)) -> dict[str, Any]:
-        data = requirements_to_dict(requirements())
-        data["llm_available"] = bool(
-            os.environ.get("OPENAI_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
-        )
-        data["llm_provider"] = (
-            "OpenAI" if os.environ.get("OPENAI_API_KEY")
-            else "Anthropic" if os.environ.get("ANTHROPIC_API_KEY") else None
-        )
-        data["search_backend"] = (
-            "Exa" if os.environ.get("EXA_API_KEY")
-            else "Brave" if os.environ.get("BRAVE_API_KEY")
-            else "SerpAPI" if os.environ.get("SERPAPI_API_KEY")
-            else "DuckDuckGo (keyless — fewer results; set EXA_API_KEY)"
-        )
-        return data
-
-    @app.post("/api/config")
-    def api_config_save(payload: dict, _: None = Depends(require_auth)) -> dict[str, Any]:
-        # Never let the editor change what content is excluded, or the rate
-        # limits -- those are safety settings, not lead tuning. Keep current.
-        current = requirements_to_dict(requirements())
-        payload.pop("llm_available", None)
-        for locked in ("excluded_content", "rate_limit"):
-            payload[locked] = current[locked]
-        # Persist to the DB (writable) rather than the packaged YAML, which is
-        # read-only on a serverless deploy (/var/task -> Errno 30).
-        from circle_leads.config.settings import validate_requirements
-        from circle_leads.storage.settings_store import set_requirements_override
-        try:
-            new_req = validate_requirements(payload)
-        except Exception as exc:  # noqa: BLE001 - report validation errors to UI
-            raise HTTPException(400, f"Invalid config: {exc}")
-        # Store the canonical serialized form so it round-trips exactly.
-        canonical = requirements_to_dict(new_req)
-        set_requirements_override(db, canonical)
-        requirements_holder["req"] = new_req
-        log_activity_holder(kind="review", summary="Lead requirements updated via dashboard")
-        return {"ok": True, "config": canonical}
 
     # Remote Browser (server-hosted interactive Chromium PoC) and the Session
     # Replay experiment (Version B) were removed outright -- both were
@@ -1672,6 +742,11 @@ def create_app(
     # circle_leads/remote_browser/ package and web/replay_store.py are
     # untouched (replay_store.py is live: scanning.py and the auto-join bot
     # use store_session/load_cookies directly, no HTTP route needed).
+
+    from circle_leads.web import sections, ui
+
+    app.include_router(ui.router)
+    sections.register(app)
 
     return app
 
