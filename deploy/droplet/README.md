@@ -1,5 +1,13 @@
 # warmr-1 (DigitalOcean, sgp1)
 
+> **Powered off on 2026-09-29. This is now the rollback runbook.** The worker and
+> the watcher moved to openclawlaunch.com — see
+> [`../openclaw/README.md`](../openclaw/README.md). The droplet still exists,
+> its units are disabled so a power-on cannot start a second worker against the
+> same database, and a snapshot `warmr-1-pre-openclaw-2026-09-29` was taken
+> first. Restoring that snapshot gives a droplet with a **new IP**, so the
+> Circle session has to be established again.
+
 Three services, one droplet, one address.
 
 | Unit | What it does | Request budget |
