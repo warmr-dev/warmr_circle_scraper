@@ -191,6 +191,14 @@ class Database:
             # P25: one host = one community. Backfilled by the manual migration
             # on Postgres; here it only has to exist so writes do not fail.
             ("communities", "host", "VARCHAR(255)"),
+            # P28: what Vini said about each lead (attention_acks is a new
+            # table, so create_all makes it).
+            ("leads", "vini_status", "VARCHAR(32)"),
+            ("leads", "vini_reason", "TEXT"),
+            ("leads", "vini_ref", "VARCHAR(64)"),
+            ("leads", "vini_attempts", "INTEGER NOT NULL DEFAULT 0"),
+            ("leads", "vini_last_attempt_at", "TIMESTAMP"),
+            ("leads", "vini_responded_at", "TIMESTAMP"),
         ]
         # replay_sessions is a whole new table (Version B experiment); create_all
         # handles it, so no per-column entry is needed here.

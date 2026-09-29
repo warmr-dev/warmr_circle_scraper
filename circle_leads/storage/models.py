@@ -292,6 +292,20 @@ class Lead(Base):
     # When this lead was POSTed to the production Vini ingest endpoint.
     external_synced_at: Mapped[datetime | None] = mapped_column(DateTime)
 
+    # What Vini said the last time we sent this lead. external_synced_at is set
+    # both for a lead Vini published and for one it parked, so it cannot say
+    # which leads the client actually sees; this can.
+    # accepted | duplicate | held (parked) | rejected | error (no answer)
+    vini_status: Mapped[str | None] = mapped_column(String(32), index=True)
+    # Vini's own words: decision + holdReason for a hold, the error otherwise.
+    vini_reason: Mapped[str | None] = mapped_column(Text)
+    # The id Vini returned for its row, when it returns one.
+    vini_ref: Mapped[str | None] = mapped_column(String(64))
+    vini_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    vini_last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime)
+    # Only when Vini answered; a transport error leaves it alone.
+    vini_responded_at: Mapped[datetime | None] = mapped_column(DateTime)
+
     post: Mapped[Post] = relationship(back_populates="lead")
 
 
@@ -309,7 +323,7 @@ class ActivityLog(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
 
-    # triage | ingest | classify | discover | export | purge | auth
+    # triage | ingest | classify | discover | export | join | purge | auth
     kind: Mapped[str] = mapped_column(String(32), index=True)
     # info | success | warning | error
     level: Mapped[str] = mapped_column(String(16), default="info", index=True)
@@ -338,6 +352,23 @@ class Setting(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=utcnow, onupdate=utcnow
     )
+
+
+class AttentionAck(Base):
+    """An operator's "seen it" on one item of the dashboard's attention list.
+
+    ``fingerprint`` is the state the item was in when it was acknowledged. The
+    item comes back as soon as that state changes, so acknowledging "session
+    expired" on a community cannot hide a different problem there later.
+    """
+
+    __tablename__ = "attention_acks"
+
+    rule: Mapped[str] = mapped_column(String(64), primary_key=True)
+    item_key: Mapped[str] = mapped_column(String(255), primary_key=True)
+    fingerprint: Mapped[str] = mapped_column(String(64))
+    note: Mapped[str | None] = mapped_column(Text)
+    acked_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
 class ScrapeRun(Base):
@@ -395,6 +426,13 @@ class JoinStatus(str, enum.Enum):
     # date of birth. A person decides; the queue must stop spending visits on
     # it in the meantime.
     NEEDS_HUMAN = "needs_human"
+
+
+# How join_status_detail starts when the bot stopped on a community without a
+# definitive outcome (a login it does not know, a challenge, an unknown page).
+# join_status stays not_attempted so the queue brings the bot back; this prefix
+# is how the dashboard tells such a row from one nobody has tried.
+JOIN_HANDOFF_PREFIX = "handoff:"
 
 
 class ConnectionState(str, enum.Enum):
