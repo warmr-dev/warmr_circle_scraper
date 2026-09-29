@@ -14,7 +14,7 @@ import logging
 import os
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from circle_leads.connector.credentials import decrypt, encrypt
 from circle_leads.storage.database import Database
@@ -29,7 +29,8 @@ _PLAINTEXT_PREFIX = "plain:"
 
 
 class ReplayKeyMissing(RuntimeError):
-    """Kept for compatibility; no longer raised (plaintext fallback is used)."""
+    """Encrypting stored sessions was asked for with no CIRCLE_CRED_KEY set.
+    Storing never raises it: without a key a session is stored as plaintext."""
 
 
 def _key() -> str | None:
@@ -110,6 +111,36 @@ def _watch_now(db: Database, host: str) -> None:
         watch_member_now(db, host)
     except Exception:  # noqa: BLE001
         logger.exception("could not put %s on the 2-minute watch", host)
+
+
+def encrypt_plaintext_sessions(db: Database) -> int:
+    """Encrypt every session still stored as plaintext; returns how many.
+
+    Run once, where CIRCLE_CRED_KEY is set, after every service that reads
+    sessions has the same key: one without it reads an encrypted session as
+    no session at all (_deserialize). Only the blob changes -- the account,
+    the source, the last result and the timestamps stay as they were.
+    """
+    key = _key()
+    if not key:
+        raise ReplayKeyMissing("CIRCLE_CRED_KEY is not set: there is nothing to encrypt with.")
+    done = 0
+    with db.session() as s:
+        rows = s.execute(select(ReplaySession.id, ReplaySession.host, ReplaySession.encrypted_cookies)
+                         .where(ReplaySession.encrypted_cookies.like(_PLAINTEXT_PREFIX + "%"))).all()
+        for row_id, host, blob in rows:
+            cookies = json.loads(blob[len(_PLAINTEXT_PREFIX):])
+            sealed = encrypt(json.dumps(cookies), key)
+            if json.loads(decrypt(sealed, key)) != cookies:
+                raise RuntimeError(f"{host}: the encrypted session does not read back; nothing written")
+            s.execute(update(ReplaySession).where(ReplaySession.id == row_id).values(
+                encrypted_cookies=sealed,
+                # Named, so onupdate leaves it alone: the dashboard reads it as
+                # the time the session was last refreshed.
+                updated_at=ReplaySession.updated_at,
+            ))
+            done += 1
+    return done
 
 
 def load_cookies(db: Database, host: str) -> list[dict] | None:

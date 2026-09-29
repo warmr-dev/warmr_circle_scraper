@@ -1471,6 +1471,25 @@ def check_schema_cmd(ctx):
     click.echo("schema ok: every mapped table and column is there")
 
 
+@cli.command("encrypt-sessions")
+@click.pass_context
+def encrypt_sessions_cmd(ctx):
+    """Encrypt every session cookie still stored as plaintext (CIRCLE_CRED_KEY).
+
+    Run once, after every service that reads sessions -- the dashboard, the
+    worker, the watcher -- has the same key: one without it reads an
+    encrypted session as none at all.
+    """
+    from circle_leads.web.replay_store import ReplayKeyMissing, encrypt_plaintext_sessions
+
+    try:
+        done = encrypt_plaintext_sessions(ctx.obj["db"])
+    except ReplayKeyMissing as exc:
+        click.echo(str(exc), err=True)
+        ctx.exit(1)
+    click.echo(f"encrypted {done} session(s)")
+
+
 @cli.command("worker")
 @click.option("--poll-seconds", type=int, default=5, show_default=True,
               help="Seconds to sleep when the job queue is empty.")
