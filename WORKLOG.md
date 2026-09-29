@@ -19,6 +19,34 @@
 
 ---
 
+## 2026-09-29 — Выкатка: новый дашборд на Vercel, воркер и наблюдатель на `842840a`
+
+- **Что:**
+  - p29 применена на проде; бэкфилл дал `(not recorded)` 25, `main` 8,
+    `test` 7, `4` 2.
+  - Пользователь слил PR #43, #45 и #44 (17:01–17:02 UTC). Vercel собрал
+    `main` успешно: `/api/health` отвечает 200, `/` уводит на `/login`.
+  - Claude по разрешению пользователя выкатил `main` на `warmr-1`
+    (`deploy/droplet/deploy_release.sh`, 17:05 UTC):
+    - новый релиз `/opt/warmr/releases/842840a` с Playwright;
+    - `check-schema` пройден;
+    - `warmr-worker` и `warmr-watcher` перезапущены на новом коде;
+    - в базе появились `worker_runtime` и `watcher_runtime` с
+      `code_version: 842840a`;
+    - установлены `warmr-join.service` и `.timer`, **таймер выключен**.
+  - Пробный прогон `auto-join --driver cdp --account 4 --dry-run` видит в
+    очереди 7 сообществ.
+- **Зачем:** выкатка PR #43 / #44 / #45.
+- **Результат:** сделано. Ошибок в журналах нет; единственная ошибка
+  опроса — `momentumlifestyle` (SSL), она была и до выкатки.
+  - Живое вступление не запускалось: авторежим не дал Claude его начать
+    («Real-World Transactions»).
+  - Первый прогон на одном сообществе запускает пользователь (команду
+    печатает скрипт выкатки); таймер включается после него.
+- **Кто:** Erksh (слияния, p29) + Claude (выкатка).
+- **Откат:** `ln -sfn /opt/warmr/releases/77028ee /opt/warmr/current`, то же
+  для `watcher`, затем `systemctl restart warmr-worker warmr-watcher`.
+
 ## 2026-09-29 — Вступления на дроплете: код готов, не выкачен
 
 - **Что:** ветка `feat/join-on-droplet`.
