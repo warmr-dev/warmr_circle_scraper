@@ -1263,3 +1263,117 @@ def test_a_handoff_does_not_claim_an_account(monkeypatch):
     monkeypatch.setattr(joiner, "sleep_between_attempts", lambda pacing: None)
     joiner.run_auto_join(db, account="test")
     assert _account_of(db, "a") is None
+
+
+# --- The droplet's browser (driver="cdp") -----------------------------------------
+#
+# 2026-09-29: joins move from the Mac's Ego Lite to warmr-browser on the
+# droplet, as account 4 whose mailbox the bot can read. The walk itself is
+# tested in tests/test_cdp_join.py; these pin what the batch does with it.
+
+class _FakeCdpPage:
+    def __init__(self, closed=False):
+        self.closed = closed
+
+    def is_closed(self):
+        return self.closed
+
+
+@pytest.fixture
+def cdp(monkeypatch):
+    """Account 4, no Ego profile, a browser that is there, and a walk the
+    test scripts."""
+    from contextlib import contextmanager
+
+    from circle_leads.join import cdp_driver, cdp_join
+
+    monkeypatch.setenv("CIRCLE_EMAIL4", "bot+4@example.com")
+    monkeypatch.setenv("CIRCLE_PASSWORD4", "pw")
+    monkeypatch.delenv("CIRCLE_EGO_PROFILE4", raising=False)
+    monkeypatch.delenv("CIRCLE_MAIL_USER", raising=False)
+    monkeypatch.delenv("CIRCLE_MAIL_APP_PASSWORD", raising=False)
+    monkeypatch.setattr(joiner, "sleep_between_attempts", lambda pacing: None)
+    page = _FakeCdpPage()
+    state = {"page": page, "outcomes": [], "calls": []}
+
+    @contextmanager
+    def attach(url):
+        state["cdp_url"] = url
+        yield page
+
+    def join_community(page_, url, **kw):
+        state["calls"].append((url, kw))
+        return state["outcomes"].pop(0)
+
+    monkeypatch.setattr(cdp_driver, "attach", attach)
+    monkeypatch.setattr(cdp_join, "join_community", join_community)
+    return state
+
+
+def test_the_droplet_driver_needs_no_ego_profile_and_keeps_the_account(cdp, monkeypatch):
+    db = _db()
+    _seed(db, "a", icp_score=10)
+    seen = {}
+    monkeypatch.setattr(joiner, "connect_host",
+                        lambda db_, host, cookies, **kw: seen.update(host=host, kw=kw))
+    cdp["outcomes"] = [EgoJoinResult(status="joined", detail="Clicked \"Join\"", cookies=[
+        {"name": "_circle_session", "value": "s", "domain": "a.circle.so"}])]
+
+    result = joiner.run_auto_join(db, account="4", driver="cdp")
+
+    assert result.joined == ["a"]
+    assert cdp["cdp_url"] == "http://127.0.0.1:9222"
+    url, kw = cdp["calls"][0]
+    assert url == "https://a.circle.so" and kw["email"] == "bot+4@example.com"
+    assert kw["fetch_code"] is None          # no mailbox configured in this test
+    assert seen == {"host": "a.circle.so", "kw": {"member_label": "4"}}
+    with db.session() as s:
+        row = s.scalar(select(Community).where(Community.slug == "a"))
+        assert (row.join_status, row.join_account) == (JoinStatus.JOINED.value, "4")
+
+
+def test_a_login_stopped_by_the_code_is_a_handoff_not_a_membership(cdp):
+    db = _db()
+    _seed(db, "a", icp_score=10)
+    cdp["outcomes"] = [EgoJoinResult(status="login_code_needed",
+                                     detail="Circle asks for the emailed code at sign-in; none arrived")]
+    result = joiner.run_auto_join(db, account="4", driver="cdp")
+    assert "login_code_needed" in result.handoffs["a"]
+    with db.session() as s:
+        row = s.scalar(select(Community).where(Community.slug == "a"))
+        assert row.join_status == JoinStatus.NOT_ATTEMPTED.value
+        assert row.join_account is None
+        assert row.join_status_detail.startswith("handoff: login_code_needed")
+
+
+def test_a_browser_that_went_away_stops_the_batch(cdp):
+    db = _db()
+    _seed(db, "a", icp_score=20)
+    _seed(db, "b", icp_score=10)
+    cdp["page"].closed = True
+    cdp["outcomes"] = [EgoJoinResult(status="driver_error", detail="Target closed")]
+    result = joiner.run_auto_join(db, account="4", driver="cdp")
+    assert result.stopped_for == "a"
+    assert result.stop_reason.startswith("browser error")
+    assert len(cdp["calls"]) == 1            # b was never visited
+
+
+def test_the_mailbox_is_used_when_it_is_configured(cdp, monkeypatch):
+    db = _db()
+    _seed(db, "a", icp_score=10)
+    monkeypatch.setenv("CIRCLE_MAIL_USER", "bot@example.com")
+    monkeypatch.setenv("CIRCLE_MAIL_APP_PASSWORD", "app")
+    asked = []
+    monkeypatch.setattr("circle_leads.join.email_code.fetch_login_code",
+                        lambda recipient, since, timeout_seconds: asked.append(
+                            (recipient, timeout_seconds)) or "123456")
+    cdp["outcomes"] = [EgoJoinResult(status="invite_skip", detail="private")]
+    joiner.run_auto_join(db, account="4", driver="cdp", code_timeout=99)
+    fetch = cdp["calls"][0][1]["fetch_code"]
+    assert fetch(datetime(2026, 9, 29)) == "123456"
+    assert asked == [("bot+4@example.com", 99)]
+
+
+def test_an_unknown_driver_is_refused():
+    with pytest.raises(ValueError):
+        joiner.run_auto_join(_db(), driver="selenium")

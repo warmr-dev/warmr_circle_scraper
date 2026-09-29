@@ -70,3 +70,23 @@ def test_an_old_sqlite_database_gains_the_join_account(tmp_path):
         conn.execute("CREATE TABLE communities (id INTEGER PRIMARY KEY, slug TEXT, url TEXT)")
     db = Database(f"sqlite:///{path}")
     assert "join_account" in {c["name"] for c in inspect(db.engine).get_columns("communities")}
+
+
+def test_check_schema_names_what_a_database_lacks(tmp_path, monkeypatch):
+    """The deploy's guard: a release must not switch onto a database without
+    its migrations (SKIP_DB_INIT=true never adds a column by itself)."""
+    from click.testing import CliRunner
+
+    from circle_leads.cli.main import cli
+    from circle_leads.storage.schema_check import missing_columns
+
+    path = tmp_path / "full.db"
+    full = Database(f"sqlite:///{path}")
+    assert missing_columns(full.engine) == []
+
+    with sqlite3.connect(path) as conn:
+        conn.execute("ALTER TABLE communities DROP COLUMN join_account")
+    monkeypatch.setenv("SKIP_DB_INIT", "true")
+    result = CliRunner().invoke(cli, ["--db", f"sqlite:///{path}", "check-schema"])
+    assert result.exit_code == 1
+    assert "communities.join_account" in result.output

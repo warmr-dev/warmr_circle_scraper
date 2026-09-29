@@ -445,6 +445,131 @@ def _link_connection(db: Database, host: str, community_id: int, account_key: st
             row.member_label = account_key
 
 
+class _BatchStop(Exception):
+    """The browser itself failed: nothing more can be visited in this batch."""
+
+    def __init__(self, reason: str, *, pages: int = 0):
+        super().__init__(reason)
+        self.pages = pages
+
+
+class _EgoVisitor:
+    """One community per ``ego-browser`` call, on the Mac's Ego Lite.
+
+    The driver cannot answer profile questions itself: it hands them back as
+    ``profile_form`` and is run a second time with the answers.
+    """
+
+    label = "ego-browser bridge error"
+
+    def __init__(self, db: Database, acct, space_id: int, *, screenshot_dir: str | None):
+        self.db, self.acct, self.space_id = db, acct, space_id
+        self.screenshot_dir = screenshot_dir
+        self.form_llm = None  # built on the first profile form that needs it
+
+    def visit(self, candidate: dict) -> tuple[EgoJoinResult, int]:
+        def once(answers=None):
+            return attempt_join(
+                self.space_id, candidate["url"], email=self.acct.email,
+                password=self.acct.password, screenshot_dir=self.screenshot_dir, answers=answers,
+            )
+
+        try:
+            outcome = once()
+        except EgoBrowserError as exc:
+            raise _BatchStop(str(exc)) from exc
+        pages = 1
+        if outcome.status != "profile_form":
+            return outcome, pages
+        _log_attempt(candidate, outcome.status, outcome.detail, self.acct.key)
+        fields = [FormField.from_payload(f) for f in (outcome.form or {}).get("fields", [])]
+        if self.form_llm is None:
+            self.form_llm = make_form_llm()
+        resolution = resolve_form(
+            self.db, self.acct.key, fields, host=_host_of(candidate["url"]),
+            community_id=candidate["id"], llm=self.form_llm,
+        )
+        if not resolution.complete:
+            return EgoJoinResult(
+                status="profile_incomplete",
+                detail="Required profile question(s) the bot may not answer: "
+                       + ", ".join(f'"{f.label}"' for f in resolution.needs_human)
+                       + " -- answer them in join_form_answers, then run again.",
+            ), pages
+        try:
+            outcome = once(resolution.answers)
+        except EgoBrowserError as exc:
+            raise _BatchStop(str(exc), pages=pages) from exc
+        pages += 1
+        if outcome.status == "profile_form":
+            outcome = EgoJoinResult(
+                status="profile_incomplete",
+                detail="Filled every required question, Circle still shows them: "
+                       + ", ".join(f.label for f in fields),
+            )
+        return outcome, pages
+
+
+class _CdpVisitor:
+    """One community per walk in the droplet's browser (join/cdp_join.py).
+
+    The emailed code comes out of the bot's mailbox and the profile answers
+    out of the answer database while the page waits: one visit each.
+    """
+
+    label = "browser error"
+
+    def __init__(self, db: Database, acct, page, *, screenshot_dir: str | None,
+                 code_timeout: int):
+        self.db, self.acct, self.page = db, acct, page
+        self.screenshot_dir = screenshot_dir
+        self.code_timeout = code_timeout
+        self.form_llm = None
+
+    def _mailbox(self):
+        """The code reader, or None when this host has no mailbox configured."""
+        import os
+
+        from circle_leads.join.email_code import fetch_login_code
+
+        if not (os.environ.get("CIRCLE_MAIL_USER") and os.environ.get("CIRCLE_MAIL_APP_PASSWORD")):
+            return None
+
+        def fetch(since):
+            return fetch_login_code(self.acct.email, since=since, timeout_seconds=self.code_timeout)
+
+        return fetch
+
+    def _browser_gone(self) -> bool:
+        try:
+            if self.page.is_closed():
+                return True
+            browser = self.page.context.browser
+            return browser is not None and not browser.is_connected()
+        except Exception:  # noqa: BLE001 - asking a dead browser anything fails
+            return True
+
+    def visit(self, candidate: dict) -> tuple[EgoJoinResult, int]:
+        from circle_leads.join.cdp_join import join_community
+
+        def answer_profile(fields):
+            if self.form_llm is None:
+                self.form_llm = make_form_llm()
+            return resolve_form(
+                self.db, self.acct.key, fields, host=_host_of(candidate["url"]),
+                community_id=candidate["id"], llm=self.form_llm,
+            )
+
+        outcome = join_community(
+            self.page, candidate["url"], email=self.acct.email, password=self.acct.password,
+            fetch_code=self._mailbox(), answer_profile=answer_profile,
+            screenshot_dir=self.screenshot_dir,
+        )
+        if outcome.status == "driver_error" and self._browser_gone():
+            raise _BatchStop(f"the browser went away: {outcome.detail}", pages=1)
+        return outcome, 1
+
+
 def run_auto_join(
     db: Database,
     *,
@@ -455,24 +580,34 @@ def run_auto_join(
     screenshot_dir: str | None = None,
     dry_run: bool = False,
     account: str = "main",
+    driver: str = "ego",
+    cdp_url: str | None = None,
+    code_timeout: int = 420,
 ) -> JoinBatchResult:
     """Attempt to join every selected candidate in order.
 
     A candidate that needs a human is recorded and skipped, not treated as
-    the end of the batch -- only the daily cap or a broken ego-browser bridge
-    stops the run. See ``_handoff_counts`` for why (one stuck host used to
-    block the queue on every subsequent run too).
+    the end of the batch -- only the daily cap or a broken browser stops the
+    run. See ``_handoff_counts`` for why (one stuck host used to block the
+    queue on every subsequent run too).
 
-    The account runs in its own Ego Lite profile (accounts.py); a run with no
-    profile configured for it is refused. When Circle's new-member profile
-    step asks required questions, they are answered from the shared form
-    database (forms.py) and the page is visited a second time with the answers.
+    ``driver``:
+
+    - ``ego`` -- the Mac's Ego Lite; the account runs in its own Ego profile
+      (accounts.py) and a run with no profile configured for it is refused.
+      Profile questions are answered from the shared form database (forms.py)
+      and the page is visited a second time with the answers.
+    - ``cdp`` -- the droplet's browser (warmr-browser.service, ``cdp_url``).
+      The emailed code is read from the bot's mailbox (``code_timeout``
+      seconds at most) and the questions are answered in the same visit.
 
     ``host`` is an operator override and is honoured whatever the queue order
     says: a host that has needed a human before is sorted to the back of the
     queue, and naming it is precisely how the operator retries it. See
     ``select_join_candidates``.
     """
+    if driver not in ("ego", "cdp"):
+        raise ValueError(f"Unknown join driver {driver!r} -- expected ego or cdp.")
     acct = resolve_account(account)
     pacing = pacing or JoinPacingConfig()
     # One snapshot of the attempt log for the whole batch: the candidate
@@ -488,7 +623,7 @@ def run_auto_join(
         return JoinBatchResult(space_id=space_id or 0)
 
     profile = acct.ego_profile
-    if not profile:
+    if driver == "ego" and not profile:
         raise RuntimeError(
             f"No Ego Lite profile configured for account {acct.key!r} -- set {acct.profile_var}. "
             "Refusing to run in the default profile: every account on one profile shares one "
@@ -503,12 +638,25 @@ def run_auto_join(
             "try again tomorrow or raise join_pacing.max_joins_per_day."
         )
 
+    if driver == "cdp":
+        from circle_leads.join.cdp_driver import DEFAULT_CDP_URL, attach
+
+        with attach(cdp_url or DEFAULT_CDP_URL) as page:
+            visitor = _CdpVisitor(db, acct, page, screenshot_dir=screenshot_dir,
+                                  code_timeout=code_timeout)
+            return _run_batch(db, candidates, acct, pacing, already_today,
+                              JoinBatchResult(space_id=0), visitor)
+
     sid = open_join_space(
         f"warmr auto-join ({acct.key} · {profile})", profile=profile, existing_space_id=space_id,
     )
-    result = JoinBatchResult(space_id=sid)
-    form_llm = None  # built on the first profile form that needs it
+    visitor = _EgoVisitor(db, acct, sid, screenshot_dir=screenshot_dir)
+    return _run_batch(db, candidates, acct, pacing, already_today,
+                      JoinBatchResult(space_id=sid), visitor)
 
+
+def _run_batch(db: Database, candidates: list[dict], acct, pacing: JoinPacingConfig,
+               already_today: int, result: JoinBatchResult, visitor) -> JoinBatchResult:
     for candidate in candidates:
         if already_today >= pacing.max_joins_per_day:
             result.stop_reason = "daily cap reached mid-batch (every page opened counts)"
@@ -522,47 +670,18 @@ def run_auto_join(
             result.skipped[candidate["slug"]] = dead
             continue
 
-        def visit(answers=None):
-            return attempt_join(
-                sid, candidate["url"], email=acct.email, password=acct.password,
-                screenshot_dir=screenshot_dir, answers=answers,
-            )
-
         try:
-            outcome = visit()
-            result.attempted.append(candidate["slug"])
-            already_today += 1
-            if outcome.status == "profile_form":
-                _log_attempt(candidate, outcome.status, outcome.detail, acct.key)
-                fields = [FormField.from_payload(f) for f in (outcome.form or {}).get("fields", [])]
-                if form_llm is None:
-                    form_llm = make_form_llm()
-                resolution = resolve_form(
-                    db, acct.key, fields, host=_host_of(candidate["url"]),
-                    community_id=candidate["id"], llm=form_llm,
-                )
-                if resolution.complete:
-                    outcome = visit(resolution.answers)
-                    already_today += 1
-                    if outcome.status == "profile_form":
-                        outcome = EgoJoinResult(
-                            status="profile_incomplete",
-                            detail="Filled every required question, Circle still shows them: "
-                                   + ", ".join(f.label for f in fields),
-                        )
-                else:
-                    outcome = EgoJoinResult(
-                        status="profile_incomplete",
-                        detail="Required profile question(s) the bot may not answer: "
-                               + ", ".join(f'"{f.label}"' for f in resolution.needs_human)
-                               + " -- answer them in join_form_answers, then run again.",
-                    )
-        except EgoBrowserError as exc:
-            logger.error("ego-browser bridge failed on %s: %s", candidate["slug"], exc)
+            outcome, pages = visitor.visit(candidate)
+        except _BatchStop as exc:
+            if exc.pages:
+                result.attempted.append(candidate["slug"])
+            logger.error("%s on %s: %s", visitor.label, candidate["slug"], exc)
             _record_visit(db, candidate, "bridge_error", str(exc), acct.key, level="error")
             result.stopped_for = candidate["slug"]
-            result.stop_reason = f"ego-browser bridge error: {exc}"
+            result.stop_reason = f"{visitor.label}: {exc}"
             break
+        result.attempted.append(candidate["slug"])
+        already_today += pages
 
         _log_attempt(candidate, outcome.status, outcome.detail, acct.key)
         _record_visit(db, candidate, outcome.status, outcome.detail, acct.key)

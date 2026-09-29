@@ -1,0 +1,38 @@
+[Unit]
+Description=Warmr joins: work the join queue as the bot account, in warmr-browser
+Documentation=https://github.com/warmr-dev/warmr_circle_scraper/blob/main/docs/joining.md
+After=network-online.target warmr-browser.service
+Wants=network-online.target warmr-browser.service
+OnFailure=warmr-alert@%n.service
+
+[Service]
+Type=oneshot
+User=warmr
+Group=warmr
+WorkingDirectory=/var/lib/warmr
+EnvironmentFile=/etc/warmr/warmr.env
+# CIRCLE_EMAIL4 / CIRCLE_PASSWORD4 and the bot mailbox (CIRCLE_MAIL_USER,
+# CIRCLE_MAIL_APP_PASSWORD): the emailed code is read here, not by a person.
+EnvironmentFile=/etc/warmr/warmr-join.env
+# The same request budget as the worker: one address, one budget.
+Environment=CIRCLE_GOVERNOR_FILE=/var/lib/warmr/circle-governor.json
+# The daily cap and the queue order read data/join_attempts.log under the
+# working directory. Screenshots of every stop go to join-shots/.
+ExecStart=/opt/warmr/current/venv/bin/circle-leads auto-join --driver cdp --account 4 --limit 5 --screenshot-dir /var/lib/warmr/join-shots
+# A visit can wait up to 7 minutes for Circle's code; five visits and the
+# pauses between them fit in well under this.
+TimeoutStartSec=90min
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/warmr
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+MemoryMax=512M
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=warmr-join

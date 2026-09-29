@@ -7,6 +7,7 @@ Three services, one droplet, one address.
 | `warmr-worker` | drains the scan-job queue, runs the scheduled harvest, enrichment, ICP | `circle-governor.json`, 20/min |
 | `warmr-watcher` | polls community feeds, triages new posts | `watch-governor.json`, 40/min |
 | `warmr-browser` | holds the join session: headed Chrome in a virtual display, CDP on `127.0.0.1:9222` | driven per join, see [`joining.md`](../../docs/joining.md) |
+| `warmr-join` (+ `.timer`, every 4 h) | works the join queue as account 4 in `warmr-browser`; reads the emailed code from the bot mailbox | the worker's `circle-governor.json` |
 
 ## Layout
 
@@ -32,7 +33,10 @@ From a checkout of `main` on a machine that has the repo:
       "install -d -o warmr -g warmr /opt/warmr/releases/<sha> && tar -x -C /opt/warmr/releases/<sha>"
 
 then build the venv, **apply any pending migration**, and only then switch the
-symlink and restart. The order matters: `SKIP_DB_INIT=true` means the code
+symlink and restart. `deploy/droplet/deploy_release.sh [ref]` does all of it
+from a Mac, and refuses to switch when `circle-leads check-schema` finds a
+column the database lacks. It installs the join units but leaves the timer
+off: turning joins on is a person's call. The order matters: `SKIP_DB_INIT=true` means the code
 never creates its own columns, so deploying code that knows about a column the
 database does not have turns into a silent failure -- that is exactly what
 happened with `read_outcome` on 2026-09-23.
