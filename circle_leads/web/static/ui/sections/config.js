@@ -4,7 +4,7 @@
 
 import { api } from '../api.js';
 import { $, ago, empty, html, num, pill, render, toast, when } from '../dom.js';
-import { JOB_STATE, JOB_STATE_TONE, SCHEDULE, STAGE, label } from '../labels.js';
+import { JOB_STATE, JOB_STATE_TONE, SCHEDULE, STAGE, STAGE_NOTE, label } from '../labels.js';
 
 export const title = 'Конфиг';
 export const subtitle = 'Расписания и правила лидов, которые читает воркер, и состояние сервисов.';
@@ -80,6 +80,7 @@ async function loadSchedules() {
             ${s.options.map((o) => html`<option value="${o}" ${o === s.value ? 'selected' : ''}>${label(SCHEDULE, o)}</option>`)}
             ${s.options.includes(s.value) ? '' : html`<option value="${s.value}" selected>${s.value}</option>`}
           </select>
+          ${STAGE_NOTE[key] ? html`<span class="muted small">${STAGE_NOTE[key]}</span>` : ''}
         </label>`)}
       <div class="row"><button class="btn" type="submit">Сохранить расписания</button></div>
     </form>`);
@@ -182,17 +183,27 @@ function snapshot(name, snap) {
     </div>`;
 }
 
+// The harvest's own summary, in words; any other stage's result as it came.
+function stageResult(key, result) {
+  if (!result) return '';
+  if (key === 'harvest') {
+    return html`лидов по сессии: <b>${num(result.private_leads ?? 0)}</b> · из открытых разделов: <b>${num(result.public_leads ?? 0)}</b>
+      <div class="muted">прочитано открытых сообществ ${num(result.communities_read ?? 0)} · новых найдено ${num(result.new_communities ?? 0)}${result.searched ? ' · был поиск' : ''}</div>`;
+  }
+  return html`<code class="compact">${JSON.stringify(result)}</code>`;
+}
+
 function stageRow(key, s) {
   const err = s.last_error;
   const failedLast = err && (!s.last_finish || new Date(err.at) > new Date(s.last_finish));
   return html`
     <tr>
-      <td>${STAGE[key] || key}</td>
+      <td>${STAGE[key] || key}${STAGE_NOTE[key] ? html`<div class="muted small">${STAGE_NOTE[key]}</div>` : ''}</td>
       <td>${label(SCHEDULE, s.schedule)}</td>
       <td class="small">${s.last_run ? html`${when(s.last_run)}<div class="muted">${ago(s.last_run)}</div>` : '—'}</td>
       <td class="small">${s.last_finish ? html`${when(s.last_finish)}<div class="muted">${ago(s.last_finish)}</div>` : '—'}</td>
       <td class="small">${err ? html`${pill(failedLast ? 'упал' : 'была ошибка', failedLast ? 'critical' : 'muted')} <span class="muted">${when(err.at)}</span><div class="detail">${err.error}</div>` : '—'}</td>
-      <td class="small">${s.last_result ? html`<code class="compact">${JSON.stringify(s.last_result)}</code>` : ''}${key === 'icp_classification' && s.enrichment_moved_at ? html`<div class="muted">обогащение: курсор ${s.enrichment_cursor}, сдвинулся ${ago(s.enrichment_moved_at)}</div>` : ''}</td>
+      <td class="small">${stageResult(key, s.last_result)}${key === 'icp_classification' && s.enrichment_moved_at ? html`<div class="muted">обогащение: курсор ${s.enrichment_cursor}, сдвинулся ${ago(s.enrichment_moved_at)}</div>` : ''}</td>
     </tr>`;
 }
 

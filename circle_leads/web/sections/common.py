@@ -6,12 +6,16 @@ to cannot disagree. Everything here runs on SQLite (the tests) and Postgres.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from sqlalchemy import and_, case, exists, func, or_, select
 
 from circle_leads.reach import has_session, on_circle
-from circle_leads.storage.models import Community, JoinStatus, Lead, Post, ReplaySession
+from circle_leads.storage.models import (
+    CircleConnection, Community, ConnectionState, JoinStatus, Lead, Post, ReplaySession,
+    WatchState,
+)
 
 # What the push stores in Lead.vini_status (circle_leads/export/vini_ingest.py).
 VINI_STATUSES = ("accepted", "duplicate", "held", "rejected", "error")
@@ -64,6 +68,65 @@ def access_since(start):
         exists(select(ReplaySession.id).where(
             ReplaySession.host == Community.host, ReplaySession.created_at >= start)),
     )
+
+
+# A stored session's label names one of our accounts only when it looks like
+# one: a join bot key (main, test, 3..10) or "client". Older rows carry the
+# community's own name there ("Speak_ Roblox", "OTTO-MATES"), which says
+# nothing about whose login it is.
+_ACCOUNT_LABEL = re.compile(r"^(main|test|client|\d{1,2})\b", re.IGNORECASE)
+
+
+def account_label(label: str | None) -> str | None:
+    label = (label or "").strip()
+    return label if _ACCOUNT_LABEL.match(label) else None
+
+
+def account_of(join_account: str | None, session_label: str | None) -> str | None:
+    """Which of our accounts is the member: the recorded join account first,
+    then a session label that names an account."""
+    return join_account or account_label(session_label)
+
+
+# The watcher's answers that mean the feed was read.
+FEED_OK = ("ok", "not_modified")
+
+
+def feed_reads():
+    """The watcher's last check of this community's feed was answered."""
+    return exists(select(WatchState.id).where(
+        WatchState.community_id == Community.id, WatchState.last_status.in_(FEED_OK)))
+
+
+def feed_reads_with_session():
+    return exists(select(WatchState.id).where(
+        WatchState.community_id == Community.id, WatchState.mode == "cookie",
+        WatchState.last_status.in_(FEED_OK)))
+
+
+def session_reads():
+    """A stored session whose last cookie scan read the community.
+
+    The scan (circle_leads/scanning.py) runs inside the scheduled harvest and
+    reads every space the member sees, comments included; ``connected`` is what
+    it leaves behind when the session was accepted.
+    """
+    return and_(has_session(), exists(select(CircleConnection.id).where(
+        CircleConnection.host == Community.host,
+        CircleConnection.state == ConnectionState.CONNECTED.value)))
+
+
+def reading():
+    """We read this community now: its feed answers, or its session works.
+
+    Membership is not needed for this -- an open community is read
+    anonymously -- which is why "reading" is larger than "inside".
+    """
+    return or_(feed_reads(), session_reads())
+
+
+def reading_with_session():
+    return or_(session_reads(), feed_reads_with_session())
 
 
 def segment_expr():

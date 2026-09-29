@@ -90,3 +90,31 @@ def test_the_panel_has_leads_and_activity_under_any_name(tmp_path, monkeypatch):
     assert panel["session"]["cookie_count"] == 2
     assert "encrypted_cookies" not in str(panel)
     assert client.get("/api/dash/communities/999999").status_code == 404
+
+
+def test_a_person_can_say_which_account_is_the_member(tmp_path, monkeypatch):
+    """For a join made by hand, or one from before the account was kept."""
+    from sqlalchemy import select
+
+    from circle_leads.storage.models import Community, ReplaySession
+    from tests.dash_fixtures import session_for
+
+    client, db, _app = make_app(tmp_path, monkeypatch)
+    with db.session() as s:
+        cid = community(s, "manual", host="manual.circle.so", join_status="joined").id
+        session_for(s, "manual.circle.so")
+    r = client.post(f"/api/dash/communities/{cid}/account", json={"account": " test "})
+    assert r.status_code == 200 and r.json()["account"] == "test"
+    with db.session() as s:
+        assert s.get(Community, cid).join_account == "test"
+        assert s.scalar(select(ReplaySession.member_label).where(
+            ReplaySession.host == "manual.circle.so")) == "test"
+    assert client.get(f"/api/dash/communities/{cid}").json()["community"]["join_account"] == "test"
+
+    assert client.post(f"/api/dash/communities/{cid}/account",
+                       json={"account": "x" * 33}).status_code == 400
+    assert client.post("/api/dash/communities/999999/account",
+                       json={"account": "test"}).status_code == 404
+    client.post(f"/api/dash/communities/{cid}/account", json={"account": ""})
+    with db.session() as s:
+        assert s.get(Community, cid).join_account is None

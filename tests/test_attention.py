@@ -117,6 +117,52 @@ def test_a_dead_session_but_not_a_cloudflare_block_or_a_site_that_left_circle(ap
     assert _keys(client, "session_cloudflare") == {"conn:cf.circle.so"}
 
 
+def test_a_dead_session_says_which_account_can_refresh_it(app):
+    """Only the account that is the member can bring fresh cookies back."""
+    from sqlalchemy import select
+
+    from circle_leads.storage.models import ReplaySession
+
+    client, db, app_ = app
+    with db.session() as s:
+        community(s, "joined", host="joined.circle.so", join_account="test")
+        connection(s, "joined.circle.so", "session_expired", "Session cookie invalid")
+        connection(s, "labelled.circle.so", "session_expired", "Session cookie invalid")
+        session_for(s, "labelled.circle.so")
+        s.scalar(select(ReplaySession).where(
+            ReplaySession.host == "labelled.circle.so")).member_label = "main"
+        connection(s, "nobody.circle.so", "session_expired", "Session cookie invalid")
+    _clear_cache(app_)
+    titles = {i["key"]: i["title"] for i in _rules(client)["session_dead"]["items"]}
+    assert titles["conn:joined.circle.so"].endswith("обновить под аккаунтом test")
+    assert titles["conn:labelled.circle.so"].endswith("обновить под аккаунтом main")
+    assert titles["conn:nobody.circle.so"].endswith("аккаунт не записан")
+
+
+def test_a_feed_refusing_a_session_the_scan_still_reads_is_not_a_dead_session(app):
+    """2026-09-29: four member communities were read by the cookie scan that
+    morning while the watcher's feed request with the same cookies got 401
+    280 times in a row. Telling the operator to refresh those cookies was
+    wrong; the feed request is what fails."""
+    client, db, app_ = app
+    with db.session() as s:
+        live = community(s, "live", host="live.circle.so", join_status="joined")
+        live_id = live.id
+        watch(s, live, mode="cookie", last_status="unauthorized", consecutive_errors=284)
+        session_for(s, "live.circle.so")
+        connection(s, "live.circle.so", "connected", "76 post(s), 0 lead(s) from 2/2 space(s)",
+                   last_sync_at=NOW - timedelta(hours=3))
+        dead = community(s, "dead", host="dead.circle.so", join_status="joined")
+        watch(s, dead, mode="cookie", last_status="unauthorized", consecutive_errors=9)
+        session_for(s, "dead.circle.so")
+    _clear_cache(app_)
+    rules = _rules(client)
+    assert {i["key"] for i in rules["session_dead"]["items"]} == {"conn:dead.circle.so"}
+    feed = rules["watch_cookie_feed"]["items"]
+    assert [i["key"] for i in feed] == [f"watchfeed:{live_id}"]
+    assert "284 раза подряд" in feed[0]["title"]
+
+
 def test_the_watcher_failing_and_a_member_community_switched_off(app):
     client, db, app_ = app
     with db.session() as s:

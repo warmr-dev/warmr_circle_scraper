@@ -44,6 +44,20 @@ function sessionForm(host) {
     </form>`;
 }
 
+// Which of our accounts is the member: the one whose cookies can be
+// refreshed here. Free text, with the join bot's own keys suggested.
+function accountForm(account, sessionLabel) {
+  const note = sessionLabel && sessionLabel !== account
+    ? html`<div class="muted small">в сессии записано: ${sessionLabel}</div>` : '';
+  return html`
+    <form class="row" data-account-form>
+      <input name="account" value="${account || ''}" placeholder="не записан" maxlength="32" list="accounts" autocomplete="off">
+      <datalist id="accounts"><option value="main"><option value="test"><option value="4"><option value="client"></datalist>
+      <button class="btn btn-ghost" type="submit">Сохранить</button>
+    </form>${note}
+    <div class="muted small">Под этим аккаунтом обновлять куки: другой аккаунт здесь не участник.</div>`;
+}
+
 function communityView(d) {
   const c = d.community;
   const host = c.host || '';
@@ -69,6 +83,7 @@ function communityView(d) {
         ['ICP', html`${c.icp_score === null ? '—' : Math.round(c.icp_score)} · ${c.icp_decided_by || '—'} · проверено ${ago(c.icp_checked_at)}`],
         ['Тип входа', html`${label(JOIN_TYPE, c.join_type)}${c.price_label ? ` · ${c.price_label}` : ''}<div class="muted small">${c.join_type_detail || ''}</div>`],
         ['Вступление', html`${label(JOIN_STATUS, c.join_status)} · попыток ${num(c.join_attempts || 0)}${c.joined_at ? ` · вступили ${when(c.joined_at)}` : ''}<div class="muted small">${c.join_status_detail || ''}</div>`],
+        ['Аккаунт', accountForm(c.join_account, session?.member_label)],
         ['Чтение', html`${label(READ_OUTCOME, c.read_outcome)} · последнее ${ago(c.last_synced_at)}`],
         ['Заметки', c.notes],
       ])}
@@ -76,7 +91,7 @@ function communityView(d) {
       <h3>Опрос ленты</h3>
       ${watch ? facts([
         ['Режим', html`${label(WATCH_MODE, watch.mode)} · ${label(WATCH_TIER, watch.tier)}`],
-        ['Последний ответ', html`${watchStatus(watch.last_status)} · ${ago(watch.last_checked_at)}${watch.consecutive_errors ? html` · <b>${watch.consecutive_errors} ошибок подряд</b>` : ''}<div class="muted small">${watch.last_detail || ''}</div>`],
+        ['Последний ответ', html`${watchStatus(watch.last_status, watch.mode, conn?.bucket === 'working' && !!session)} · ${ago(watch.last_checked_at)}${watch.consecutive_errors ? html` · <b>${watch.consecutive_errors} ошибок подряд</b>` : ''}<div class="muted small">${watch.last_detail || ''}</div>`],
         ['Следующая проверка', when(watch.next_check_at)],
         ['Новые посты', html`последний ${ago(watch.last_new_at)} · всего увидено ${num(watch.posts_seen)}`],
       ]) : empty('Это сообщество не опрашивается.')}
@@ -157,6 +172,15 @@ function wireCommunity(body, d, id) {
     try {
       await api(`/api/connections/${encodeURIComponent(host)}/priority`, { method: 'POST', body: { priority: e.target.value } });
       toast('Приоритет сохранён');
+    } catch (err) { toast(err.message, 'error'); }
+  });
+  $('[data-account-form]', body)?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const account = new FormData(e.target).get('account');
+    try {
+      await api(`/api/dash/communities/${id}/account`, { method: 'POST', body: { account } });
+      toast('Аккаунт сохранён');
+      reload();
     } catch (err) { toast(err.message, 'error'); }
   });
   $('[data-session-form]', body)?.addEventListener('submit', async (e) => {

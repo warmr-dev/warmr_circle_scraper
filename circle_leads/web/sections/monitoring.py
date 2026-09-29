@@ -1,10 +1,19 @@
-"""Section 2: the communities we check, how each check went, and the leads.
+"""Section 2: the communities we read, how each read went, and the leads.
 
 The list is the feed watcher's ``watch_state``: every community it polls (fast
 every 2 minutes, slow every 15) and the ones it switched off, with the reason.
 Leads are counted from ``leads`` itself, not from ``watch_state.leads_found``,
 which only counts what the watcher found -- the harvest and the cookie scans
 file leads for the same communities.
+
+Each row falls in one group (the user, 2026-09-29: "show the ones we read,
+that really work or worked"):
+
+- ``ok``      -- read now: the feed answers, or the stored session works;
+- ``broken``  -- read before (posts on file, or the feed once had a
+  watermark), not now;
+- ``private`` -- never read, and the feed refuses a visitor without a login;
+- ``other``   -- never read for another reason: gone, moved, erroring.
 
 A stored session is described by its metadata only; the cookie blob is never
 selected, so it cannot end up in a response by accident.
@@ -20,10 +29,10 @@ from sqlalchemy import exists, select
 from sqlalchemy.orm import Session
 
 from circle_leads.storage.models import (
-    CircleConnection, Community, JoinStatus, ReplaySession, WatchState,
+    CircleConnection, Community, ConnectionState, JoinStatus, Post, ReplaySession, WatchState,
 )
 from circle_leads.web.overview import connection_bucket
-from circle_leads.web.sections.common import lead_counts_by_community
+from circle_leads.web.sections.common import account_of, lead_counts_by_community
 from circle_leads.web.sections.deps import (
     cached, day_start_utc, get_db, iso, require_session, tz_offset, utc_now,
 )
@@ -65,19 +74,29 @@ def _connections(s: Session) -> dict[str, dict[str, Any]]:
     }
 
 
+def _group(*, reading: bool, worked: bool, refused: bool) -> str:
+    if reading:
+        return "ok"
+    if worked:
+        return "broken"
+    return "private" if refused else "other"
+
+
 def build_monitoring(s: Session, now: datetime, start: datetime) -> dict[str, Any]:
     counts = lead_counts_by_community(start)
     session_stored = exists(select(ReplaySession.id).where(ReplaySession.host == WatchState.host))
     w = WatchState
+    # Any reader filed a post from it: the watcher, the harvest, a cookie scan.
+    posts_on_file = exists(select(Post.id).where(Post.community_id == w.community_id))
     rows = s.execute(
         select(
             w.id, w.community_id, w.host, w.mode, w.tier, w.last_status, w.last_detail,
             w.consecutive_errors, w.last_checked_at, w.next_check_at, w.last_new_at,
-            w.posts_seen, w.leads_found,
+            w.posts_seen, w.leads_found, w.last_post_id,
             Community.slug, Community.name, Community.url, Community.join_status,
-            Community.join_type, Community.icp_flag,
+            Community.join_type, Community.icp_flag, Community.join_account,
             counts.c.leads_all, counts.c.leads_today, counts.c.last_lead_at,
-            session_stored.label("has_session"),
+            session_stored.label("has_session"), posts_on_file.label("posts_on_file"),
         )
         .join(Community, Community.id == w.community_id)
         .outerjoin(counts, counts.c.community_id == w.community_id)
@@ -88,6 +107,14 @@ def build_monitoring(s: Session, now: datetime, start: datetime) -> dict[str, An
     out = []
     for r in rows:
         member = r.join_status == JoinStatus.JOINED.value or bool(r.has_session)
+        conn = connections.get(r.host)
+        session = sessions.get(r.host)
+        feed_ok = r.last_status in HEALTHY_STATUSES
+        session_ok = bool(r.has_session) and bool(conn) and (
+            conn["state"] == ConnectionState.CONNECTED.value)
+        reading = feed_ok or session_ok
+        worked = reading or bool(r.posts_on_file) or r.last_post_id is not None
+        group = _group(reading=reading, worked=worked, refused=r.last_status == "unauthorized")
         out.append({
             "watch_id": r.id,
             "community_id": r.community_id,
@@ -110,13 +137,19 @@ def build_monitoring(s: Session, now: datetime, start: datetime) -> dict[str, An
             "icp_flag": bool(r.icp_flag),
             "member": member,
             "has_session": bool(r.has_session),
+            "feed_ok": feed_ok,
+            "session_ok": session_ok,
+            "group": group,
+            # Only the account that is the member can refresh the cookies.
+            "account": account_of(r.join_account, (session or {}).get("member_label")),
+            "join_account": r.join_account,
             "leads_all": int(r.leads_all or 0),
             "leads_today": int(r.leads_today or 0),
             "last_lead_at": iso(r.last_lead_at),
-            "conn": connections.get(r.host),
-            "session": sessions.get(r.host),
+            "conn": conn,
+            "session": session,
         })
-    out.sort(key=lambda x: (-x["leads_all"], x["mode"] == "off", x["name"].lower()))
+    out.sort(key=lambda x: (-x["leads_all"], x["group"] != "ok", x["name"].lower()))
 
     watched_hosts = {r["host"] for r in out}
     unwatched = [
@@ -124,20 +157,20 @@ def build_monitoring(s: Session, now: datetime, start: datetime) -> dict[str, An
         for host, conn in sorted(connections.items()) if host not in watched_hosts
     ]
 
-    active = [r for r in out if r["mode"] != "off"]
-    failing = [r for r in active
-               if r["last_status"] not in HEALTHY_STATUSES or r["consecutive_errors"] > 0]
+    groups = {g: sum(1 for r in out if r["group"] == g) for g in ("ok", "broken", "private", "other")}
+    feeds = [r for r in out if r["feed_ok"] and r["mode"] != "off"]
     return {
         "generated_at": iso(now),
         "today_start": iso(start),
         "summary": {
             "total": len(out),
-            "active": len(active),
-            "off": len(out) - len(active),
-            "fast": sum(1 for r in active if r["tier"] == "fast"),
-            "slow": sum(1 for r in active if r["tier"] != "fast"),
-            "with_session": sum(1 for r in active if r["mode"] == "cookie"),
-            "failing": len(failing),
+            "reading": groups["ok"],
+            "broken": groups["broken"],
+            "private": groups["private"],
+            "other": groups["other"],
+            "feed_fast": sum(1 for r in feeds if r["tier"] == "fast"),
+            "feed_slow": sum(1 for r in feeds if r["tier"] != "fast"),
+            "session_ok": sum(1 for r in out if r["session_ok"]),
             "leads_today": sum(r["leads_today"] for r in out),
             "communities_with_leads_today": sum(1 for r in out if r["leads_today"]),
         },

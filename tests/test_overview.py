@@ -64,7 +64,10 @@ def test_each_queue_counts_what_its_worker_will_take(tmp_path):
         dead.icp_reasons = ["no_metadata", DEAD_HOST_MARKER]
         _row(s, "paid", source="circle_directory", name="P", platform="discover",
              join_type="paid", icp=True)
-        _row(s, "unread", source=DNS_SOURCE, name="R", join_type="locked_unknown", icp=True)
+        unread = _row(s, "unread", source=DNS_SOURCE, name="R", join_type="locked_unknown",
+                      icp=True)
+        # Asked yesterday: its weekly join-type look is not due yet.
+        unread.join_type_checked_at = now - timedelta(days=1)
 
     q = _queues(db, now)
     assert list(q) == ["name", "join_type_recheck", "read", "join"]
@@ -150,3 +153,18 @@ def test_a_free_community_we_hold_a_session_for_is_joined_not_waiting(tmp_path):
         _row(s, "to-join", source=DNS_SOURCE, name="T", join_type="free_join", icp=True)
         _session(s, "read-by-cookie.circle.so")
     assert _queues(db)["join"]["waiting"] == 1
+
+
+def test_a_closed_fit_community_waits_for_its_weekly_look(tmp_path):
+    """The scheduled join-type pass asks closed ICP-fit communities again once
+    a week (reach.closed_recheck_due); the queue counts the ones that are due."""
+    db = Database(f"sqlite:///{tmp_path / 'closed.db'}")
+    now = utcnow().replace(tzinfo=None)
+    with db.session() as s:
+        due = _row(s, "due", source=DNS_SOURCE, name="D", join_type="invite_only", icp=True)
+        due.join_type_checked_at = now - timedelta(days=8)
+        fresh = _row(s, "fresh", source=DNS_SOURCE, name="F", join_type="invite_only", icp=True)
+        fresh.join_type_checked_at = now - timedelta(days=2)
+        not_fit = _row(s, "not-fit", source=DNS_SOURCE, name="N", join_type="locked_unknown")
+        not_fit.join_type_checked_at = now - timedelta(days=30)
+    assert _queues(db, now)["join_type_recheck"]["waiting"] == 1

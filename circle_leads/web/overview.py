@@ -19,10 +19,12 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import String, and_, case, cast, func, select
+from sqlalchemy import String, and_, case, cast, func, or_, select
 from sqlalchemy.orm import Session
 
-from circle_leads.reach import join_queue, on_circle, readable, recheckable_unknown
+from circle_leads.reach import (
+    closed_recheck_due, join_queue, on_circle, readable, recheckable_unknown,
+)
 from circle_leads.storage.models import Community, ConnectionState
 
 DNS_SOURCE = "file:combined_hosts_2026-09-15"
@@ -98,7 +100,10 @@ def build_queues(s: Session, now: datetime, *, named) -> list[dict[str, Any]]:
         # Circle, or never was on it, is not waiting for anything: 27 of the
         # 443 once counted here redirect to circle.so's own site, 20 answer
         # 404, 13 are ordinary websites.
-        ("join_type_recheck", and_(named, on_circle(), recheckable_unknown()),
+        # Plus a closed ICP-fit community whose weekly look is due: the
+        # scheduled pass asks those again (reach.closed_recheck_due).
+        ("join_type_recheck",
+         or_(and_(named, on_circle(), recheckable_unknown()), closed_recheck_due(now)),
          c.join_type_checked_at, and_(named, on_circle())),
         # Readable and never read -- read with a session or anonymously. A
         # paid community without a login is not waiting to be read: nothing

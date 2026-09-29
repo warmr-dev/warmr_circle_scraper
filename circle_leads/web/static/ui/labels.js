@@ -45,21 +45,29 @@ export const PLATFORM = {
 
 export const SOURCE = { directory: 'каталог Circle', dns: 'DNS-выгрузка', other: 'другое' };
 
-export const WATCH_MODE = { anon: 'анонимно', cookie: 'по сессии', off: 'выключен' };
+export const WATCH_MODE = { anon: 'анонимно', cookie: 'по сессии', off: 'не читается' };
 export const WATCH_TIER = { fast: 'каждые 2 мин', slow: 'каждые 15 мин' };
 
 const WATCH_STATUS_WORDS = {
   ok: 'ок',
   not_modified: 'без изменений',
-  unauthorized: 'нет доступа (401)',
   ratelimited: 'лимит (429)',
   challenge: 'Cloudflare',
   notfound: 'не найдено (404)',
   error: 'ошибка',
 };
 
-export function watchStatus(status) {
+// A 401 means different things. Read anonymously, the community is private:
+// it shows nothing to a visitor without a login. Read with our session, the
+// session stopped working -- unless the cookie scan still reads with it, and
+// then it is the feed request that fails (seen 2026-09-29 on four hosts).
+export function watchStatus(status, mode, sessionWorks = false) {
   if (!status) return 'ещё не проверяли';
+  if (status === 'unauthorized') {
+    if (mode !== 'cookie') return 'приватное (401)';
+    return sessionWorks ? 'лента отказала (401), сессия жива' : 'сессия не пускает (401)';
+  }
+  if (status === 'http_301' || status === 'http_302') return `переехало (${status.slice(5)})`;
   if (status.startsWith('http_')) return `HTTP ${status.slice(5)}`;
   return WATCH_STATUS_WORDS[status] ?? status;
 }
@@ -152,10 +160,19 @@ export const SCHEDULE = {
 };
 
 export const STAGE = {
-  harvest: 'Сбор (чтение известных сообществ)',
+  harvest: 'Полный проход: по сессии и открытые разделы',
   discovery: 'Поиск новых сообществ',
   icp_classification: 'ICP и обогащение',
   join_type: 'Проверка типа входа',
+};
+
+// What each stage is for, now that the feed watcher reads new posts every 2
+// or 15 minutes (the user asked on 2026-09-29 why the 6-hour pass exists).
+export const STAGE_NOTE = {
+  harvest: 'По сессии читает всё, что видит участник: все разделы и комментарии — лента наблюдателя этого не видит. Новые сообщества читает целиком в первый раз. Открытые разделы перечитывает на всякий случай: их новые посты и так ловит наблюдатель каждые 2–15 мин.',
+  discovery: 'Ищет новые сообщества; запускается внутри полного прохода, когда подошёл срок.',
+  icp_classification: 'Дополняет карточки и решает, подходит ли сообщество.',
+  join_type: 'Узнаёт, как вступить: бесплатно, платно, по приглашению. Закрытые подходящие спрашивает заново раз в неделю.',
 };
 
 export const JOB_STATE = { queued: 'в очереди', running: 'выполняется', done: 'готово', error: 'ошибка' };

@@ -81,6 +81,7 @@ function legend(parts, total) {
 
 function view(d) {
   const c = d.communities;
+  const r = c.reading;
   const l = d.leads;
   const seg = l.segments;
   const fitParts = [
@@ -126,6 +127,24 @@ function view(d) {
       <h3>Из подходящих: платные, бесплатные, закрытые</h3>
       ${splitBar(fitParts, c.fit.all)}
       ${legend(fitParts, c.fit.all)}
+      ${c.other.all ? html`<p class="muted small">Закрытые подходящие перепроверяем раз в неделю: вдруг открылись или разрешили вступать.</p>` : ''}
+    </section>
+
+    <section class="panel">
+      <h2>Чтение</h2>
+      <div class="funnel">
+        ${tile({ name: 'Читаем сейчас', all: r.all,
+                 note: `анонимно ${num(r.anonymous)} · по сессии ${num(r.with_session)} · подходящих ${num(r.fit)}`,
+                 link: { section: 'monitoring', status: 'ok' }, hero: true })}
+        ${tile({ name: 'Лента каждые 2 мин', all: r.feed_fast,
+                 note: 'пишут недавно, или мы участники',
+                 link: { section: 'monitoring', status: 'ok', tier: 'fast' } })}
+        ${tile({ name: 'Лента каждые 15 мин', all: r.feed_slow,
+                 note: 'без новых постов 14+ дней',
+                 link: { section: 'monitoring', status: 'ok', tier: 'slow' } })}
+        ${tile({ name: 'Новые посты сегодня', all: r.today, note: 'сообществ, где лента их принесла' })}
+      </div>
+      <p class="muted small">«Смогли зайти» — мы участники: бот вступил или сохранена сессия. «Читаем» — лента отвечает или сессия работает. Открытые сообщества читаем анонимно, без вступления, поэтому читаем больше, чем «смогли зайти». По сессии всё сообщество, включая закрытые разделы и комментарии, читает полный проход раз в 6 ч.</p>
     </section>
 
     <section class="panel">

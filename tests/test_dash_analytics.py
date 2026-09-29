@@ -99,3 +99,47 @@ def test_an_empty_database_is_all_zeros(tmp_path, monkeypatch):
     assert data["communities"]["found"] == {"all": 0, "today": 0, "circle_all": 0, "circle_today": 0}
     assert data["leads"]["found"] == {"all": 0, "today": 0}
     assert data["today_start"].endswith("Z")
+
+
+def test_reading_counts_every_feed_that_answers_and_every_working_session(tmp_path, monkeypatch):
+    """The user, 2026-09-29: "why 57 inside, but 85 read every 2 minutes and
+    101 every 15?" -- an open community is read without joining it. The page
+    now counts what we read, anonymously or with a session, as its own number.
+    """
+    from tests.dash_fixtures import connection, watch
+
+    client, db, _app = make_app(tmp_path, monkeypatch)
+    with db.session() as s:
+        # Open, read anonymously every 2 minutes, a new post today.
+        open_fast = community(s, "open-fast", host="open-fast.circle.so", icp_flag=True)
+        watch(s, open_fast, last_status="ok", last_new_at=TODAY)
+        # Open and quiet: every 15 minutes, 304s.
+        quiet = community(s, "quiet", host="quiet.circle.so")
+        watch(s, quiet, tier="slow", last_status="not_modified", last_new_at=YESTERDAY)
+        # A member: the feed is read anonymously, the session reads the rest.
+        member = community(s, "member", host="member.circle.so", icp_flag=True,
+                           join_status="joined")
+        watch(s, member, last_status="ok")
+        session_for(s, "member.circle.so")
+        connection(s, "member.circle.so", "connected")
+        # Private, no session: the feed refuses us -- not read.
+        private = community(s, "private", host="private.circle.so", icp_flag=True)
+        watch(s, private, mode="off", last_status="unauthorized")
+        # A session that died, and its feed refuses anonymous reads: not read.
+        dead = community(s, "dead", host="dead.circle.so", join_status="joined")
+        watch(s, dead, mode="cookie", last_status="unauthorized")
+        session_for(s, "dead.circle.so")
+        connection(s, "dead.circle.so", "session_expired")
+        # Read only through its session: the feed is off, the scan works.
+        scan_only = community(s, "scan-only", host="scan-only.circle.so")
+        session_for(s, "scan-only.circle.so")
+        connection(s, "scan-only.circle.so", "connected")
+
+    r = client.get("/api/dash/analytics", params={"tz": TZ_PLUS_7}).json()["communities"]["reading"]
+    assert r["all"] == 4                      # open-fast, quiet, member, scan-only
+    assert r["with_session"] == 2             # member, scan-only
+    assert r["anonymous"] == 2
+    assert r["with_session"] + r["anonymous"] == r["all"]
+    assert r["fit"] == 2                      # open-fast, member
+    assert r["feed_fast"] == 2 and r["feed_slow"] == 1
+    assert r["today"] == 1                    # open-fast brought a post today

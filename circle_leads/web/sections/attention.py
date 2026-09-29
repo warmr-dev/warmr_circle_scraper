@@ -28,11 +28,11 @@ from circle_leads.reach import JOIN_QUEUE_STATUSES, has_session, on_circle
 from circle_leads.storage.heartbeat import HEARTBEAT_LIMITS_S
 from circle_leads.storage.models import (
     JOIN_HANDOFF_PREFIX, ActivityLog, AttentionAck, CircleConnection, Community,
-    ConnectionPriority, JoinFormFill, JoinStatus, Lead, Post, ReplaySession, ScanJob, Setting,
-    WatchState,
+    ConnectionPriority, ConnectionState, JoinFormFill, JoinStatus, Lead, Post, ReplaySession,
+    ScanJob, Setting, WatchState,
 )
 from circle_leads.web.overview import build_queues, connection_bucket
-from circle_leads.web.sections.common import lead_live, not_sent_reason_expr
+from circle_leads.web.sections.common import account_label, lead_live, not_sent_reason_expr
 from circle_leads.web.sections.deps import (
     cached, fingerprint, get_db, iso, require_session, utc_now,
 )
@@ -229,8 +229,25 @@ CONN_LABELS = {"session_expired": "сессия истекла", "access_denied"
                "error": "ошибка чтения"}
 
 
+def _accounts_by_host(ctx: Ctx) -> dict[str, str]:
+    """Which of our accounts is the member at each host, where known: the
+    account the community was joined with, else a session label naming one."""
+    out = {host: account for host, label in ctx.s.execute(select(
+        ReplaySession.host, ReplaySession.member_label,
+    )).all() if (account := account_label(label))}
+    out.update({host: account for host, account in ctx.s.execute(select(
+        Community.host, Community.join_account,
+    ).where(Community.host.is_not(None), Community.join_account.is_not(None))).all()})
+    return out
+
+
+def _refresh_as(account: str | None) -> str:
+    return f" — обновить под аккаунтом {account}" if account else " — аккаунт не записан"
+
+
 def _sessions(ctx: Ctx, *, cloudflare: bool) -> list[dict]:
     items: dict[str, dict] = {}
+    accounts = {} if cloudflare else _accounts_by_host(ctx)
     rows = ctx.s.execute(select(
         CircleConnection.host, CircleConnection.state, CircleConnection.state_detail,
         CircleConnection.community_id, CircleConnection.last_sync_at,
@@ -246,23 +263,54 @@ def _sessions(ctx: Ctx, *, cloudflare: bool) -> list[dict]:
         blocked = connection_bucket(r.state, r.state_detail) == "cloudflare_blocked"
         if blocked != cloudflare or r.host in left_circle:
             continue
-        label = "Cloudflare не пускает сервер" if blocked else CONN_LABELS.get(r.state, r.state)
+        label = "Cloudflare не пускает сервер" if blocked else (
+            CONN_LABELS.get(r.state, r.state) + _refresh_as(accounts.get(r.host)))
         items[r.host] = _item(f"conn:{r.host}", fingerprint(r.state, _shape(r.state_detail)),
                               f"{r.host}: {label}", detail=r.state_detail, at=r.last_sync_at,
                               link=_community_link(r.community_id)
                               or {"section": "monitoring", "q": r.host})
     if not cloudflare:
         # The watcher reading with a stored session and getting 401: the
-        # session is dead even if no cookie scan has run since.
+        # session is dead even if no cookie scan has run since -- unless the
+        # cookie scan reads with that same session. Then the session is fine
+        # and the feed request is what fails (watch_cookie_feed).
+        scanned = set(ctx.s.scalars(select(CircleConnection.host).where(
+            CircleConnection.state == ConnectionState.CONNECTED.value)).all())
         for host, cid, detail, at in ctx.s.execute(select(
             WatchState.host, WatchState.community_id, WatchState.last_detail,
             WatchState.last_checked_at,
         ).where(WatchState.mode == "cookie", WatchState.last_status == "unauthorized")).all():
+            if host in scanned:
+                continue
             items.setdefault(host, _item(
                 f"conn:{host}", fingerprint("unauthorized"),
-                f"{host}: сессия не пускает (401 при опросе)", detail=detail, at=at,
-                link=_community_link(cid)))
+                f"{host}: сессия не пускает (401 при опросе){_refresh_as(accounts.get(host))}",
+                detail=detail, at=at, link=_community_link(cid)))
     return list(items.values())
+
+
+def _watch_cookie_feed(ctx: Ctx) -> list[dict]:
+    """The feed refuses our session while the cookie scan reads with it.
+
+    Seen on 2026-09-29: onstartups, talentcollective, future-of-saas and
+    engage.techsoup were read by the scan that morning, while the watcher's
+    home_page_posts request with the same cookies had got 401 280 times in a
+    row. Refreshing the cookies would not help; the cause is on our side.
+    """
+    rows = ctx.s.execute(select(
+        WatchState.community_id, WatchState.host, WatchState.consecutive_errors,
+        WatchState.last_checked_at, CircleConnection.last_sync_at, CircleConnection.state_detail,
+    ).join(CircleConnection, CircleConnection.host == WatchState.host).where(
+        WatchState.mode == "cookie", WatchState.last_status == "unauthorized",
+        CircleConnection.state == ConnectionState.CONNECTED.value,
+    ).order_by(WatchState.consecutive_errors.desc())).all()
+    return [_item(f"watchfeed:{r.community_id}", fingerprint("unauthorized"),
+                  f"{r.host}: лента по сессии отвечает «нет доступа» уже "
+                  f"{_plural(r.consecutive_errors, 'раз', 'раза', 'раз')} подряд, "
+                  f"а полный проход по этой же сессии читает",
+                  detail=f"Полный проход по сессии {_ago(ctx.now, r.last_sync_at)}: "
+                         f"{r.state_detail or '—'}",
+                  at=r.last_checked_at, link=_community_link(r.community_id)) for r in rows]
 
 
 def _session_dead(ctx: Ctx) -> list[dict]:
@@ -534,8 +582,15 @@ RULES: list[Rule] = [
          "Добавь ответ в join_form_answers — бот подставит его в следующий раз.",
          _form_needs_human),
     Rule("session_dead", "warn", "Сессия сообщества умерла",
-         "Сохрани свежую сессию через расширение (или вставь куки в мониторинге).",
+         "Войди в сообщество под указанным аккаунтом и сохрани свежую сессию через "
+         "расширение (или вставь куки в карточке). Под другим аккаунтом не выйдет: "
+         "он там не участник. Аккаунт не записан — укажи его в карточке сообщества.",
          _session_dead),
+    Rule("watch_cookie_feed", "warn", "Лента по сессии не читается, а сессия живая",
+         "Куки обновлять не надо: по ним же читает полный проход. Не работает запрос "
+         "ленты наблюдателя — это наша ошибка, нужна проверка кода опроса. Пока лента "
+         "молчит, новые посты отсюда приходят только раз в 6 ч.",
+         _watch_cookie_feed),
     Rule("watch_failing", "warn", "Опрос сообщества падает",
          "Пять и больше ошибок подряд. Открой сообщество: жив ли адрес, не сменился ли домен.",
          _watch_failing),

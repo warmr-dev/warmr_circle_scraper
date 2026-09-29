@@ -10,7 +10,13 @@ its neighbours.
 - fit (and its paid/free/other split): judged a fit today -- a flagged row is
   not re-stamped by a rescore, so icp_checked_at is when it became a fit;
 - inside: joined today, or a session stored today;
+- reading: the feeds that brought new posts today;
 - leads: the leads filed today, and what Vini said about those same leads.
+
+"Reading" is not a step after "inside": an open community is read without
+joining it. The user asked on 2026-09-29 why 57 were "inside" while the watcher
+polled 186 -- both numbers were right and the page did not say what either
+counted.
 """
 
 from __future__ import annotations
@@ -23,9 +29,10 @@ from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from circle_leads.reach import has_session, on_circle, real_host
-from circle_leads.storage.models import Community, JoinStatus, Lead
+from circle_leads.storage.models import Community, JoinStatus, Lead, WatchState
 from circle_leads.web.sections.common import (
-    SEGMENTS, access_since, count_if, fit, has_access, lead_live, segment_expr,
+    FEED_OK, SEGMENTS, access_since, count_if, fit, has_access, lead_live, reading,
+    reading_with_session, segment_expr,
 )
 from circle_leads.web.sections.deps import (
     cached, day_start_utc, get_db, iso, require_session, tz_offset, utc_now,
@@ -73,6 +80,8 @@ def build_analytics(s: Session, now: datetime, start: datetime) -> dict[str, Any
      inside_all, inside_t, inside_fit, inside_fit_t, joined, with_session) = (
         int(v or 0) for v in row)
 
+    reading_counts = _reading(s, start)
+
     seg = segment_expr()
     segments = {name: {"all": 0, "today": 0} for name in SEGMENTS}
     for name, total, today in s.execute(
@@ -97,6 +106,7 @@ def build_analytics(s: Session, now: datetime, start: datetime) -> dict[str, Any
             "access": {"all": inside_all, "today": inside_t,
                        "fit_all": inside_fit, "fit_today": inside_fit_t,
                        "joined": joined, "with_session": with_session},
+            "reading": reading_counts,
         },
         "leads": {
             "found": {"all": leads_all, "today": leads_today},
@@ -106,6 +116,36 @@ def build_analytics(s: Session, now: datetime, start: datetime) -> dict[str, Any
             "segments": segments,
         },
     }
+
+
+def _reading(s: Session, start: datetime) -> dict[str, int]:
+    """How many communities we read now, and how.
+
+    Only communities the watcher polls or we hold a session for can be read,
+    so the count runs over those few hundred rows, not the whole table.
+    """
+    c, w = Community, WatchState
+    polled = select(w.community_id)
+    with_session = reading_with_session()
+    is_reading = reading()
+
+    def feed(tier: str):
+        return select(w.id).where(w.community_id == c.id, w.tier == tier, w.mode != "off",
+                                  w.last_status.in_(FEED_OK)).exists()
+
+    new_today = select(w.id).where(w.community_id == c.id, w.last_new_at >= start).exists()
+    row = s.execute(select(
+        count_if(is_reading),
+        count_if(and_(is_reading, with_session)),
+        count_if(and_(is_reading, ~with_session)),
+        count_if(and_(is_reading, fit())),
+        count_if(feed("fast")),
+        count_if(feed("slow")),
+        count_if(new_today),
+    ).where(or_(c.id.in_(polled), has_session()))).one()
+    total, session, anon, fit_count, fast, slow, today = (int(v or 0) for v in row)
+    return {"all": total, "today": today, "with_session": session, "anonymous": anon,
+            "fit": fit_count, "feed_fast": fast, "feed_slow": slow}
 
 
 @router.get("/analytics")

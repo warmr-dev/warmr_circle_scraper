@@ -13,6 +13,7 @@ from sqlalchemy import and_, exists, func, or_, select
 from sqlalchemy.orm import Session, aliased
 
 from circle_leads.reach import has_session
+from circle_leads.storage.activity import log_activity
 from circle_leads.storage.models import (
     ActivityLog, CircleConnection, Community, JoinFormFill, Lead, Post, ReplaySession,
     WatchState,
@@ -283,3 +284,33 @@ def api_community(community_id: int, db=Depends(get_db)) -> dict[str, Any]:
     if out is None:
         raise HTTPException(404, "Community not found")
     return out
+
+
+# Account keys the join bot uses (circle_leads/join/accounts.py), plus names a
+# person may give an account the bot does not drive -- "client" for the
+# customer's own login.
+ACCOUNT_MAX = 32
+
+
+@router.post("/communities/{community_id}/account")
+def api_set_account(community_id: int, payload: dict, db=Depends(get_db)) -> dict[str, Any]:
+    """Say which of our accounts is the member here -- for a join made by hand,
+    or one from before the account was recorded. The stored session, if any,
+    gets the same label: that is the account that can refresh it."""
+    raw = (payload or {}).get("account")
+    account = str(raw).strip() if raw is not None else ""
+    if len(account) > ACCOUNT_MAX:
+        raise HTTPException(400, f"Account name is longer than {ACCOUNT_MAX} characters")
+    with db.session() as s:
+        community = s.get(Community, community_id)
+        if community is None:
+            raise HTTPException(404, "Community not found")
+        before = community.join_account
+        community.join_account = account or None
+        if community.host:
+            session = s.scalar(select(ReplaySession).where(ReplaySession.host == community.host))
+            if session is not None and account:
+                session.member_label = account
+        log_activity(s, kind="review", community=community.slug,
+                     summary=f"Join account set: {before or '-'} -> {account or '-'}")
+    return {"ok": True, "account": account or None}
