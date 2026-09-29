@@ -76,3 +76,19 @@ def resolve_account(account: str | int) -> JoinAccount:
 
 def account_choices() -> list[str]:
     return ["main", "test"] + [str(n) for n in range(1, MAX_ACCOUNTS + 1)]
+
+
+# Accounts nobody signs in as any more: 1-3 are the zhappar01 Gmail addresses,
+# retired by the user on 2026-09-25. Rows they joined still name them, which is
+# how the dashboard knows their dead sessions cannot be refreshed.
+RETIRED_ACCOUNTS = frozenset({1, 2, 3})
+
+
+def is_retired(account: str | int | None) -> bool:
+    """True for "main", "test", "3" -- any spelling of a retired account."""
+    if account is None:
+        return False
+    try:
+        return resolve_account(account).number in RETIRED_ACCOUNTS
+    except ValueError:
+        return False

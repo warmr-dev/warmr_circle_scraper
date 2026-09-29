@@ -118,15 +118,18 @@ def test_a_dead_session_but_not_a_cloudflare_block_or_a_site_that_left_circle(ap
 
 
 def test_a_dead_session_says_which_account_can_refresh_it(app):
-    """Only the account that is the member can bring fresh cookies back."""
+    """Only the account that is the member can bring fresh cookies back --
+    and not one the user retired (accounts 1-3, 2026-09-25)."""
     from sqlalchemy import select
 
     from circle_leads.storage.models import ReplaySession
 
     client, db, app_ = app
     with db.session() as s:
-        community(s, "joined", host="joined.circle.so", join_account="test")
+        community(s, "joined", host="joined.circle.so", join_account="4")
         connection(s, "joined.circle.so", "session_expired", "Session cookie invalid")
+        community(s, "old", host="old.circle.so", join_account="test")
+        connection(s, "old.circle.so", "session_expired", "Session cookie invalid")
         connection(s, "labelled.circle.so", "session_expired", "Session cookie invalid")
         session_for(s, "labelled.circle.so")
         s.scalar(select(ReplaySession).where(
@@ -134,8 +137,11 @@ def test_a_dead_session_says_which_account_can_refresh_it(app):
         connection(s, "nobody.circle.so", "session_expired", "Session cookie invalid")
     _clear_cache(app_)
     titles = {i["key"]: i["title"] for i in _rules(client)["session_dead"]["items"]}
-    assert titles["conn:joined.circle.so"].endswith("обновить под аккаунтом test")
-    assert titles["conn:labelled.circle.so"].endswith("обновить под аккаунтом main")
+    assert titles["conn:joined.circle.so"].endswith("обновить под аккаунтом 4")
+    assert titles["conn:old.circle.so"].endswith(
+        "вход был аккаунтом test, он больше не используется: нужен новый вход")
+    assert titles["conn:labelled.circle.so"].endswith(
+        "вход был аккаунтом main, он больше не используется: нужен новый вход")
     assert titles["conn:nobody.circle.so"].endswith("аккаунт не записан")
 
 
@@ -151,7 +157,7 @@ def test_a_feed_refusing_a_session_the_scan_still_reads_is_not_a_dead_session(ap
         watch(s, live, mode="cookie", last_status="unauthorized", consecutive_errors=284)
         session_for(s, "live.circle.so")
         connection(s, "live.circle.so", "connected", "76 post(s), 0 lead(s) from 2/2 space(s)",
-                   last_sync_at=NOW - timedelta(hours=3))
+                   spaces_total=2, spaces_readable=2, last_sync_at=NOW - timedelta(hours=3))
         dead = community(s, "dead", host="dead.circle.so", join_status="joined")
         watch(s, dead, mode="cookie", last_status="unauthorized", consecutive_errors=9)
         session_for(s, "dead.circle.so")
@@ -161,6 +167,36 @@ def test_a_feed_refusing_a_session_the_scan_still_reads_is_not_a_dead_session(ap
     feed = rules["watch_cookie_feed"]["items"]
     assert [i["key"] for i in feed] == [f"watchfeed:{live_id}"]
     assert "284 раза подряд" in feed[0]["title"]
+
+
+def test_a_live_session_that_reads_no_space(app):
+    """onstartups: the scan got in, saw 2 spaces and read nothing. Neither a
+    dead session nor the watcher's fault -- a person has to look inside."""
+    client, db, app_ = app
+    with db.session() as s:
+        empty = community(s, "empty", host="empty.circle.so", join_status="joined",
+                          join_account="4")
+        watch(s, empty, mode="cookie", last_status="unauthorized", consecutive_errors=40)
+        session_for(s, "empty.circle.so")
+        connection(s, "empty.circle.so", "connected", "No readable posts (2 space(s) visible).",
+                   spaces_total=2, spaces_readable=0, last_sync_at=NOW - timedelta(hours=1))
+    _clear_cache(app_)
+    rules = _rules(client)
+    (item,) = rules["session_reads_nothing"]["items"]
+    assert item["key"] == "empty:empty.circle.so"
+    assert item["title"] == ("empty.circle.so: сессия живая, но не читается ни один из "
+                             "разделов (2), аккаунт 4")
+    assert not rules["watch_cookie_feed"]["items"]
+    assert not rules["session_dead"]["items"]
+
+    with db.session() as s:
+        from sqlalchemy import select
+
+        from circle_leads.storage.models import CircleConnection
+        s.scalar(select(CircleConnection).where(
+            CircleConnection.host == "empty.circle.so")).spaces_readable = 1
+    _clear_cache(app_)
+    assert not _rules(client)["session_reads_nothing"]["items"]
 
 
 def test_the_watcher_failing_and_a_member_community_switched_off(app):
