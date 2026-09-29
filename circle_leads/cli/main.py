@@ -1469,11 +1469,13 @@ def worker_cmd(ctx, poll_seconds, use_llm):
 
     from circle_leads.storage.job_queue import claim_next, complete
     from circle_leads.scanning import cookie_hosts_vip_first, scan_cookie_host
+    from circle_leads.storage import runtime
     from circle_leads.storage.settings_store import (
         is_discovery_due, is_harvest_due, is_icp_classification_due,
         is_join_type_check_due, load_effective_requirements,
         mark_discovery_run, mark_harvest_finished, mark_harvest_run,
         mark_icp_classification_run, mark_join_type_check_run,
+        record_stage_error, record_stage_finish,
     )
 
     # Read the same config the dashboard writes (DB override on top of the
@@ -1498,14 +1500,15 @@ def worker_cmd(ctx, poll_seconds, use_llm):
         res = harvest(db, req, verbose_log=True, use_llm=use_llm, search=search)
         if search:
             mark_discovery_run(db)
+        summary = {"private_leads": priv_leads, "public_leads": res.leads_found,
+                   "communities_read": res.communities_read,
+                   "new_communities": res.new_communities, "searched": search}
         # Only here, at the end. The start was recorded before any of this ran
         # so a crash loop cannot hammer the schedule, but a harvest killed
         # halfway -- the daily unattended-upgrade restarts our services -- must
         # not count as a completed one.
-        mark_harvest_finished(db)
-        return {"private_leads": priv_leads, "public_leads": res.leads_found,
-                "communities_read": res.communities_read,
-                "new_communities": res.new_communities, "searched": search}
+        mark_harvest_finished(db, result=summary)
+        return summary
 
     last_schedule_check = 0.0
 
@@ -1518,7 +1521,9 @@ def worker_cmd(ctx, poll_seconds, use_llm):
     # from here made a busy worker look dead and sent a false alarm.
     from circle_leads.storage.heartbeat import start_heartbeat
 
-    start_heartbeat(db, "worker_heartbeat")
+    # The snapshot beside it is what the dashboard knows about this process:
+    # host, code, model, which keys are set, and the stage it is in.
+    start_heartbeat(db, "worker_heartbeat", runtime_key="worker_runtime", service="worker")
 
     # Stop on request instead of being killed mid-write. This is not a rare
     # event: a stock Ubuntu box runs unattended-upgrades daily and needrestart
@@ -1557,28 +1562,31 @@ def worker_cmd(ctx, poll_seconds, use_llm):
         if job is not None:
             click.echo(f"  job {job.id}: {job.kind} {job.host or ''}")
             try:
-                if job.kind == "scan" and job.host:
-                    result = scan_cookie_host(db, req, job.host, use_llm=use_llm)
-                elif job.kind == "scan_all":
-                    hosts = cookie_hosts_vip_first(db)
-                    results = [scan_cookie_host(db, req, h, use_llm=use_llm) for h in hosts]
-                    result = {"scanned": len(results),
-                              "leads": sum(r["leads"] for r in results),
-                              "detail": f"scanned {len(results)} communities"}
-                elif job.kind == "harvest":
-                    result = _run_harvest()
-                elif job.kind == "discover_directory":
-                    # Incremental: a full crawl re-walks ~2k listings, and the
-                    # queue is meant to be run often, not once by hand.
-                    result = ctx.invoke(discover_directory_cmd, incremental=True) or {}
-                elif job.kind == "enrich":
-                    result = ctx.invoke(enrich_cmd) or {}
-                else:
-                    result = {"detail": f"unknown job kind {job.kind!r}"}
+                with runtime.stage(f"job:{job.kind}"):
+                    if job.kind == "scan" and job.host:
+                        result = scan_cookie_host(db, req, job.host, use_llm=use_llm)
+                    elif job.kind == "scan_all":
+                        hosts = cookie_hosts_vip_first(db)
+                        results = [scan_cookie_host(db, req, h, use_llm=use_llm) for h in hosts]
+                        result = {"scanned": len(results),
+                                  "leads": sum(r["leads"] for r in results),
+                                  "detail": f"scanned {len(results)} communities"}
+                    elif job.kind == "harvest":
+                        result = _run_harvest()
+                    elif job.kind == "discover_directory":
+                        # Incremental: a full crawl re-walks ~2k listings, and
+                        # the queue is meant to be run often, not once by hand.
+                        result = ctx.invoke(discover_directory_cmd, incremental=True) or {}
+                    elif job.kind == "enrich":
+                        result = ctx.invoke(enrich_cmd) or {}
+                    else:
+                        result = {"detail": f"unknown job kind {job.kind!r}"}
                 complete(db, job.id, result=result)
                 click.echo(f"    done: {result.get('detail') or result}")
             except Exception as exc:  # noqa: BLE001 - record and move on
                 complete(db, job.id, result={}, error=f"{exc.__class__.__name__}: {exc}")
+                if job.kind == "harvest":
+                    record_stage_error(db, "harvest", exc)
                 click.echo(f"    error: {exc}", err=True)
             continue  # immediately look for the next job
 
@@ -1586,14 +1594,21 @@ def worker_cmd(ctx, poll_seconds, use_llm):
         now = _t.time()
         if now - last_schedule_check > 60:
             last_schedule_check = now
+            # Each stage below leaves <stage>_last_finish or <stage>_last_error
+            # behind (settings_store.record_stage_*): the class name printed
+            # here goes to a log on the worker's host, which the dashboard
+            # cannot read.
             try:
                 if is_harvest_due(db):
                     mark_harvest_run(db)
                     click.echo("  scheduled harvest due -- running")
-                    r = _run_harvest()
+                    with runtime.stage("harvest"):
+                        r = _run_harvest()
                     click.echo(f"    harvest: {r}")
             except Exception as exc:  # noqa: BLE001
+                record_stage_error(db, "harvest", exc)
                 click.echo(f"  schedule error: {exc.__class__.__name__}", err=True)
+            step = "enrichment"
             try:
                 if is_icp_classification_due(db):
                     mark_icp_classification_run(db)
@@ -1603,8 +1618,10 @@ def worker_cmd(ctx, poll_seconds, use_llm):
                     # files it as "not ICP" with no evidence either way. Both
                     # stages are bounded per run (one enrichment batch, one
                     # re-score batch), so the pair stays a fixed cost.
-                    enriched = enrich_pending(db)
+                    with runtime.stage("enrichment"):
+                        enriched = enrich_pending(db)
                     click.echo(f"  scheduled enrichment: {enriched}")
+                    step = "icp"
                     # use_llm: this scheduled sweep is the only ICP path that
                     # runs unattended, and leaving it off is why icp_decided_by
                     # was 'rules' for every row in prod. classify_icp_pending
@@ -1621,11 +1638,15 @@ def worker_cmd(ctx, poll_seconds, use_llm):
                     # review but stays out of the auto-join queue. Nothing here
                     # is supervised, and the join bot drives the user's real
                     # account -- growing that queue is a human's decision.
-                    stats = classify_icp_pending(
-                        db, req, use_llm=use_llm, rescore_llm_eligible=True
-                    )
+                    with runtime.stage("icp_classification"):
+                        stats = classify_icp_pending(
+                            db, req, use_llm=use_llm, rescore_llm_eligible=True
+                        )
                     click.echo(f"  scheduled ICP classification: {stats}")
+                    record_stage_finish(db, "icp_classification",
+                                        result={"enrichment": enriched, "icp": stats})
             except Exception as exc:  # noqa: BLE001
+                record_stage_error(db, "icp_classification", exc, step=step)
                 click.echo(f"  ICP schedule error: {exc.__class__.__name__}", err=True)
 
             try:
@@ -1642,9 +1663,12 @@ def worker_cmd(ctx, poll_seconds, use_llm):
                         classify_join_type_pending,
                     )
 
-                    jt = classify_join_type_pending(db, limit=JOIN_TYPE_BATCH, scheduled=True)
+                    with runtime.stage("join_type"):
+                        jt = classify_join_type_pending(db, limit=JOIN_TYPE_BATCH, scheduled=True)
                     click.echo(f"  scheduled join-type check: {jt}")
+                    record_stage_finish(db, "join_type", result=jt)
             except Exception as exc:  # noqa: BLE001
+                record_stage_error(db, "join_type", exc)
                 click.echo(
                     f"  join-type schedule error: {exc.__class__.__name__}", err=True
                 )

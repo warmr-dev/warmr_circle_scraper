@@ -17,6 +17,8 @@ The rule, as the user set it on 2026-09-24:
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 from sqlalchemy import and_, exists, func, or_, select
 
 from circle_leads.storage.models import Community, JoinStatus, ReplaySession
@@ -48,6 +50,30 @@ def recheckable_unknown():
     return and_(
         Community.join_type == "unknown",
         *[~detail.startswith(p) for p in TERMINAL_UNKNOWN_PREFIXES],
+    )
+
+
+# A community we could not get into is asked again once a week: a private one
+# can open up, an invite-only one can switch self-signup on (the user,
+# 2026-09-29). Before, only the harvest asked again, and only on a read -- up to
+# 11 days apart, and a person's "manual check" verdict never changed.
+CLOSED_JOIN_TYPES = ("invite_only", "locked_unknown")
+CLOSED_RECHECK_DAYS = 7
+
+
+def closed_recheck_due(now):
+    """An ICP-fit community closed to us, last asked a week ago or more.
+
+    ``now`` is UTC. One anonymous request per community: nothing here needs a
+    login.
+    """
+    return and_(
+        Community.icp_flag.is_(True),
+        on_circle(),
+        real_host(),
+        Community.join_type.in_(CLOSED_JOIN_TYPES),
+        or_(Community.join_type_checked_at.is_(None),
+            Community.join_type_checked_at < now - timedelta(days=CLOSED_RECHECK_DAYS)),
     )
 
 

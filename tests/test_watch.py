@@ -405,6 +405,41 @@ def test_a_feed_that_closes_with_a_session_stored_switches_to_cookie(db, communi
     assert read_row(db, community).mode == WatchMode.COOKIE.value
 
 
+def test_a_switched_off_feed_that_answers_again_is_read_again(db, community, monkeypatch):
+    """A private community that opened up used to stay on the once-a-day
+    check for good, its posts readable all along."""
+    from sqlalchemy import select
+
+    ensure_watch_rows(db)
+    with db.session() as s:
+        s.scalar(select(WatchState).where(WatchState.community_id == community)).mode = (
+            WatchMode.OFF.value)
+    monkeypatch.setattr("circle_leads.triage.pipeline.triage_records", triage_spy([]))
+
+    out = check_community(db, state_for(db, community), Requirements(),
+                          session=FakeSession([feed([make_record(10)])]), tuning=WatchTuning())
+    assert out.status == "ok"
+    row = read_row(db, community)
+    assert row.mode == WatchMode.ANON.value
+    assert row.next_check_at - row.last_checked_at < timedelta(hours=1)
+
+
+def test_a_switched_off_feed_that_still_refuses_stays_off(db, community, monkeypatch):
+    from sqlalchemy import select
+
+    ensure_watch_rows(db)
+    with db.session() as s:
+        s.scalar(select(WatchState).where(WatchState.community_id == community)).mode = (
+            WatchMode.OFF.value)
+    monkeypatch.setattr("circle_leads.triage.pipeline.triage_records", triage_spy([]))
+
+    check_community(db, state_for(db, community), Requirements(),
+                    session=FakeSession([FakeResponse(401)]), tuning=WatchTuning())
+    row = read_row(db, community)
+    assert row.mode == WatchMode.OFF.value
+    assert row.next_check_at - row.last_checked_at > timedelta(hours=12)
+
+
 def test_a_dead_host_is_switched_off(db, community, monkeypatch):
     ensure_watch_rows(db)
     monkeypatch.setattr("circle_leads.triage.pipeline.triage_records", triage_spy([]))

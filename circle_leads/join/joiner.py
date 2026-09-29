@@ -37,9 +37,10 @@ from circle_leads.join.ego_bridge import (
 from circle_leads.join.forms import FormField, make_form_llm, resolve_form
 from circle_leads.join.pacing import joins_attempted_today, sleep_between_attempts
 from circle_leads.reach import join_queue
+from circle_leads.storage.activity import log_activity
 from circle_leads.storage.database import Database
 from circle_leads.storage.models import (
-    CircleConnection, Community, JoinStatus, ReplaySession, utcnow,
+    JOIN_HANDOFF_PREFIX, CircleConnection, Community, JoinStatus, ReplaySession, utcnow,
 )
 from circle_leads.watch.poller import watch_member_now
 from circle_leads.web.replay_store import connect_host
@@ -55,8 +56,9 @@ logger = logging.getLogger(__name__)
 # ever writes joined/paid_skip/pending_approval/etc. to the DB, so a handoff
 # like application_form_detected (an unrecognized custom application form)
 # used to vanish the moment the process exited, with no record it ever
-# happened. This is the only durable trace of "what UI/form variants has the
-# batch actually seen" across runs.
+# happened. This file is what the queue order and the daily cap read; the
+# dashboard reads the same visits from activity_log (_record_visit), because
+# this file lives on whichever machine ran the batch.
 ATTEMPT_LOG_PATH = Path("data/join_attempts.log")
 
 
@@ -77,6 +79,59 @@ def _log_attempt(candidate: dict, status: str, detail: str, account: str,
         entry["visit"] = False
     with ATTEMPT_LOG_PATH.open("a") as f:
         f.write(json.dumps(entry) + "\n")
+
+
+def _record_visit(db: Database, candidate: dict, status: str, detail: str, account: str,
+                  *, level: str | None = None) -> None:
+    """Put one join visit in activity_log, where the dashboard can read it.
+
+    Never raises: the visit already happened, and losing its log row must not
+    stop the batch.
+    """
+    if level is None:
+        if status == "joined":
+            level = "success"
+        elif status in _TERMINAL_STATUS_MAP:
+            level = "info"
+        else:
+            level = "warning"  # the bot stopped and a person has to look
+    try:
+        with db.session() as s:
+            log_activity(
+                s,
+                kind="join",
+                level=level,
+                community=candidate["slug"],
+                summary=f"Join {status}: {candidate['slug']}",
+                detail={"status": status, "detail": (detail or "")[:1000],
+                        "account": account, "url": candidate["url"]},
+            )
+    except Exception:  # noqa: BLE001 - see the docstring
+        logger.warning("could not record the join visit to %s", candidate["slug"],
+                       exc_info=True)
+
+
+def _record_handoff(db: Database, community_id: int, status: str, detail: str) -> None:
+    """Say on the community row that the bot stopped there, and why.
+
+    Before this a handoff left nothing in the database: the join "did not
+    work" and nobody could say why without the batch machine's log file.
+    join_status stays as it is, so the row stays in the queue and the bot comes
+    back once the blocker is gone. join_attempted_at stays too: the daily cap
+    and the join queue's "last moved" read it as a terminal outcome.
+    """
+    stamp = utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    text = f"{JOIN_HANDOFF_PREFIX} {status} — {detail or 'the driver gave no detail'} ({stamp})"
+    try:
+        with db.session() as s:
+            community = s.get(Community, community_id)
+            if community is None:
+                return
+            community.join_status_detail = text[:2000]
+            community.join_attempts = (community.join_attempts or 0) + 1
+    except Exception:  # noqa: BLE001 - the attempt log already has it
+        logger.warning("could not record the handoff on community %s", community_id,
+                       exc_info=True)
 
 
 def _iter_attempt_log() -> "list[dict]":
@@ -307,7 +362,16 @@ def select_join_candidates(
     return candidates
 
 
-def _persist_terminal_outcome(db: Database, community_id: int, status: str, detail: str) -> None:
+# Outcomes after which one of our accounts is inside, or asked to be: the row
+# remembers which account (Community.join_account). Only that account can
+# refresh the session later -- another one is not a member.
+_MEMBER_STATUSES = (
+    JoinStatus.JOINED.value, JoinStatus.PROFILE_PENDING.value, JoinStatus.PENDING_APPROVAL.value,
+)
+
+
+def _persist_terminal_outcome(db: Database, community_id: int, status: str, detail: str,
+                              *, account: str | None = None) -> None:
     with db.session() as s:
         community = s.get(Community, community_id)
         if community is None:
@@ -318,6 +382,8 @@ def _persist_terminal_outcome(db: Database, community_id: int, status: str, deta
         community.join_attempts += 1
         if status == JoinStatus.JOINED.value:
             community.joined_at = utcnow()
+        if account and status in _MEMBER_STATUSES:
+            community.join_account = account
         host = community.host
     if status == JoinStatus.JOINED.value and host:
         # Joined without a captured session still gets the 2-minute watch;
@@ -451,6 +517,7 @@ def run_auto_join(
         dead = _dead_host_reason(candidate["url"])
         if dead:
             _log_attempt(candidate, "dead_host", dead, acct.key, visit=False)
+            _record_visit(db, candidate, "dead_host", dead, acct.key)
             _persist_terminal_outcome(db, candidate["id"], JoinStatus.DEAD_HOST.value, dead)
             result.skipped[candidate["slug"]] = dead
             continue
@@ -492,24 +559,28 @@ def run_auto_join(
                     )
         except EgoBrowserError as exc:
             logger.error("ego-browser bridge failed on %s: %s", candidate["slug"], exc)
+            _record_visit(db, candidate, "bridge_error", str(exc), acct.key, level="error")
             result.stopped_for = candidate["slug"]
             result.stop_reason = f"ego-browser bridge error: {exc}"
             break
 
         _log_attempt(candidate, outcome.status, outcome.detail, acct.key)
+        _record_visit(db, candidate, outcome.status, outcome.detail, acct.key)
 
         if outcome.status in ("profile_incomplete", "email_code_needed"):
             # The membership exists; only the profile step is open. Recorded so
             # the dashboard shows it and the queue brings the bot back to it.
             _persist_terminal_outcome(
-                db, candidate["id"], JoinStatus.PROFILE_PENDING.value, outcome.detail
+                db, candidate["id"], JoinStatus.PROFILE_PENDING.value, outcome.detail,
+                account=acct.key,
             )
             result.handoffs[candidate["slug"]] = f"{outcome.status}: {outcome.detail}"
         elif outcome.status not in _TERMINAL_STATUS_MAP:
-            # Nothing is written to the DB (the community stays in the queue so
-            # it is retried once the blocker is resolved), but the batch moves
-            # on. The handoff is durable in the attempt log, which is also what
-            # pushes this host down the queue on the next run.
+            # The community stays in the queue so it is retried once the
+            # blocker is resolved, but the batch moves on. The row says why
+            # (_record_handoff); the attempt log is what pushes this host down
+            # the queue on the next run.
+            _record_handoff(db, candidate["id"], outcome.status, outcome.detail)
             result.handoffs[candidate["slug"]] = f"{outcome.status}: {outcome.detail}"
             logger.info(
                 "%s needs a human (%s) -- skipping to the next candidate",
@@ -535,7 +606,8 @@ def run_auto_join(
                         candidate["slug"],
                     )
             _persist_terminal_outcome(
-                db, candidate["id"], _TERMINAL_STATUS_MAP[outcome.status], detail
+                db, candidate["id"], _TERMINAL_STATUS_MAP[outcome.status], detail,
+                account=acct.key,
             )
 
         sleep_between_attempts(pacing)

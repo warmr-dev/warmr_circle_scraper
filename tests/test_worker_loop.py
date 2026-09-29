@@ -236,6 +236,77 @@ def test_use_llm_flag_works_without_the_env_var(monkeypatch):
     assert icp_kwargs == [{"use_llm": True, "rescore_llm_eligible": True}]
 
 
+# --- How each stage ended, where the dashboard can read it -------------------
+#
+# The *_last_run keys are stamped when a stage starts. A stage that crashed
+# looked exactly like one that worked, and the only trace of the error was its
+# class name printed on the worker's host.
+
+
+def test_a_failed_stage_leaves_its_error_behind(monkeypatch):
+    import json
+
+    from circle_leads.cli import main as cli_main
+    from circle_leads.storage.settings_store import get_setting
+
+    url = _db_url()
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    _patch_scheduled_stages(monkeypatch)
+
+    def out_of_credits(db, req, **kw):
+        raise RuntimeError("openrouter said 402")
+
+    monkeypatch.setattr(cli_main, "classify_icp_pending", out_of_credits)
+
+    _run_worker(url, monkeypatch)
+
+    db = Database(url)
+    error = json.loads(get_setting(db, "icp_classification_last_error"))
+    assert error["error"] == "icp: RuntimeError: openrouter said 402"
+    assert error["at"]
+    assert get_setting(db, "icp_classification_last_finish") is None
+
+
+def test_a_finished_stage_says_so_with_its_result(monkeypatch):
+    import json
+
+    from circle_leads.storage.settings_store import get_setting
+
+    url = _db_url()
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    _patch_scheduled_stages(monkeypatch)
+
+    _run_worker(url, monkeypatch)
+
+    db = Database(url)
+    assert get_setting(db, "icp_classification_last_finish")
+    result = json.loads(get_setting(db, "icp_classification_last_result"))
+    assert result["icp"] == {"checked": 0, "flagged": 0, "not_flagged": 0}
+    assert get_setting(db, "icp_classification_last_error") is None
+
+
+def test_a_failed_harvest_job_leaves_its_error_behind(monkeypatch):
+    import json
+
+    from circle_leads import scanning
+    from circle_leads.storage.job_queue import enqueue
+    from circle_leads.storage.settings_store import get_setting
+
+    url = _worker_db(monkeypatch)
+    enqueue(Database(url), "harvest")
+
+    def pool_exhausted(db):
+        raise RuntimeError("pool exhausted")
+
+    monkeypatch.setattr(scanning, "cookie_hosts_vip_first", pool_exhausted)
+
+    _run_worker(url, monkeypatch)
+
+    error = json.loads(get_setting(Database(url), "harvest_last_error"))
+    assert error["error"] == "RuntimeError: pool exhausted"
+    assert _job_rows(url)["harvest"]["state"] == "error"
+
+
 # --- CLI wiring the automation depends on ------------------------------------
 
 

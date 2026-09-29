@@ -605,3 +605,64 @@ def test_a_moved_community_already_on_file_is_left_as_a_dead_copy(monkeypatch):
         assert row.host == "community.futureofsaas.io"
         assert row.join_type == JoinType.UNKNOWN
         assert row.join_type_detail.startswith("custom domain no longer served")
+
+
+def _closed(s, slug, *, join_type=JoinType.INVITE_ONLY, days_ago=8, icp=True,
+            detail="manual check 2026-09-19: invite"):
+    from datetime import timedelta
+
+    from circle_leads.storage.models import utcnow
+
+    c = get_or_create_community(s, slug=slug, url=f"https://{slug}.circle.so")
+    c.name, c.icp_flag, c.platform = slug, icp, "circle"
+    c.join_type, c.join_type_detail = join_type, detail
+    c.join_type_checked_at = utcnow() - timedelta(days=days_ago)
+    return c
+
+
+def test_the_scheduled_pass_asks_closed_fit_communities_again_once_a_week(monkeypatch):
+    """The user, 2026-09-29: the closed ones must be looked at weekly -- a
+    private community can open up. Only the harvest used to ask, and only
+    when it read one."""
+    db = _db()
+    with db.session() as s:
+        _closed(s, "stale-invite")
+        _closed(s, "stale-locked", join_type=JoinType.LOCKED_UNKNOWN,
+                detail="private (members only): HTTP 401 on communities/current")
+        _closed(s, "fresh-invite", days_ago=2)
+        _closed(s, "not-fit", icp=False)
+        free = _closed(s, "free", join_type=JoinType.FREE_JOIN, detail="open signup")
+        free.icp_flag = True
+
+    seen = []
+    monkeypatch.setattr(join_type_module, "fetch_join_classification",
+                        lambda host, session=None: seen.append(host) or JoinClassification(
+                            JoinType.LOCKED_UNKNOWN,
+                            "private (members only): HTTP 401 on communities/current"))
+    classify_join_type_pending(db, scheduled=True)
+    assert sorted(seen) == ["stale-invite.circle.so", "stale-locked.circle.so"]
+
+    from datetime import timedelta
+
+    from circle_leads.storage.models import utcnow
+
+    with db.session() as s:
+        row = s.scalar(select(Community).where(Community.slug == "stale-invite"))
+        # Still closed: the person's verdict stays, and it waits another week.
+        assert row.join_type == JoinType.INVITE_ONLY
+        assert row.join_type_detail.startswith("manual check")
+        checked = row.join_type_checked_at.replace(tzinfo=None)
+        assert utcnow().replace(tzinfo=None) - checked < timedelta(minutes=5)
+
+
+def test_a_closed_community_that_opened_up_is_free_to_join(monkeypatch):
+    db = _db()
+    with db.session() as s:
+        _closed(s, "opened")
+    monkeypatch.setattr(join_type_module, "fetch_join_classification",
+                        lambda host, session=None: JoinClassification(
+                            JoinType.FREE_JOIN, "open signup, no paywall"))
+    classify_join_type_pending(db, scheduled=True)
+    with db.session() as s:
+        assert s.scalar(select(Community.join_type).where(
+            Community.slug == "opened")) == JoinType.FREE_JOIN

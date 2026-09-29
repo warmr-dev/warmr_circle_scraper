@@ -180,6 +180,8 @@ class Database:
             ("communities", "join_attempted_at", "TIMESTAMP"),
             ("communities", "joined_at", "TIMESTAMP"),
             ("communities", "join_attempts", "INTEGER DEFAULT 0"),
+            # p29: which of our accounts got us in.
+            ("communities", "join_account", "VARCHAR(32)"),
             ("replay_sessions", "source", "VARCHAR(16) DEFAULT 'extension'"),
             # Why join_type landed where it did -- "unknown" alone doesn't say
             # whether a host is dead, timed out, or returned something odd;
@@ -191,6 +193,14 @@ class Database:
             # P25: one host = one community. Backfilled by the manual migration
             # on Postgres; here it only has to exist so writes do not fail.
             ("communities", "host", "VARCHAR(255)"),
+            # P28: what Vini said about each lead (attention_acks is a new
+            # table, so create_all makes it).
+            ("leads", "vini_status", "VARCHAR(32)"),
+            ("leads", "vini_reason", "TEXT"),
+            ("leads", "vini_ref", "VARCHAR(64)"),
+            ("leads", "vini_attempts", "INTEGER NOT NULL DEFAULT 0"),
+            ("leads", "vini_last_attempt_at", "TIMESTAMP"),
+            ("leads", "vini_responded_at", "TIMESTAMP"),
         ]
         # replay_sessions is a whole new table (Version B experiment); create_all
         # handles it, so no per-column entry is needed here.

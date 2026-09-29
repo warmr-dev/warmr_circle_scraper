@@ -21,6 +21,7 @@ import requests
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from circle_leads.storage.activity import log_activity
 from circle_leads.storage.models import Author, Community, Lead, Post, Setting, utcnow
 
 logger = logging.getLogger(__name__)
@@ -91,6 +92,17 @@ FIXABLE_HOLDS = {AUTHOR_IDENTITY_HOLD: "source_author_id", FETCHED_AT_HOLD: "fet
                  CLASSIFIED_AT_HOLD: "classified_at"}
 # One-shot: leads stamped synced before the payload carried source_author_id.
 RESEND_WITH_AUTHOR_KEY = "vini_author_identity_resend"
+
+# What Vini said about a lead, kept on the lead itself (Lead.vini_status).
+# external_synced_at cannot answer "does the client see it": a parked lead is
+# stamped exactly like a published one.
+VINI_ACCEPTED = "accepted"
+VINI_DUPLICATE = "duplicate"
+VINI_HELD = "held"
+VINI_REJECTED = "rejected"
+VINI_ERROR = "error"  # no answer at all: HTTP error, timeout
+# Landed statuses that mean "already have this one", not "took it just now".
+DUPLICATE_STATUSES = frozenset({"duplicate", "skipped"})
 
 
 def load_vini_ingest_config() -> ViniIngestConfig:
@@ -292,6 +304,86 @@ def _load_lead_bundle(
     ]
 
 
+def _record_answer(lead: Lead, status: str, reason: str | None, ref: Any,
+                   at: datetime) -> bool:
+    """Keep what Vini said about ``lead``. True when it differs from before."""
+    reason = (reason or "")[:300] or None
+    changed = (lead.vini_status, lead.vini_reason) != (status, reason)
+    lead.vini_status = status
+    lead.vini_reason = reason
+    if ref not in (None, ""):
+        lead.vini_ref = str(ref)[:64]
+    lead.vini_attempts = (lead.vini_attempts or 0) + 1
+    lead.vini_last_attempt_at = at
+    lead.vini_responded_at = at
+    return changed
+
+
+def _record_no_answer(lead: Lead, error: str, at: datetime) -> bool:
+    """A push that got no answer at all: an HTTP error, a timeout.
+
+    That says nothing about what Vini thinks of the lead, so an earlier answer
+    stays as it was. Only a lead Vini has never answered is marked ``error``.
+    """
+    lead.vini_attempts = (lead.vini_attempts or 0) + 1
+    lead.vini_last_attempt_at = at
+    if lead.vini_status not in (None, VINI_ERROR):
+        return False
+    reason = (error or "")[:300] or None
+    changed = (lead.vini_status, lead.vini_reason) != (VINI_ERROR, reason)
+    lead.vini_status = VINI_ERROR
+    lead.vini_reason = reason
+    return changed
+
+
+def _log_answers(session: Session, changed: list[Lead], slug_of: dict[int, str],
+                 *, error: str | None = None) -> None:
+    """One activity row when Vini's answer about some lead changed.
+
+    Only on a change: the watcher drains after every batch and a refused lead
+    is sent again each time, so a row per push would bury the log in copies.
+    Ids go in one key per status because the activity log cuts any single
+    value at 2000 characters.
+    """
+    if not changed:
+        return
+    by_status: dict[str, list[int]] = {}
+    reasons: dict[str, int] = {}
+    for lead in changed:
+        by_status.setdefault(lead.vini_status or "", []).append(lead.id)
+        if lead.vini_status in (VINI_HELD, VINI_REJECTED, VINI_ERROR) and lead.vini_reason:
+            key = lead.vini_reason[:80]
+            reasons[key] = reasons.get(key, 0) + 1
+    detail: dict[str, Any] = {
+        f"{status}_ids": ",".join(str(i) for i in ids[:100])
+        for status, ids in by_status.items()
+    }
+    detail["counts"] = {status: len(ids) for status, ids in by_status.items()}
+    if reasons:
+        top = sorted(reasons.items(), key=lambda kv: -kv[1])[:15]
+        detail["reasons"] = dict(top)
+    if error:
+        detail["error"] = error[:300]
+    slugs = {slug_of.get(lead.id) for lead in changed}
+    if VINI_ERROR in by_status:
+        level = "error"
+    elif VINI_HELD in by_status or VINI_REJECTED in by_status:
+        level = "warning"
+    else:
+        level = "success"
+    log_activity(
+        session,
+        kind="export",
+        level=level,
+        community=slugs.pop() if len(slugs) == 1 else None,
+        summary="Vini answered: " + ", ".join(
+            f"{status} {len(ids)}" for status, ids in sorted(by_status.items())
+        ),
+        detail=detail,
+        leads_found=len(by_status.get(VINI_ACCEPTED, [])),
+    )
+
+
 def push_leads_by_ids(
     session: Session,
     lead_ids: Iterable[int],
@@ -311,6 +403,7 @@ def push_leads_by_ids(
     bundles = _load_lead_bundle(session, ids)
     payloads: list[dict[str, Any]] = []
     ready_leads: list[Lead] = []
+    slug_of: dict[int, str] = {}
 
     for lead, post, community, author in bundles:
         if not force and lead.external_synced_at is not None:
@@ -327,6 +420,7 @@ def push_leads_by_ids(
             continue
         payloads.append(payload)
         ready_leads.append(lead)
+        slug_of[lead.id] = community.slug
 
     result.attempted = len(payloads)
     if not payloads:
@@ -337,9 +431,13 @@ def push_leads_by_ids(
     except Exception as exc:  # noqa: BLE001 - caller should keep local leads
         result.errors.append(str(exc))
         logger.exception("Failed to push %d lead(s) to Vini ingest", len(payloads))
+        at = utcnow()
+        changed = [lead for lead in ready_leads if _record_no_answer(lead, str(exc), at)]
+        _log_answers(session, changed, slug_of, error=str(exc))
         return result
 
     synced_at = utcnow()
+    changed: list[Lead] = []
     for index, lead in enumerate(ready_leads):
         item = results[index] if index < len(results) else None
         if item is None:
@@ -347,9 +445,12 @@ def push_leads_by_ids(
             # sent). Keep the old behaviour: a 2xx counts as delivered.
             lead.external_synced_at = synced_at
             result.sent += 1
+            if _record_answer(lead, VINI_ACCEPTED, "no_item_result", None, synced_at):
+                changed.append(lead)
             continue
 
         status = str(item.get("status") or "").strip().lower()
+        ref = item.get("id") or item.get("lead_id") or item.get("leadId")
         result.outcomes[status or "(no status)"] = (
             result.outcomes.get(status or "(no status)", 0) + 1
         )
@@ -360,6 +461,8 @@ def push_leads_by_ids(
                 if item.get(k)
             )
             result.held.append((lead.id, reason[:300]))
+            if _record_answer(lead, VINI_HELD, reason, ref, synced_at):
+                changed.append(lead)
             sent = payloads[index] or {}
             if any(hold in reason and not sent.get(field_name)
                    for hold, field_name in FIXABLE_HOLDS.items()):
@@ -374,12 +477,20 @@ def push_leads_by_ids(
         if status in LANDED_STATUSES:
             lead.external_synced_at = synced_at
             result.sent += 1
+            answer = VINI_DUPLICATE if status in DUPLICATE_STATUSES else VINI_ACCEPTED
+            if _record_answer(lead, answer, status, ref, synced_at):
+                changed.append(lead)
         else:
             # Leave external_synced_at NULL so push_unsynced_leads picks it up
             # again. Stamping it was how leads that never arrived came to be
             # recorded as delivered.
             message = str(item.get("error") or item.get("reason") or "")[:300]
             result.rejected.append((lead.id, status or "(no status)", message))
+            reason = f"{status or '(no status)'}: {message}" if message else (status or "(no status)")
+            if _record_answer(lead, VINI_REJECTED, reason, ref, synced_at):
+                changed.append(lead)
+
+    _log_answers(session, changed, slug_of)
 
     if result.held:
         logger.error(

@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
+from sqlalchemy import select
 
 from circle_leads.export.vini_ingest import (
     DEFAULT_INGEST_URL,
@@ -590,3 +591,158 @@ def test_push_leads_resends_exactly_the_given_ids(tmp_path, monkeypatch):
     sent = mock_post.call_args.args[0]
     assert [p["external_id"] for p in sent] == [
         "circle:acme:lead:post-1", "circle:acme:lead:post-extra-1"]
+
+
+# --- Vini's answer is kept on the lead ---------------------------------------
+#
+# external_synced_at is set both for a lead Vini published and for one it
+# parked, so "which leads does the client actually see" had no answer outside
+# the worker's log. The answer now lives on the lead (vini_status/reason/ref).
+
+def _answer(db, lead_id):
+    with db.session() as s:
+        lead = s.get(Lead, lead_id)
+        return (lead.vini_status, lead.vini_reason, lead.vini_ref,
+                lead.vini_attempts, lead.vini_responded_at is not None)
+
+
+@pytest.mark.parametrize("status, expected", [
+    ("inserted", "accepted"), ("created", "accepted"), ("accepted", "accepted"),
+    ("ok", "accepted"), ("success", "accepted"),
+    ("duplicate", "duplicate"), ("skipped", "duplicate"),
+])
+def test_a_landed_answer_is_kept(db, monkeypatch, status, expected):
+    ids, _ = _push_with(db, monkeypatch, [{"status": status, "id": 7}])
+    assert _answer(db, ids[0]) == (expected, status, "7", 1, True)
+
+
+def test_a_hold_is_kept_with_vinis_reason(db, monkeypatch):
+    ids, _ = _push_with(db, monkeypatch, [{
+        "status": "held", "decision": "invalid_timestamp",
+        "holdReason": "missing_source_author_identity"}])
+    status, reason, _ref, attempts, answered = _answer(db, ids[0])
+    assert (status, attempts, answered) == ("held", 1, True)
+    assert reason == "invalid_timestamp missing_source_author_identity"
+
+
+@pytest.mark.parametrize("item, reason", [
+    ({"status": "error", "error": "content is required"}, "error: content is required"),
+    ({"status": "historical_expired"}, "historical_expired"),
+    ({"status": "discarded", "reason": "spam"}, "discarded: spam"),
+])
+def test_a_refusal_is_kept_with_its_reason(db, monkeypatch, item, reason):
+    ids, _ = _push_with(db, monkeypatch, [item])
+    assert _answer(db, ids[0])[:2] == ("rejected", reason)
+
+
+def test_no_answer_per_item_counts_as_accepted_and_says_so(db, monkeypatch):
+    ids, _ = _push_with(db, monkeypatch, [])
+    assert _answer(db, ids[0])[:2] == ("accepted", "no_item_result")
+
+
+def test_a_transport_error_is_an_error_until_vini_answers(db, monkeypatch):
+    monkeypatch.setenv("SUPABASE_ANON_KEY", "anon")
+    monkeypatch.setenv("VINI_API_SECRET", "secret")
+    lead_id = _seed_lead(db)
+    with patch("circle_leads.export.vini_ingest.post_leads_to_vini",
+               side_effect=RuntimeError("Vini ingest HTTP 503: down")):
+        with db.session() as s:
+            push_leads_by_ids(s, [lead_id])
+    status, reason, _ref, attempts, answered = _answer(db, lead_id)
+    assert (status, attempts, answered) == ("error", 1, False)
+    assert "HTTP 503" in reason
+
+
+def test_a_transport_error_does_not_erase_an_earlier_answer(db, monkeypatch):
+    """A timeout says nothing about what Vini thinks of the lead."""
+    monkeypatch.setenv("SUPABASE_ANON_KEY", "anon")
+    monkeypatch.setenv("VINI_API_SECRET", "secret")
+    ids, _ = _push_with(db, monkeypatch, [{
+        "status": "held", "decision": "needs_review", "holdReason": "manual"}])
+    with patch("circle_leads.export.vini_ingest.post_leads_to_vini",
+               side_effect=RuntimeError("timeout")):
+        with db.session() as s:
+            push_leads_by_ids(s, ids, force=True)
+    status, reason, _ref, attempts, _answered = _answer(db, ids[0])
+    assert (status, reason, attempts) == ("held", "needs_review manual", 2)
+
+
+def _export_rows(db):
+    from circle_leads.storage.models import ActivityLog
+
+    with db.session() as s:
+        return [(a.level, a.summary, a.detail) for a in s.scalars(
+            select(ActivityLog).where(ActivityLog.kind == "export").order_by(ActivityLog.id))]
+
+
+def test_a_changed_answer_is_logged_once(db, monkeypatch):
+    """The watcher drains after every batch and a refused lead goes out again
+    each time: a row per push would bury the log in identical copies."""
+    from circle_leads.export.vini_ingest import push_unsynced_leads
+
+    ids, _ = _push_with(db, monkeypatch, [{"status": "discarded", "reason": "spam"}])
+    with patch("circle_leads.export.vini_ingest.post_leads_to_vini") as mock_post:
+        mock_post.return_value = [{"status": "discarded", "reason": "spam"}]
+        with db.session() as s:
+            push_unsynced_leads(s)
+    rows = _export_rows(db)
+    assert len(rows) == 1
+    level, summary, detail = rows[0]
+    assert level == "warning"
+    assert summary == "Vini answered: rejected 1"
+    assert detail["rejected_ids"] == str(ids[0])
+    assert detail["reasons"] == {"discarded: spam": 1}
+
+    # A different answer is news again.
+    with patch("circle_leads.export.vini_ingest.post_leads_to_vini") as mock_post:
+        mock_post.return_value = [{"status": "inserted"}]
+        with db.session() as s:
+            push_unsynced_leads(s)
+    assert [r[0] for r in _export_rows(db)] == ["warning", "success"]
+
+
+def test_a_mixed_batch_is_one_row_with_ids_per_answer(db, monkeypatch):
+    first = _seed_lead(db)
+    ids = [first] + _seed_sibling_leads(db, first, 2)
+    _push_with(db, monkeypatch, [
+        {"status": "inserted"},
+        {"status": "held", "decision": "invalid_timestamp", "holdReason": "x"},
+        {"status": "error", "error": "boom"},
+    ], lead_ids=ids)
+    rows = _export_rows(db)
+    assert len(rows) == 1
+    level, _summary, detail = rows[0]
+    assert level == "warning"
+    assert detail["counts"] == {"accepted": 1, "held": 1, "rejected": 1}
+    assert detail["accepted_ids"] == str(ids[0])
+    assert detail["held_ids"] == str(ids[1])
+    assert detail["rejected_ids"] == str(ids[2])
+
+
+def test_the_triage_path_leaves_one_export_row(db, monkeypatch):
+    """The push logs for every caller now; the triage path must not add its
+    own copy of the same row."""
+    from circle_leads.config.settings import Requirements
+    from circle_leads.triage.pipeline import triage_records
+
+    monkeypatch.setenv("SUPABASE_ANON_KEY", "anon")
+    monkeypatch.setenv("VINI_API_SECRET", "secret")
+    reqs = Requirements(
+        target_roles=["Flutter Developer", "Mobile Developer"],
+        target_skills=["Flutter", "Mobile Development"],
+        minimum_confidence=0.5,
+        exclude_job_seekers=True,
+    )
+    records = [{
+        "content": "We're looking for a Flutter developer to build our mobile app.",
+        "url": "https://acme.circle.so/c/jobs/99",
+        "author": {"display_name": "Priya"},
+        "published_at": datetime.now(timezone.utc).replace(tzinfo=None),
+    }]
+    with patch("circle_leads.export.vini_ingest.post_leads_to_vini") as mock_post:
+        mock_post.return_value = [{"status": "inserted", "id": 11}]
+        result = triage_records(db, records, reqs, community="acme",
+                                source_url="https://acme.circle.so")
+    assert result.leads
+    rows = _export_rows(db)
+    assert len(rows) == 1 and rows[0][1] == "Vini answered: accepted 1"

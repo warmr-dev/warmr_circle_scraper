@@ -352,9 +352,11 @@ def classify_join_type_pending(
     ``recheck`` re-classifies every community instead of only never-checked
     ones -- e.g. to backfill join_type_detail (P21) onto rows classified
     before that column existed, or after a classification-rule change.
-    ``scheduled`` is the worker's unattended pass: never-checked rows plus
+    ``scheduled`` is the worker's unattended pass: never-checked rows,
     "unknown" answers older than UNKNOWN_RECHECK_AFTER that another look could
-    still change (not TERMINAL_UNKNOWN_PREFIXES), ICP-fit and named first --
+    still change (not TERMINAL_UNKNOWN_PREFIXES), and ICP-fit communities
+    closed to us that were last asked a week ago (reach.closed_recheck_due),
+    ICP-fit and named first --
     the rows the dashboard's re-check queue counts. Before, the pass took
     never-checked rows by id, so it could not touch a single one of the 443
     "unknown" rows that queue showed: every one of them had been checked once.
@@ -371,18 +373,21 @@ def classify_join_type_pending(
 def _pending_query(*, recheck: bool, scheduled: bool):
     from sqlalchemy import and_, case, nullsfirst, or_, select
 
-    from circle_leads.reach import real_host
+    from circle_leads.reach import closed_recheck_due, real_host
     from circle_leads.storage.models import Community, utcnow
 
     query = select(Community.id)
     if scheduled:
         named = and_(Community.name.is_not(None), Community.name != "")
+        now = utcnow()
         return query.where(
             real_host(),
             or_(
                 Community.join_type_checked_at.is_(None),
                 and_(recheckable_unknown(),
-                     Community.join_type_checked_at < utcnow() - UNKNOWN_RECHECK_AFTER),
+                     Community.join_type_checked_at < now - UNKNOWN_RECHECK_AFTER),
+                # ICP-fit and closed to us: once a week, in case it opened.
+                closed_recheck_due(now),
             ),
         ).order_by(
             Community.icp_flag.desc(),
