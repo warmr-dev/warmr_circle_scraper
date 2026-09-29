@@ -46,6 +46,32 @@ That difference is the entire reason the split exists.
      └───────────────────────┘
 ```
 
+## Automatic runs on the droplet (2026-09-29)
+
+The known path now runs by itself, from the join queue, and writes what
+happened to the database -- `circle-leads auto-join --driver cdp --account 4`,
+started by `warmr-join.timer` every four hours (`deploy/droplet/`).
+
+- **The walk** is `circle_leads/join/cdp_join.py`: the Ego driver's state
+  machine (`ego_join_driver.mjs`), ported rule for rule to Python and driven
+  over CDP in `warmr-browser`.
+- **The emailed code** is read from the bot mailbox while the page waits, and
+  typed in the same visit: at sign-in (`/two_fa`) and on the join step alike.
+  A code that never arrives stops the visit as `login_code_needed` (before a
+  membership, a handoff) or `email_code_needed` (after it, `profile_pending`).
+- **The profile questions** are answered from `join_form_answers`
+  (`forms.resolve_form`) in the same visit; a question the bot may not answer
+  stops it as `profile_incomplete`, naming the question.
+- **Outcomes** go where the Mac's runs put them: `join_status`, the account in
+  `communities.join_account`, the session through `connect_host`, every visit
+  in `activity_log` (`join`), a handoff in `join_status_detail`.
+- **The Mac's Ego runs are off** since 2026-09-29 (WORKLOG). The Ego path stays
+  in the code for a Mac that needs it: `--driver ego` is the default.
+
+Not verified yet: a join by this walk against a live community. The first run
+is one community by hand (the command is printed by `deploy_release.sh`), and
+the timer is enabled only after it.
+
 ## Why the work is split
 
 Measured on 2026-09-25, one community per run, driven end to end by the Hermes
@@ -237,7 +263,7 @@ Verified on the droplet, 2026-09-25:
   queue, so this test is available and should be the next one run.
 - **The agent fallback is not wired on the droplet.** Hermes is not installed
   there. Today an `UNKNOWN` page stops the run and waits for a person.
-- **Outcomes are not persisted.** `join_one.py` prints; the three rows written
+- **Outcomes are not persisted** by `join_one.py` (it prints; the automatic runs above do). The three rows written
   on 2026-09-25 were written by hand in one transaction.
 - **Volume from one server IP is untested.** Every run so far was a single
   visit. A series of 20–25 visits in a row from this address has not been

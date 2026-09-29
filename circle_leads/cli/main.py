@@ -390,8 +390,17 @@ def join_queue_cmd(ctx, limit):
                    "CIRCLE_EMAIL2/PASSWORD2) or 3..10 (CIRCLE_EMAIL<n>/PASSWORD<n>). Each runs in "
                    "its own Ego Lite profile (CIRCLE_EGO_PROFILE, CIRCLE_EGO_PROFILE2, ...) and has "
                    "its own daily cap.")
+@click.option("--driver", type=click.Choice(["ego", "cdp"]), default="ego", show_default=True,
+              help="ego: the Mac's Ego Lite. cdp: a Chrome already running with a debugging "
+                   "port -- the droplet's warmr-browser.service -- which also reads the emailed "
+                   "code from the bot mailbox (CIRCLE_MAIL_USER / CIRCLE_MAIL_APP_PASSWORD).")
+@click.option("--cdp-url", default=None, help="The browser's debugging address "
+                                               "(default http://127.0.0.1:9222).")
+@click.option("--code-timeout", type=int, default=420, show_default=True,
+              help="Seconds to wait for Circle's emailed code (cdp only).")
 @click.pass_context
-def auto_join_cmd(ctx, limit, host, space_id, screenshot_dir, dry_run, account):
+def auto_join_cmd(ctx, limit, host, space_id, screenshot_dir, dry_run, account, driver, cdp_url,
+                  code_timeout):
     """Join ICP-qualified free/paid Circle communities via ego-browser.
 
     Drives the operator's own ego-browser (Ego Lite) Chromium, logging in
@@ -409,6 +418,7 @@ def auto_join_cmd(ctx, limit, host, space_id, screenshot_dir, dry_run, account):
       circle-leads auto-join --host practicommunity --dry-run
       circle-leads auto-join --space-id 7               # resume after a handoff
       circle-leads auto-join --account test --host matadorbet-giris
+      circle-leads auto-join --driver cdp --account 4 --limit 5   # on the droplet
     """
     from circle_leads.join.ego_bridge import EgoBrowserError
     from circle_leads.join.joiner import run_auto_join
@@ -423,6 +433,9 @@ def auto_join_cmd(ctx, limit, host, space_id, screenshot_dir, dry_run, account):
             screenshot_dir=screenshot_dir,
             dry_run=dry_run,
             account=account,
+            driver=driver,
+            cdp_url=cdp_url,
+            code_timeout=code_timeout,
         )
     except (EgoBrowserError, RuntimeError) as exc:
         raise click.ClickException(str(exc)) from exc
@@ -431,7 +444,8 @@ def auto_join_cmd(ctx, limit, host, space_id, screenshot_dir, dry_run, account):
         click.echo(f"Would attempt {len(result.attempted)}: {', '.join(result.attempted) or '(none)'}")
         return
 
-    click.echo(f"ego-browser task space: {result.space_id}")
+    if driver == "ego":
+        click.echo(f"ego-browser task space: {result.space_id}")
     click.echo(
         f"Attempted {len(result.attempted)}, joined {len(result.joined)}: "
         f"{', '.join(result.joined) or '(none)'}"
@@ -445,11 +459,13 @@ def auto_join_cmd(ctx, limit, host, space_id, screenshot_dir, dry_run, account):
     # so without this the run's most actionable outcome -- the hosts waiting on
     # a human -- would be invisible in the output.
     if result.handoffs:
+        resume = (f"\nResolve them in ego-browser, then resume with: "
+                  f"circle-leads auto-join --space-id {result.space_id}" if driver == "ego"
+                  else "\nThey stay in the queue; the dashboard's attention list says why.")
         click.echo(
             f"\n{len(result.handoffs)} need a human: "
             + ", ".join(f"{slug} ({why})" for slug, why in result.handoffs.items())
-            + f"\nResolve them in ego-browser, then resume with: "
-            f"circle-leads auto-join --space-id {result.space_id}",
+            + resume,
             err=True,
         )
     if result.stopped_for:
@@ -1433,6 +1449,26 @@ def dashboard_cmd(ctx, host, port):
     from circle_leads.web.app import run
 
     run(host=host, port=port, db=ctx.obj["db"])
+
+
+@cli.command("check-schema")
+@click.pass_context
+def check_schema_cmd(ctx):
+    """Exit 1 if the database lacks a column this code maps (read-only).
+
+    Run before switching a release: with SKIP_DB_INIT=true a missing
+    migration only shows up as every query on that table failing.
+    """
+    from circle_leads.storage.schema_check import missing_columns
+
+    missing = missing_columns(ctx.obj["db"].engine)
+    if missing:
+        click.echo("Missing in the database -- apply the pending migrations/manual/ files first:",
+                   err=True)
+        for name in missing:
+            click.echo(f"  {name}", err=True)
+        ctx.exit(1)
+    click.echo("schema ok: every mapped table and column is there")
 
 
 @cli.command("worker")
