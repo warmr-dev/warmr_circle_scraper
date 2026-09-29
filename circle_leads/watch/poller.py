@@ -521,6 +521,11 @@ def _finish(db: Database, state: dict, outcome: WatchOutcome, tuning: WatchTunin
             row.mode = WatchMode.COOKIE.value if has_session else WatchMode.OFF.value
         elif outcome.status == "notfound":
             row.mode = WatchMode.OFF.value
+        elif outcome.status in ("ok", "not_modified") and row.mode == WatchMode.OFF.value:
+            # Switched off because it refused us, and now the feed answers
+            # without a login: the community opened up. Left off, it stayed on
+            # the once-a-day check for good while its posts were readable.
+            row.mode = WatchMode.ANON.value
 
         delay = tuning.off_interval if row.mode == WatchMode.OFF.value else _next_delay(
             {**state, "consecutive_errors": row.consecutive_errors, "tier": row.tier},
