@@ -47,7 +47,11 @@ systemctl daemon-reload
 
 ln -sfn "$REL" /opt/warmr/current
 ln -sfn "$REL" /opt/warmr/watcher
-systemctl restart warmr-worker warmr-watcher
+# A stop that times out (a worker deep in a long step) makes `systemctl
+# restart` fail although the new worker comes up. That stopped this script --
+# and whatever was chained after it with && -- on 2026-09-29 and 09-30.
+# Whether the services run is what the is-active line below checks.
+systemctl restart warmr-worker warmr-watcher || echo "restart reported a failure; checking the services"
 sleep 20
 systemctl is-active warmr-worker warmr-watcher warmr-browser
 readlink -f /opt/warmr/current

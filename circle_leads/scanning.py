@@ -128,10 +128,13 @@ def scan_cookie_host(db: Database, requirements: Requirements, host: str, *,
                     )
                 leads += len(res.leads)
             suffix = " (partial — scan again to continue)" if partial else ""
-            detail = (f"{total} post(s), {leads} lead(s) from "
-                      f"{readable}/{spaces_total} space(s){suffix}"
-                      if total else
-                      f"No readable posts ({spaces_total} space(s) visible){suffix}.")
+            if total:
+                detail = (f"{total} post(s), {leads} lead(s) from "
+                          f"{readable}/{spaces_total} space(s){suffix}")
+            elif since is not None:
+                detail = f"No new posts since the last read ({spaces_total} space(s) visible){suffix}."
+            else:
+                detail = f"No readable posts ({spaces_total} space(s) visible){suffix}."
     except SessionInvalid:
         state = ConnectionState.SESSION_EXPIRED
         detail = "Session rejected -- refresh the cookie."
@@ -154,7 +157,15 @@ def scan_cookie_host(db: Database, requirements: Requirements, host: str, *,
             s.add(conn)
         conn.state = state.value
         conn.state_detail = detail or None
-        conn.spaces_readable = readable
+        if since is not None and state == ConnectionState.CONNECTED:
+            # A re-read counts only the spaces with something new in them. Stored
+            # as is, a quiet day wrote 0, and _rescan_since took that for an
+            # empty read, so every other pass re-read the whole archive:
+            # entrepreneur-bootcamp 205 posts at 21:45, 0 at 03:41 (2026-09-29/30).
+            # The spaces the session reads are the ones the full read found.
+            conn.spaces_readable = max(readable, conn.spaces_readable or 0)
+        else:
+            conn.spaces_readable = readable
         conn.spaces_total = spaces_total
         conn.last_sync_at = _dt.datetime.utcnow()
         if state == ConnectionState.CONNECTED and spaces_total and not partial:

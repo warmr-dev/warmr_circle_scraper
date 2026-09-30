@@ -344,3 +344,22 @@ def test_auto_join_prints_the_hosts_waiting_on_a_human(monkeypatch):
     assert "1 need a human" in res.output
     assert "needs_login" in res.output
     assert "--space-id 7" in res.output
+
+
+from pathlib import Path  # noqa: E402
+
+
+def test_a_stop_request_leaves_on_its_own_when_the_step_runs_long():
+    """systemd killed the worker at TimeoutStopSec on 2026-09-29 and 09-30:
+    a false alert, and a failed restart that stopped the deploy script."""
+    from circle_leads.cli.main import WORKER_STOP_GRACE_S, _leave_after
+
+    left = []
+    timer = _leave_after(0.01, leave=left.append)
+    timer.join(2)
+    assert left == [0]                      # a clean exit, not a kill
+
+    unit = Path(__file__).parents[1] / "deploy" / "droplet" / "warmr-worker.service"
+    timeout = next(int(line.split("=", 1)[1]) for line in unit.read_text().splitlines()
+                   if line.startswith("TimeoutStopSec="))
+    assert WORKER_STOP_GRACE_S < timeout    # gone before systemd would kill it

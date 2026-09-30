@@ -557,3 +557,47 @@ def test_a_complete_member_scan_counts_as_a_read(monkeypatch):
     assert out["state"] == "connected"
     with db.session() as s:
         assert s.scalar(select(Community.last_synced_at).where(Community.slug == "x")) is not None
+
+
+def test_a_quiet_reread_keeps_the_spaces_the_session_reads(monkeypatch):
+    """A re-read counts only spaces with something new. Written as is, a quiet
+    pass stored 0 readable spaces, _rescan_since took that for an empty read,
+    and every other pass re-read the whole archive: entrepreneur-bootcamp read
+    205 posts at 21:45 and 0 at 03:41 (2026-09-29/30), over and over."""
+    from datetime import datetime
+
+    from sqlalchemy import select
+
+    from circle_leads.config.settings import load_requirements
+    from circle_leads.scanning import _rescan_since, scan_cookie_host
+    from circle_leads.scraper import member_api_reader
+    from circle_leads.storage.models import CircleConnection
+    from circle_leads.web import replay_store
+
+    db = _conn_db()
+    with db.session() as s:
+        s.add(CircleConnection(host="x.circle.so", state="connected",
+                               state_detail="205 post(s), 0 lead(s) from 8/17 space(s)",
+                               spaces_total=17, spaces_readable=8,
+                               last_sync_at=datetime(2026, 9, 29, 21, 45)))
+    monkeypatch.setattr(replay_store, "load_cookies",
+                        lambda db_, host: [{"name": "_circle_session", "value": "tok"}])
+    monkeypatch.setattr(member_api_reader.MemberApiReader, "list_spaces",
+                        lambda self: [{"id": i, "slug": f"s{i}", "name": f"S{i}"} for i in range(17)])
+    asked_since = []
+
+    def nothing_new(reader, space_id, **kw):
+        asked_since.append(kw.get("since"))
+        return []
+
+    monkeypatch.setattr(member_api_reader, "fetch_space_posts", nothing_new)
+
+    out = scan_cookie_host(db, load_requirements(), "x.circle.so")
+
+    assert out["state"] == "connected"
+    assert all(since is not None for since in asked_since)   # it was a re-read
+    with db.session() as s:
+        conn = s.scalar(select(CircleConnection).where(CircleConnection.host == "x.circle.so"))
+        assert conn.spaces_readable == 8
+        assert conn.state_detail == "No new posts since the last read (17 space(s) visible)."
+    assert _rescan_since(db, "x.circle.so") is not None      # and the next one is too
