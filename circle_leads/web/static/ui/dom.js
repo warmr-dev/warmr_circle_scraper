@@ -36,7 +36,7 @@ export const $$ = (selector, root = document) => [...root.querySelectorAll(selec
 
 // --- formatting ---------------------------------------------------------------
 
-const NUMBER = new Intl.NumberFormat('ru-RU');
+const NUMBER = new Intl.NumberFormat('en-US');
 export const num = (n) => (n === null || n === undefined ? '—' : NUMBER.format(n));
 
 export function pct(part, whole) {
@@ -54,21 +54,21 @@ export function when(iso) {
   const now = new Date();
   const time = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
   const sameDay = d.toDateString() === now.toDateString();
-  if (sameDay) return `сегодня ${time}`;
-  const date = `${pad(d.getDate())}.${pad(d.getMonth() + 1)}`;
-  return d.getFullYear() === now.getFullYear() ? `${date} ${time}` : `${date}.${d.getFullYear()}`;
+  if (sameDay) return `today ${time}`;
+  const date = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  return d.getFullYear() === now.getFullYear() ? `${date} ${time}` : `${date}, ${d.getFullYear()}`;
 }
 
 export function ago(iso) {
-  if (!iso) return 'никогда';
+  if (!iso) return 'never';
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return '—';
   const s = Math.round((Date.now() - d.getTime()) / 1000);
-  if (s < 0) return `через ${Math.round(-s / 60)} мин`;
-  if (s < 60) return 'только что';
-  if (s < 3600) return `${Math.floor(s / 60)} мин назад`;
-  if (s < 48 * 3600) return `${Math.floor(s / 3600)} ч назад`;
-  return `${Math.floor(s / 86400)} дн назад`;
+  if (s < 0) return `in ${Math.round(-s / 60)} min`;
+  if (s < 60) return 'just now';
+  if (s < 3600) return `${Math.floor(s / 60)} min ago`;
+  if (s < 48 * 3600) return `${Math.floor(s / 3600)} h ago`;
+  return `${Math.floor(s / 86400)} d ago`;
 }
 
 export function utcOffsetLabel() {
@@ -104,9 +104,9 @@ export function pager(page, limit, total, onGo) {
   const el = document.createElement('div');
   el.className = 'pager';
   render(el, html`
-    <button data-go="${page - 1}" ${page <= 1 ? raw('disabled') : ''}>← Назад</button>
-    <span>страница ${num(page)} из ${num(pages)} · всего ${num(total)}</span>
-    <button data-go="${page + 1}" ${page >= pages ? raw('disabled') : ''}>Дальше →</button>`);
+    <button data-go="${page - 1}" ${page <= 1 ? raw('disabled') : ''}>← Previous</button>
+    <span>page ${num(page)} of ${num(pages)} · ${num(total)} total</span>
+    <button data-go="${page + 1}" ${page >= pages ? raw('disabled') : ''}>Next →</button>`);
   el.addEventListener('click', (e) => {
     const b = e.target.closest('button[data-go]');
     if (b && !b.disabled) onGo(Number(b.dataset.go));

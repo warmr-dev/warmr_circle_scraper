@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="ru">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -10,16 +10,17 @@
 <body>
 <div class="app">
   <aside class="sidebar">
-    <div class="brand"><span class="logo">W</span> Warmr Circle</div>
-    <nav aria-label="Разделы">
-      <a href="#/analytics" data-section="analytics"><span class="n">1</span>Аналитика</a>
-      <a href="#/monitoring" data-section="monitoring"><span class="n">2</span>Мониторинг</a>
-      <a href="#/leads" data-section="leads"><span class="n">3</span>Лиды</a>
-      <a href="#/communities" data-section="communities"><span class="n">4</span>База сообществ</a>
-      <a href="#/attention" data-section="attention"><span class="n">5</span>Требует внимания<span id="attention-badge" class="badge" hidden></span></a>
-      <a href="#/config" data-section="config"><span class="n">6</span>Конфиг</a>
+    <div class="brand"><span class="logo" aria-hidden="true">🔥</span> Warmr Circle</div>
+    <nav aria-label="Sections">
+      <a href="#/analytics" data-section="analytics"><span class="ic" aria-hidden="true">📊</span>Analytics</a>
+      <a href="#/monitoring" data-section="monitoring"><span class="ic" aria-hidden="true">📡</span>Monitoring</a>
+      <a href="#/leads" data-section="leads"><span class="ic" aria-hidden="true">🎯</span>Leads</a>
+      <a href="#/communities" data-section="communities"><span class="ic" aria-hidden="true">🌐</span>Communities</a>
+      <a href="#/attention" data-section="attention"><span class="ic" aria-hidden="true">🔔</span>Needs attention<span id="attention-badge" class="badge" hidden></span></a>
+      <div class="sep" role="separator"></div>
+      <a href="#/config" data-section="config"><span class="ic" aria-hidden="true">⚙️</span>Config</a>
     </nav>
-    <button id="logout" class="btn btn-ghost">Выйти</button>
+    <button id="logout" class="btn btn-ghost">Sign out</button>
   </aside>
   <main id="view" aria-live="polite"></main>
 </div>
@@ -29,12 +30,12 @@
   <aside class="drawer-panel" role="dialog" aria-modal="true" aria-labelledby="drawer-title">
     <header class="drawer-head">
       <h2 id="drawer-title"></h2>
-      <button id="drawer-close" class="btn btn-ghost" aria-label="Закрыть">✕</button>
+      <button id="drawer-close" class="btn btn-ghost" aria-label="Close">✕</button>
     </header>
     <div id="drawer-body"></div>
   </aside>
 </div>
 <div id="toasts" aria-live="polite"></div>
-<noscript>Дашборду нужен JavaScript.</noscript>
+<noscript>The dashboard needs JavaScript.</noscript>
 </body>
 </html>

@@ -78,3 +78,11 @@ def test_nothing_is_loaded_from_elsewhere():
         assert not re.search(r"""(?:src|href)\s*=\s*["']https?://""", text), path.name
         assert "@import" not in text, path.name
         assert not re.search(r"""from\s+['"]https?://""", text), path.name
+
+
+def test_the_dashboard_is_light_only():
+    """The user asked for the first dashboard's light look whatever the system
+    theme (2026-09-30): no dark palette, and the browser told so."""
+    css = (UI_DIR / "app.css").read_text()
+    assert "prefers-color-scheme" not in css
+    assert "color-scheme: light;" in css

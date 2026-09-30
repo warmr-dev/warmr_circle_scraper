@@ -129,6 +129,7 @@ def query_leads_page(
             Post.url, Post.title, Post.published_at, Post.content,
             Author.display_name, Community.id.label("community_id"),
             Community.slug, Community.name.label("community_name"),
+            Community.url.label("community_url"),
         ))
         .where(*where)
         .order_by(*SORTS[sort])
@@ -170,8 +171,19 @@ def _row(r) -> dict[str, Any]:
         "post_url": r.url,
         "title": r.title,
         "snippet": content[:SNIPPET_CHARS] + ("…" if len(content) > SNIPPET_CHARS else ""),
+        # What the lead card shows (the first dashboard's design): the whole
+        # post, clamped on the page, and the facts the model pulled out of it.
+        "content": content,
+        "reason": lead.reason,
+        "confidence": lead.confidence,
+        "skills": lead.skills or [],
+        "employment_type": lead.employment_type,
+        "hire_target": lead.hire_target,
+        "budget": lead.budget,
+        "location": lead.location,
+        "urgency": lead.urgency,
         "community": {"id": r.community_id, "slug": r.slug,
-                      "name": r.community_name or r.slug},
+                      "name": r.community_name or r.slug, "url": r.community_url},
     }
 
 
@@ -182,6 +194,7 @@ def lead_detail(s: Session, lead_id: int) -> dict[str, Any] | None:
             Post.url, Post.title, Post.published_at, Post.content,
             Author.display_name, Community.id.label("community_id"),
             Community.slug, Community.name.label("community_name"),
+            Community.url.label("community_url"),
         )).where(Lead.id == lead_id)
     ).first()
     if row is None:
@@ -190,15 +203,7 @@ def lead_detail(s: Session, lead_id: int) -> dict[str, Any] | None:
     out = _row(row)
     out.update({
         "content": row.content,
-        "reason": lead.reason,
         "evidence_quote": lead.evidence_quote,
-        "confidence": lead.confidence,
-        "skills": lead.skills or [],
-        "employment_type": lead.employment_type,
-        "hire_target": lead.hire_target,
-        "budget": lead.budget,
-        "location": lead.location,
-        "urgency": lead.urgency,
         "score_breakdown": lead.score_breakdown or {},
         "classifier_version": lead.classifier_version,
         "vini_responded_at": iso(lead.vini_responded_at),

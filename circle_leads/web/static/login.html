@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="ru">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -53,11 +53,11 @@
 <body>
   <form class="card" id="form">
     <div class="brand"><span class="logo">🔥</span> Warmr Circle</div>
-    <p class="sub">Здесь чужие посты и лиды. Войдите, чтобы продолжить.</p>
-    <label for="password">Пароль</label>
+    <p class="sub">This dashboard holds other people's posts and leads. Sign in to continue.</p>
+    <label for="password">Password</label>
     <input id="password" name="password" type="password" autocomplete="current-password"
            autofocus required>
-    <button type="submit">Войти</button>
+    <button type="submit">Sign in</button>
     <div class="error" id="error" hidden></div>
   </form>
 
@@ -79,10 +79,10 @@ form.addEventListener('submit', async (event) => {
       return;
     }
     const data = await response.json().catch(() => ({}));
-    errorBox.textContent = (response.status === 401 ? 'Неверный пароль.' : data.error) || 'Не удалось войти.';
+    errorBox.textContent = (response.status === 401 ? 'Wrong password.' : data.error) || 'Sign in failed.';
     errorBox.hidden = false;
   } catch {
-    errorBox.textContent = 'Сервер не отвечает.';
+    errorBox.textContent = 'Could not reach the server.';
     errorBox.hidden = false;
   }
 });

@@ -10,8 +10,8 @@ import {
 } from '../labels.js';
 import { navigate, toObject } from '../router.js';
 
-export const title = 'База сообществ';
-export const subtitle = 'Все сообщества, которые мы когда-либо нашли, с поиском и фильтрами.';
+export const title = 'Communities';
+export const subtitle = 'Every community we have ever found, with search and filters.';
 
 const LIMIT = 50;
 const NULL = '__null__';
@@ -21,55 +21,55 @@ let facets = null;
 
 function options(values, map, allText) {
   return html`<option value="">${allText}</option>${values.map((f) => html`
-    <option value="${f.value}">${f.value === NULL ? 'не указано' : label(map, f.value)} (${num(f.count)})</option>`)}`;
+    <option value="${f.value}">${f.value === NULL ? 'not set' : label(map, f.value)} (${num(f.count)})</option>`)}`;
 }
 
 export function mount(context) {
   ctx = context;
   render(ctx.body, html`
     <form class="toolbar" data-add>
-      <input class="grow" name="url" placeholder="Добавить сообщество по ссылке: https://…" autocomplete="off">
-      <button class="btn" type="submit">Добавить</button>
+      <input class="grow" name="url" placeholder="Add a community by link: https://…" autocomplete="off">
+      <button class="btn" type="submit">Add</button>
     </form>
     <div class="toolbar">
-      <input type="search" data-f="q" placeholder="Поиск: название, адрес, описание">
+      <input type="search" data-f="q" placeholder="Search: name, URL, description">
       <select data-f="icp">
-        <option value="">ICP: все</option>
-        <option value="fit">подходят (в воронке)</option>
-        <option value="flag">помечены ICP (все)</option>
-        <option value="no">не подходят</option>
-        <option value="unchecked">ещё не проверены</option>
+        <option value="">ICP: all</option>
+        <option value="fit">ICP fit (in the funnel)</option>
+        <option value="flag">flagged ICP (all)</option>
+        <option value="no">not a fit</option>
+        <option value="unchecked">not checked yet</option>
       </select>
-      <select data-f="platform"><option value="">платформа: все</option></select>
-      <select data-f="join_type"><option value="">тип входа: все</option></select>
-      <select data-f="join_status"><option value="">вступление: все</option></select>
-      <select data-f="read_outcome"><option value="">чтение: все</option></select>
+      <select data-f="platform"><option value="">platform: all</option></select>
+      <select data-f="join_type"><option value="">join type: all</option></select>
+      <select data-f="join_status"><option value="">join status: all</option></select>
+      <select data-f="read_outcome"><option value="">reading: all</option></select>
       <select data-f="monitored">
-        <option value="">опрос: все</option>
-        <option value="1">опрашиваем</option>
-        <option value="off">опрос выключен</option>
-        <option value="0">не в опросе</option>
+        <option value="">polling: all</option>
+        <option value="1">polled</option>
+        <option value="off">polling off</option>
+        <option value="0">not polled</option>
       </select>
       <select data-f="access">
-        <option value="">доступ: все</option>
-        <option value="1">есть доступ</option>
-        <option value="0">нет доступа</option>
+        <option value="">access: all</option>
+        <option value="1">has access</option>
+        <option value="0">no access</option>
       </select>
-      <select data-f="source"><option value="">источник: все</option></select>
+      <select data-f="source"><option value="">source: all</option></select>
       <select data-f="sort">
-        <option value="icp">по ICP</option>
-        <option value="leads">по лидам</option>
-        <option value="discovered">по дате находки</option>
-        <option value="read">по последнему чтению</option>
-        <option value="joined">по дате вступления</option>
-        <option value="name">по названию</option>
+        <option value="icp">by ICP</option>
+        <option value="leads">by leads</option>
+        <option value="discovered">by date found</option>
+        <option value="read">by last read</option>
+        <option value="joined">by join date</option>
+        <option value="name">by name</option>
       </select>
       <select data-f="dir">
-        <option value="">по убыванию</option>
-        <option value="asc">по возрастанию</option>
+        <option value="">descending</option>
+        <option value="asc">ascending</option>
       </select>
     </div>
-    <div data-table>${empty('Загрузка…')}</div>
+    <div data-table>${empty('Loading…')}</div>
     <div data-pager></div>`);
 
   const push = () => {
@@ -93,7 +93,7 @@ export function mount(context) {
     button.disabled = true;
     try {
       const res = await api('/api/communities/add', { method: 'POST', body: { url } });
-      toast(res.note || 'Добавлено');
+      toast(res.note || 'Added');
       input.value = '';
       navigate('communities', { q: res.slug }, { replace: true });
     } catch (err) {
@@ -117,11 +117,11 @@ async function loadFacets() {
     render(el, options(facets[key] || [], map, allText));
     el.value = keep;
   };
-  fill('platform', PLATFORM, 'платформа: все');
-  fill('join_type', JOIN_TYPE, 'тип входа: все');
-  fill('join_status', JOIN_STATUS, 'вступление: все');
-  fill('read_outcome', READ_OUTCOME, 'чтение: все');
-  fill('source', SOURCE, 'источник: все');
+  fill('platform', PLATFORM, 'platform: all');
+  fill('join_type', JOIN_TYPE, 'join type: all');
+  fill('join_status', JOIN_STATUS, 'join status: all');
+  fill('read_outcome', READ_OUTCOME, 'reading: all');
+  fill('source', SOURCE, 'source: all');
 }
 
 function sync(params) {
@@ -147,8 +147,8 @@ export async function refresh() {
 
 function icpCell(r) {
   const score = r.icp_score === null || r.icp_score === undefined ? '—' : Math.round(r.icp_score);
-  if (r.fit) return html`${pill('подходит', 'good')} <span class="muted small">${score}</span>`;
-  if (r.icp_flag) return html`${pill('ICP вне воронки', 'neutral', 'помечено ICP, но не Circle или подписка истекла')} <span class="muted small">${score}</span>`;
+  if (r.fit) return html`${pill('ICP fit', 'good')} <span class="muted small">${score}</span>`;
+  if (r.icp_flag) return html`${pill('ICP, not in funnel', 'neutral', 'flagged ICP, but not on Circle, or its subscription expired')} <span class="muted small">${score}</span>`;
   return html`<span class="muted small">${score}</span>`;
 }
 
@@ -156,8 +156,8 @@ function draw(data, page) {
   render($('[data-table]', ctx.body), data.rows.length ? html`
     <div class="table-wrap"><table class="table">
       <thead><tr>
-        <th>Сообщество</th><th>Платформа</th><th>ICP</th><th>Тип входа</th><th>Вступление</th>
-        <th>Чтение</th><th>Опрос</th><th class="num">Лидов</th><th>Найдено</th>
+        <th>Community</th><th>Platform</th><th>ICP</th><th>Join type</th><th>Join status</th>
+        <th>Reading</th><th>Polling</th><th class="num">Leads</th><th>Found</th>
       </tr></thead>
       <tbody>${data.rows.map((r) => html`
         <tr class="row-link" data-cid="${r.id}">
@@ -165,13 +165,13 @@ function draw(data, page) {
           <td class="small">${label(PLATFORM, r.platform)}</td>
           <td>${icpCell(r)}</td>
           <td class="small">${label(JOIN_TYPE, r.join_type)}${r.price_label ? html`<div class="muted">${r.price_label}</div>` : ''}</td>
-          <td class="small">${r.join_status === 'joined' ? pill('вступили', 'good') : label(JOIN_STATUS, r.join_status)}${r.has_session ? html`<div class="muted">есть сессия</div>` : ''}</td>
+          <td class="small">${r.join_status === 'joined' ? pill('joined', 'good') : label(JOIN_STATUS, r.join_status)}${r.has_session ? html`<div class="muted">has a session</div>` : ''}</td>
           <td class="small">${label(READ_OUTCOME, r.read_outcome)}</td>
           <td class="small">${r.watch_mode ? label(WATCH_MODE, r.watch_mode) : raw('<span class="muted">—</span>')}</td>
           <td class="num">${r.leads ? num(r.leads) : html`<span class="muted">0</span>`}</td>
           <td class="small nowrap">${when(r.discovered_at)}</td>
         </tr>`)}</tbody>
-    </table></div>` : empty('Ничего не найдено.'));
+    </table></div>` : empty('Nothing found.'));
   $('[data-pager]', ctx.body).replaceChildren(pager(page, LIMIT, data.total, (p) => {
     navigate('communities', { ...state, page: String(p) }, { replace: true });
   }));

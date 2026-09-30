@@ -7,15 +7,15 @@ import { empty, html, num, pct, raw, render, utcOffsetLabel } from '../dom.js';
 import { SEGMENT, SEGMENT_TONE } from '../labels.js';
 import { navigate } from '../router.js';
 
-export const title = 'Аналитика';
-export const subtitle = 'Воронка сообществ и лидов: за всё время и за сегодня.';
+export const title = 'Analytics';
+export const subtitle = 'The community and lead funnel, all time and today.';
 export const autoRefresh = true;
 
 let ctx = null;
 
 export function mount(context) {
   ctx = context;
-  render(ctx.body, empty('Загрузка…'));
+  render(ctx.body, empty('Loading…'));
   const follow = (e) => {
     const el = e.target.closest('[data-link]');
     if (!el) return;
@@ -37,7 +37,7 @@ export async function refresh() {
 }
 
 function today(n) {
-  return n ? html`<span class="today up">+${num(n)} сегодня</span>` : html`<span class="today">сегодня 0</span>`;
+  return n ? html`<span class="today up">+${num(n)} today</span>` : html`<span class="today">0 today</span>`;
 }
 
 function tile({ name, all, todayCount, note, link, hero = false }) {
@@ -68,7 +68,7 @@ function splitBar(parts, total) {
 function legend(parts, total) {
   return html`
     <table class="legend">
-      <thead><tr><th></th><th class="num">всего</th><th class="num">доля</th><th class="num">сегодня</th></tr></thead>
+      <thead><tr><th></th><th class="num">total</th><th class="num">share</th><th class="num">today</th></tr></thead>
       <tbody>${parts.map((p) => html`
         <tr class="${p.link ? 'row-link' : ''}" ${p.link ? raw(`data-link="${escapeAttr(JSON.stringify(p.link))}"`) : ''}>
           <td><span class="swatch ${p.cls}"></span>${p.name}${p.hint ? html` <span class="muted small">${p.hint}</span>` : ''}</td>
@@ -85,14 +85,14 @@ function view(d) {
   const l = d.leads;
   const seg = l.segments;
   const fitParts = [
-    { name: 'платные', value: c.paid.all, today: c.paid.today, cls: 'cat-1',
-      hint: c.paid.with_session ? `с купленной сессией: ${num(c.paid.with_session)}` : '',
+    { name: 'paid', value: c.paid.all, today: c.paid.today, cls: 'cat-1',
+      hint: c.paid.with_session ? `${num(c.paid.with_session)} with a bought session` : '',
       link: { section: 'communities', icp: 'fit', join_type: 'paid' } },
-    { name: 'бесплатные', value: c.free.all, today: c.free.today, cls: 'cat-2',
-      hint: c.free.no_address ? `без адреса: ${num(c.free.no_address)}` : '',
+    { name: 'free', value: c.free.all, today: c.free.today, cls: 'cat-2',
+      hint: c.free.no_address ? `${num(c.free.no_address)} with no known address` : '',
       link: { section: 'communities', icp: 'fit', join_type: 'free_join' } },
-    { name: 'закрытые или неясно', value: c.other.all, today: c.other.today, cls: 'cat-3',
-      hint: 'по приглашению, закрыто, тип не определён',
+    { name: 'closed or unclear', value: c.other.all, today: c.other.today, cls: 'cat-3',
+      hint: 'invite-only, closed, or type unknown',
       link: { section: 'communities', icp: 'fit' } },
   ];
   const segParts = ['accepted', 'duplicate', 'held', 'rejected', 'error', 'no_data', 'not_sent'].map((key) => ({
@@ -101,71 +101,71 @@ function view(d) {
     today: seg[key].today,
     cls: `tone-${SEGMENT_TONE[key]}`,
     link: { section: 'leads', segment: key, classification: 'LEAD' },
-    hint: key === 'no_data' ? 'отправлены до того, как ответы стали сохраняться' : '',
+    hint: key === 'no_data' ? 'sent before we started saving answers' : '',
   }));
   const notAccepted = seg.held.all + seg.rejected.all + seg.error.all;
   const notAcceptedToday = seg.held.today + seg.rejected.today + seg.error.today;
 
   return html`
-    <p class="chip">Сегодня — с 00:00 по вашему времени (${utcOffsetLabel()})</p>
+    <p class="chip">Today counts from 00:00 your time (${utcOffsetLabel()})</p>
 
     <section class="panel">
-      <h2>Сообщества</h2>
+      <h2>Communities</h2>
       <div class="funnel">
-        ${tile({ name: 'Найдено', all: c.found.all, todayCount: c.found.today,
-                 note: `на Circle с адресом: ${num(c.found.circle_all)}`,
+        ${tile({ name: 'Found', all: c.found.all, todayCount: c.found.today,
+                 note: `${num(c.found.circle_all)} on Circle with a known address`,
                  link: { section: 'communities' } })}
         <span class="arrow" aria-hidden="true">→</span>
-        ${tile({ name: 'Подходят (ICP)', all: c.fit.all, todayCount: c.fit.today,
-                 note: `${pct(c.fit.all, c.found.all)} от найденных`,
+        ${tile({ name: 'ICP fit', all: c.fit.all, todayCount: c.fit.today,
+                 note: `${pct(c.fit.all, c.found.all)} of those found`,
                  link: { section: 'communities', icp: 'fit' }, hero: true })}
         <span class="arrow" aria-hidden="true">→</span>
-        ${tile({ name: 'Смогли зайти', all: c.access.all, todayCount: c.access.today,
-                 note: `подходящих ${num(c.access.fit_all)} · бот вступил ${num(c.access.joined)} · сессий ${num(c.access.with_session)}`,
+        ${tile({ name: 'Got in', all: c.access.all, todayCount: c.access.today,
+                 note: `${num(c.access.fit_all)} ICP fit · ${num(c.access.joined)} via the join bot · ${num(c.access.with_session)} with a session`,
                  link: { section: 'communities', access: '1' } })}
       </div>
-      <h3>Из подходящих: платные, бесплатные, закрытые</h3>
+      <h3>Of the ICP fit: paid, free, closed</h3>
       ${splitBar(fitParts, c.fit.all)}
       ${legend(fitParts, c.fit.all)}
-      ${c.other.all ? html`<p class="muted small">Закрытые подходящие перепроверяем раз в неделю: вдруг открылись или разрешили вступать.</p>` : ''}
+      ${c.other.all ? html`<p class="muted small">Closed ICP-fit communities are rechecked weekly, in case they opened up or started allowing joins.</p>` : ''}
     </section>
 
     <section class="panel">
-      <h2>Чтение</h2>
+      <h2>Reading</h2>
       <div class="funnel">
-        ${tile({ name: 'Читаем сейчас', all: r.all,
-                 note: `анонимно ${num(r.anonymous)} · по сессии ${num(r.with_session)} · подходящих ${num(r.fit)}`,
+        ${tile({ name: 'Reading now', all: r.all,
+                 note: `${num(r.anonymous)} anonymously · ${num(r.with_session)} with a session · ${num(r.fit)} ICP fit`,
                  link: { section: 'monitoring', status: 'ok' }, hero: true })}
-        ${tile({ name: 'Лента каждые 2 мин', all: r.feed_fast,
-                 note: 'пишут недавно, или мы участники',
+        ${tile({ name: 'Feed every 2 min', all: r.feed_fast,
+                 note: 'recently active, or we are members',
                  link: { section: 'monitoring', status: 'ok', tier: 'fast' } })}
-        ${tile({ name: 'Лента каждые 15 мин', all: r.feed_slow,
-                 note: 'без новых постов 14+ дней',
+        ${tile({ name: 'Feed every 15 min', all: r.feed_slow,
+                 note: 'no new posts for 14+ days',
                  link: { section: 'monitoring', status: 'ok', tier: 'slow' } })}
-        ${tile({ name: 'Новые посты сегодня', all: r.today, note: 'сообществ, где лента их принесла' })}
+        ${tile({ name: 'New posts today', all: r.today, note: 'communities whose feed brought new posts' })}
       </div>
-      <p class="muted small">«Смогли зайти» — мы участники: бот вступил или сохранена сессия. «Читаем» — лента отвечает или сессия работает. Открытые сообщества читаем анонимно, без вступления, поэтому читаем больше, чем «смогли зайти». По сессии всё сообщество, включая закрытые разделы и комментарии, читает полный проход раз в 6 ч.</p>
+      <p class="muted small">“Got in” means we are members: the join bot joined, or a session is saved. “Reading now” means the feed answers or the session works. Open communities are read anonymously, without joining, so “Reading now” is larger than “Got in”. With a session, the cookie scan reads the whole community every 6 hours, including closed spaces and comments.</p>
     </section>
 
     <section class="panel">
-      <h2>Лиды</h2>
+      <h2>Leads</h2>
       <div class="funnel">
-        ${tile({ name: 'Найдено лидов', all: l.found.all, todayCount: l.found.today,
+        ${tile({ name: 'Leads found', all: l.found.all, todayCount: l.found.today,
                  link: { section: 'leads', classification: 'LEAD' } })}
         <span class="arrow" aria-hidden="true">→</span>
-        ${tile({ name: 'Отправлено в Vini', all: l.sent.all, todayCount: l.sent.today,
-                 note: `${pct(l.sent.all, l.found.all)} от найденных`,
+        ${tile({ name: 'Sent to Vini', all: l.sent.all, todayCount: l.sent.today,
+                 note: `${pct(l.sent.all, l.found.all)} of those found`,
                  link: { section: 'leads', classification: 'LEAD', segment: 'accepted,duplicate,held,rejected,error,no_data' } })}
         <span class="arrow" aria-hidden="true">→</span>
-        ${tile({ name: 'Принял Vini', all: seg.accepted.all, todayCount: seg.accepted.today,
-                 note: seg.duplicate.all ? `ещё ${num(seg.duplicate.all)} у Vini уже были` : '',
+        ${tile({ name: 'Accepted by Vini', all: seg.accepted.all, todayCount: seg.accepted.today,
+                 note: seg.duplicate.all ? `${num(seg.duplicate.all)} more Vini already had` : '',
                  link: { section: 'leads', classification: 'LEAD', segment: 'accepted' }, hero: true })}
-        ${tile({ name: 'Не принял', all: notAccepted, todayCount: notAcceptedToday,
-                 note: 'запаркован, отклонён или не дошёл',
+        ${tile({ name: 'Not accepted', all: notAccepted, todayCount: notAcceptedToday,
+                 note: 'parked, rejected, or not delivered',
                  link: { section: 'leads', classification: 'LEAD', segment: 'held,rejected,error' } })}
       </div>
-      <h3>Что сказал Vini</h3>
-      ${seg.no_data.all ? html`<p class="muted small">«Нет данных» — лиды, отправленные до того, как дашборд начал сохранять ответ Vini. Что он о них сказал, неизвестно.</p>` : ''}
+      <h3>What Vini said</h3>
+      ${seg.no_data.all ? html`<p class="muted small">“No data”: leads sent before the dashboard started saving Vini's answer, so what Vini said about them is unknown.</p>` : ''}
       ${splitBar(segParts, l.found.all)}
       ${legend(segParts, l.found.all)}
     </section>`;

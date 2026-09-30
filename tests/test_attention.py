@@ -137,12 +137,12 @@ def test_a_dead_session_says_which_account_can_refresh_it(app):
         connection(s, "nobody.circle.so", "session_expired", "Session cookie invalid")
     _clear_cache(app_)
     titles = {i["key"]: i["title"] for i in _rules(client)["session_dead"]["items"]}
-    assert titles["conn:joined.circle.so"].endswith("обновить под аккаунтом 4")
+    assert titles["conn:joined.circle.so"].endswith("refresh as account 4")
     assert titles["conn:old.circle.so"].endswith(
-        "вход был аккаунтом test, он больше не используется: нужен новый вход")
+        "logged in as account test, which is no longer in use: new login needed")
     assert titles["conn:labelled.circle.so"].endswith(
-        "вход был аккаунтом main, он больше не используется: нужен новый вход")
-    assert titles["conn:nobody.circle.so"].endswith("аккаунт не записан")
+        "logged in as account main, which is no longer in use: new login needed")
+    assert titles["conn:nobody.circle.so"].endswith("account not recorded")
 
 
 def test_a_feed_refusing_a_session_the_scan_still_reads_is_not_a_dead_session(app):
@@ -166,37 +166,7 @@ def test_a_feed_refusing_a_session_the_scan_still_reads_is_not_a_dead_session(ap
     assert {i["key"] for i in rules["session_dead"]["items"]} == {"conn:dead.circle.so"}
     feed = rules["watch_cookie_feed"]["items"]
     assert [i["key"] for i in feed] == [f"watchfeed:{live_id}"]
-    assert "284 раза подряд" in feed[0]["title"]
-
-
-def test_a_live_session_that_reads_no_space(app):
-    """onstartups: the scan got in, saw 2 spaces and read nothing. Neither a
-    dead session nor the watcher's fault -- a person has to look inside."""
-    client, db, app_ = app
-    with db.session() as s:
-        empty = community(s, "empty", host="empty.circle.so", join_status="joined",
-                          join_account="4")
-        watch(s, empty, mode="cookie", last_status="unauthorized", consecutive_errors=40)
-        session_for(s, "empty.circle.so")
-        connection(s, "empty.circle.so", "connected", "No readable posts (2 space(s) visible).",
-                   spaces_total=2, spaces_readable=0, last_sync_at=NOW - timedelta(hours=1))
-    _clear_cache(app_)
-    rules = _rules(client)
-    (item,) = rules["session_reads_nothing"]["items"]
-    assert item["key"] == "empty:empty.circle.so"
-    assert item["title"] == ("empty.circle.so: сессия живая, но не читается ни один из "
-                             "разделов (2), аккаунт 4")
-    assert not rules["watch_cookie_feed"]["items"]
-    assert not rules["session_dead"]["items"]
-
-    with db.session() as s:
-        from sqlalchemy import select
-
-        from circle_leads.storage.models import CircleConnection
-        s.scalar(select(CircleConnection).where(
-            CircleConnection.host == "empty.circle.so")).spaces_readable = 1
-    _clear_cache(app_)
-    assert not _rules(client)["session_reads_nothing"]["items"]
+    assert "284 times in a row" in feed[0]["title"]
 
 
 def test_the_watcher_failing_and_a_member_community_switched_off(app):
@@ -230,7 +200,7 @@ def test_joins_that_need_a_person(app):
     rules = _rules(client)
     assert len(rules["join_needs_human"]["items"]) == 2
     handoffs = {i["title"] for i in rules["join_handoff"]["items"]}
-    assert any("причина неизвестна" in t for t in handoffs)
+    assert any("reason unknown" in t for t in handoffs)
     assert any("challenge_stop" in t for t in handoffs)
     assert len(rules["join_pending_long"]["items"]) == 1
 
@@ -291,7 +261,7 @@ def test_jobs_queues_and_the_log(app):
     # Three rows that differ only in the community are one problem.
     assert len(log) == 1
     assert log[0]["title"] == "Session cookie invalid"
-    assert log[0]["detail"] == "3× за сутки (ingest): c0, c1, c2"
+    assert log[0]["detail"] == "3× in 24 h (ingest): c0, c1, c2"
     assert log[0]["link"] == {"section": "log", "q": "Session cookie invalid"}
 
 

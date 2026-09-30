@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import threading
 from pathlib import Path
 
 import click
@@ -1490,6 +1491,30 @@ def encrypt_sessions_cmd(ctx):
     click.echo(f"encrypted {done} session(s)")
 
 
+# Once a stop is asked for, how long the current step gets to finish. A step
+# can be a discovery pass or a harvest that runs for an hour; systemd kills the
+# worker at TimeoutStopSec (300 s) anyway, and a kill is a failure to systemd:
+# a false "the worker stopped" alert, and a failed `systemctl restart` that
+# stopped the deploy script (2026-09-29 and 09-30). Leaving on our own first
+# is a clean exit. What the step had not written is lost either way.
+WORKER_STOP_GRACE_S = 120
+
+
+def _leave_after(seconds: float, *, leave=os._exit) -> threading.Timer:
+    """Exit cleanly if the process is still running ``seconds`` from now."""
+    def _go():
+        click.echo(f"The current step did not finish within {seconds:.0f}s of the stop "
+                   "request; leaving now.")
+        sys.stdout.flush()
+        sys.stderr.flush()
+        leave(0)
+
+    timer = threading.Timer(seconds, _go)
+    timer.daemon = True
+    timer.start()
+    return timer
+
+
 @cli.command("worker")
 @click.option("--poll-seconds", type=int, default=5, show_default=True,
               help="Seconds to sleep when the job queue is empty.")
@@ -1589,7 +1614,10 @@ def worker_cmd(ctx, poll_seconds, use_llm):
     stopping = {"now": False}
 
     def _stop(signum, _frame):
-        click.echo(f"Signal {signum}: finishing the current step, then stopping.")
+        click.echo(f"Signal {signum}: finishing the current step, then stopping "
+                   f"(at most {WORKER_STOP_GRACE_S}s).")
+        if not stopping["now"]:
+            _leave_after(WORKER_STOP_GRACE_S)
         stopping["now"] = True
 
     _signal.signal(_signal.SIGTERM, _stop)

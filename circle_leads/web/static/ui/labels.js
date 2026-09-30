@@ -5,58 +5,58 @@ export const label = (map, key) => (key === null || key === undefined || key ===
   ? '—' : (map[key] ?? key));
 
 export const JOIN_STATUS = {
-  not_attempted: 'не пробовали',
-  queued: 'в очереди',
-  pending_approval: 'ждёт одобрения',
-  joined: 'вступили',
-  paid_skip: 'платное — пропуск',
-  invite_skip: 'по приглашению — пропуск',
-  subscription_expired_skip: 'у сообщества истекла подписка',
-  failed: 'не удалось',
-  dead_host: 'адрес мёртв',
-  profile_pending: 'профиль не заполнен',
-  external_login: 'вход через свой сайт',
-  needs_human: 'нужен человек',
+  not_attempted: 'not attempted',
+  queued: 'queued',
+  pending_approval: 'pending approval',
+  joined: 'joined',
+  paid_skip: 'paid — skipped',
+  invite_skip: 'invite only — skipped',
+  subscription_expired_skip: 'community subscription expired',
+  failed: 'failed',
+  dead_host: 'dead address',
+  profile_pending: 'profile not filled in',
+  external_login: 'sign-in on its own site',
+  needs_human: 'needs a human',
 };
 
 export const JOIN_TYPE = {
-  free_join: 'бесплатно',
-  paid: 'платно',
-  invite_only: 'по приглашению',
-  locked_unknown: 'закрыто, неясно как',
-  unknown: 'неизвестно',
-  subscription_expired: 'подписка истекла',
+  free_join: 'free',
+  paid: 'paid',
+  invite_only: 'invite only',
+  locked_unknown: 'closed, unclear how to join',
+  unknown: 'unknown',
+  subscription_expired: 'subscription expired',
 };
 
 export const READ_OUTCOME = {
-  public: 'читается открыто',
-  private: 'только участникам',
-  gone: 'удалено',
-  error: 'ошибка чтения',
+  public: 'public',
+  private: 'members only',
+  gone: 'deleted',
+  error: 'read error',
 };
 
 export const PLATFORM = {
   circle: 'Circle',
-  discover: 'каталог Circle',
-  other: 'не Circle',
-  circle_infra: 'служебный Circle',
+  discover: 'Circle directory',
+  other: 'not Circle',
+  circle_infra: 'Circle internal',
   facebook: 'Facebook',
 };
 
-export const SOURCE = { directory: 'каталог Circle', dns: 'DNS-выгрузка', other: 'другое' };
+export const SOURCE = { directory: 'Circle directory', dns: 'DNS dump', other: 'other' };
 
-export const WATCH_MODE = { anon: 'анонимно', cookie: 'по сессии', off: 'не читается' };
-export const WATCH_TIER = { fast: 'каждые 2 мин', slow: 'каждые 15 мин' };
+export const WATCH_MODE = { anon: 'anonymously', cookie: 'with a session', off: 'not read' };
+export const WATCH_TIER = { fast: 'every 2 min', slow: 'every 15 min' };
 
 const WATCH_STATUS_WORDS = {
-  ok: 'ок',
-  not_modified: 'без изменений',
-  ratelimited: 'лимит (429)',
+  ok: 'OK',
+  not_modified: 'unchanged',
+  ratelimited: 'rate limited (429)',
   challenge: 'Cloudflare',
-  notfound: 'не найдено (404)',
-  moved: 'переехало',
-  tls_error: 'домен не обслуживается (SSL)',
-  error: 'ошибка',
+  notfound: 'not found (404)',
+  moved: 'moved',
+  tls_error: 'domain no longer served (SSL)',
+  error: 'error',
 };
 
 // A 401 means different things. Read anonymously, the community is private:
@@ -64,34 +64,34 @@ const WATCH_STATUS_WORDS = {
 // session stopped working -- unless the cookie scan still reads with it, and
 // then it is the feed request that fails (seen 2026-09-29 on four hosts).
 export function watchStatus(status, mode, sessionWorks = false) {
-  if (!status) return 'ещё не проверяли';
+  if (!status) return 'not checked yet';
   if (status === 'unauthorized') {
-    if (mode !== 'cookie') return 'приватное (401)';
-    return sessionWorks ? 'лента отказала (401), сессия жива' : 'сессия не пускает (401)';
+    if (mode !== 'cookie') return 'private (401)';
+    return sessionWorks ? 'feed refused (401), session alive' : 'session refused (401)';
   }
-  if (status === 'http_301' || status === 'http_302') return `переехало (${status.slice(5)})`;
+  if (status === 'http_301' || status === 'http_302') return `moved (${status.slice(5)})`;
   if (status.startsWith('http_')) return `HTTP ${status.slice(5)}`;
   return WATCH_STATUS_WORDS[status] ?? status;
 }
 
 export const CONN_BUCKET = {
-  working: 'сессия работает',
-  cloudflare_blocked: 'Cloudflare не пускает сервер',
-  session_expired: 'сессия истекла',
-  error: 'ошибка чтения',
-  not_connected: 'не подключено',
+  working: 'session works',
+  cloudflare_blocked: 'Cloudflare blocks the server',
+  session_expired: 'session expired',
+  error: 'read error',
+  not_connected: 'not connected',
 };
 
-export const PRIORITY = { vip: 'VIP', normal: 'обычный', low: 'низкий', paused: 'на паузе' };
+export const PRIORITY = { vip: 'VIP', normal: 'normal', low: 'low', paused: 'paused' };
 
 export const SEGMENT = {
-  accepted: 'принят',
-  duplicate: 'уже был у Vini',
-  held: 'запаркован',
-  rejected: 'отклонён',
-  error: 'не дошёл',
-  not_sent: 'не отправлен',
-  no_data: 'нет данных',
+  accepted: 'accepted',
+  duplicate: 'already at Vini',
+  held: 'held',
+  rejected: 'rejected',
+  error: 'not delivered',
+  not_sent: 'not sent',
+  no_data: 'no data',
 };
 
 export const SEGMENT_TONE = {
@@ -105,23 +105,23 @@ export const SEGMENT_TONE = {
 };
 
 export const NOT_SENT = {
-  not_lead: 'не лид — наш вердикт',
-  duplicate_of: 'дубль нашего лида',
-  held_for_review: 'придержан: модель не дала вердикт',
-  no_author: 'у поста нет автора',
-  pending: 'ждёт отправки',
+  not_lead: 'not a lead — our verdict',
+  duplicate_of: 'duplicate of our lead',
+  held_for_review: 'held back — the model gave no verdict',
+  no_author: 'post has no author',
+  pending: 'waiting to be sent',
 };
 
 // Vini's reason codes, in words. The raw code stays in the tooltip.
 const VINI_WORDS = [
-  ['missing_source_author_identity', 'нет ID автора'],
-  ['missing_or_invalid_fetched_at', 'нет времени сбора поста'],
-  ['missing_or_invalid_classified_at', 'нет времени оценки'],
-  ['missing_root_message_identity', 'нет ID сообщения'],
-  ['lead_duplicate', 'дубль у Vini'],
-  ['historical_expired', 'пост старше 48 часов'],
-  ['discarded', 'Vini отбросил'],
-  ['no_item_result', 'Vini не ответил по лиду — засчитан как принят'],
+  ['missing_source_author_identity', 'no author ID'],
+  ['missing_or_invalid_fetched_at', 'no post fetch time'],
+  ['missing_or_invalid_classified_at', 'no classification time'],
+  ['missing_root_message_identity', 'no message ID'],
+  ['lead_duplicate', 'duplicate at Vini'],
+  ['historical_expired', 'post older than 48 hours'],
+  ['discarded', 'discarded by Vini'],
+  ['no_item_result', 'no answer from Vini for this lead — counted as accepted'],
 ];
 
 export function viniReason(reason) {
@@ -130,52 +130,52 @@ export function viniReason(reason) {
   return hit ? hit[1] : reason;
 }
 
-export const LEVEL = { info: 'инфо', success: 'успех', warning: 'предупреждение', error: 'ошибка' };
+export const LEVEL = { info: 'info', success: 'success', warning: 'warning', error: 'error' };
 export const LEVEL_TONE = { info: 'neutral', success: 'good', warning: 'warning', error: 'critical' };
 
 export const KIND = {
-  read: 'чтение',
-  triage: 'разбор',
-  classify: 'оценка',
-  ingest: 'сессии',
+  read: 'reading',
+  triage: 'triage',
+  classify: 'classification',
+  ingest: 'sessions',
   export: 'Vini',
-  join: 'вступление',
-  discover: 'поиск',
-  harvest: 'сбор',
-  review: 'действия',
+  join: 'join',
+  discover: 'discovery',
+  harvest: 'harvest',
+  review: 'actions',
 };
 
-export const SEVERITY = { crit: 'критично', warn: 'внимание', info: 'к сведению' };
+export const SEVERITY = { crit: 'critical', warn: 'warning', info: 'info' };
 export const SEVERITY_TONE = { crit: 'critical', warn: 'warning', info: 'neutral' };
 
 export const SCHEDULE = {
-  off: 'выключено',
-  every_run: 'каждый проход воркера',
-  every_5min: 'каждые 5 мин',
-  every_15min: 'каждые 15 мин',
-  hourly: 'каждый час',
-  every_6h: 'каждые 6 ч',
-  every_12h: 'каждые 12 ч',
-  twice_daily: 'дважды в день',
-  daily: 'раз в день',
-  weekly: 'раз в неделю',
+  off: 'off',
+  every_run: 'every worker run',
+  every_5min: 'every 5 min',
+  every_15min: 'every 15 min',
+  hourly: 'every hour',
+  every_6h: 'every 6 h',
+  every_12h: 'every 12 h',
+  twice_daily: 'twice a day',
+  daily: 'once a day',
+  weekly: 'once a week',
 };
 
 export const STAGE = {
-  harvest: 'Полный проход: по сессии и открытые разделы',
-  discovery: 'Поиск новых сообществ',
-  icp_classification: 'ICP и обогащение',
-  join_type: 'Проверка типа входа',
+  harvest: 'Cookie scan and public spaces',
+  discovery: 'Finding new communities',
+  icp_classification: 'ICP and enrichment',
+  join_type: 'Join type check',
 };
 
 // What each stage is for, now that the feed watcher reads new posts every 2
 // or 15 minutes (the user asked on 2026-09-29 why the 6-hour pass exists).
 export const STAGE_NOTE = {
-  harvest: 'По сессии читает всё, что видит участник: все разделы и комментарии — лента наблюдателя этого не видит. Новые сообщества читает целиком в первый раз. Открытые разделы перечитывает на всякий случай: их новые посты и так ловит наблюдатель каждые 2–15 мин.',
-  discovery: 'Ищет новые сообщества; запускается внутри полного прохода, когда подошёл срок.',
-  icp_classification: 'Дополняет карточки и решает, подходит ли сообщество.',
-  join_type: 'Узнаёт, как вступить: бесплатно, платно, по приглашению. Закрытые подходящие спрашивает заново раз в неделю.',
+  harvest: "With a session, reads everything a member sees: all spaces and comments — the watcher's feed does not see these. Reads new communities in full the first time. Re-reads public spaces just in case: the watcher already catches their new posts every 2–15 min.",
+  discovery: 'Finds new communities; runs inside the cookie scan when it is due.',
+  icp_classification: 'Fills in community details and decides whether a community is an ICP fit.',
+  join_type: 'Finds out how to join: free, paid or invite only. Re-checks closed ICP-fit communities once a week.',
 };
 
-export const JOB_STATE = { queued: 'в очереди', running: 'выполняется', done: 'готово', error: 'ошибка' };
+export const JOB_STATE = { queued: 'queued', running: 'running', done: 'done', error: 'error' };
 export const JOB_STATE_TONE = { queued: 'neutral', running: 'warning', done: 'good', error: 'critical' };
