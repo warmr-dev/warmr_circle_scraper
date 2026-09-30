@@ -102,3 +102,24 @@ def test_one_lead_in_full(tmp_path, monkeypatch):
     assert detail["vini_status"] == "held" and detail["vini_reason"] == HOLD
     assert detail["content"]
     assert client.get("/api/dash/leads/999999").status_code == 404
+
+
+def test_a_row_carries_what_the_lead_card_shows(tmp_path, monkeypatch):
+    """The list is the first dashboard's lead cards again (2026-09-30): the
+    whole post, clamped on the page, and what the model pulled out of it."""
+    client, db, _app = make_app(tmp_path, monkeypatch)
+    long_post = "We need a Flutter developer. " * 30
+    with db.session() as s:
+        acme = community(s, "acme", name="Acme")
+        lead(s, acme, content=long_post, skills=["Flutter", "Dart"], employment_type="Contract",
+             hire_target="agency", budget="$100/hr", location="Remote", urgency="High",
+             decided_by="llm", reason="Clear hiring ask")
+    (row,) = _get(client)["rows"]
+    assert row["content"] == long_post.strip()
+    assert row["snippet"].endswith("…")
+    assert row["skills"] == ["Flutter", "Dart"]
+    assert (row["employment_type"], row["hire_target"], row["budget"], row["location"],
+            row["urgency"]) == ("Contract", "agency", "$100/hr", "Remote", "High")
+    assert row["decided_by"] == "llm" and row["reason"] == "Clear hiring ask"
+    assert row["confidence"] == 0.9
+    assert row["community"]["url"] == "https://acme.circle.so"

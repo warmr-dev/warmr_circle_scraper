@@ -224,7 +224,7 @@ function leadView(l) {
         ['Цитата', l.evidence_quote ? html`<blockquote>${l.evidence_quote}</blockquote>` : null],
         ['Разбор', described ? Object.entries(described).map(([k, v]) => `${k}: ${v}`).join(' · ') : null],
         ['Роль / навыки', [l.job_title, (l.skills || []).join(', ')].filter(Boolean).join(' · ')],
-        ['Компания / бюджет', [l.company, l.budget, l.location, l.urgency].filter(Boolean).join(' · ')],
+        ['Компания / бюджет', [l.company, l.budget, l.location, l.urgency && `срочность: ${l.urgency}`].filter(Boolean).join(' · ')],
         ['Версия', l.classifier_version],
       ])}
 
