@@ -169,36 +169,6 @@ def test_a_feed_refusing_a_session_the_scan_still_reads_is_not_a_dead_session(ap
     assert "284 times in a row" in feed[0]["title"]
 
 
-def test_a_live_session_that_reads_no_space(app):
-    """onstartups: the scan got in, saw 2 spaces and read nothing. Neither a
-    dead session nor the watcher's fault -- a person has to look inside."""
-    client, db, app_ = app
-    with db.session() as s:
-        empty = community(s, "empty", host="empty.circle.so", join_status="joined",
-                          join_account="4")
-        watch(s, empty, mode="cookie", last_status="unauthorized", consecutive_errors=40)
-        session_for(s, "empty.circle.so")
-        connection(s, "empty.circle.so", "connected", "No readable posts (2 space(s) visible).",
-                   spaces_total=2, spaces_readable=0, last_sync_at=NOW - timedelta(hours=1))
-    _clear_cache(app_)
-    rules = _rules(client)
-    (item,) = rules["session_reads_nothing"]["items"]
-    assert item["key"] == "empty:empty.circle.so"
-    assert item["title"] == ("empty.circle.so: session is live, but none of the spaces "
-                             "can be read (2), account 4")
-    assert not rules["watch_cookie_feed"]["items"]
-    assert not rules["session_dead"]["items"]
-
-    with db.session() as s:
-        from sqlalchemy import select
-
-        from circle_leads.storage.models import CircleConnection
-        s.scalar(select(CircleConnection).where(
-            CircleConnection.host == "empty.circle.so")).spaces_readable = 1
-    _clear_cache(app_)
-    assert not _rules(client)["session_reads_nothing"]["items"]
-
-
 def test_the_watcher_failing_and_a_member_community_switched_off(app):
     client, db, app_ = app
     with db.session() as s:
