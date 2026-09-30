@@ -85,27 +85,20 @@ def _shape(text: str | None) -> str:
 
 def _ago(now: datetime, then: datetime | None) -> str:
     if then is None:
-        return "никогда"
+        return "never"
     minutes = int((now - then).total_seconds() // 60)
+    if minutes < 1:
+        return "just now"
     if minutes < 60:
-        return f"{minutes} мин назад"
+        return f"{minutes} min ago"
     if minutes < 48 * 60:
-        return f"{minutes // 60} ч назад"
-    return f"{minutes // 1440} дн назад"
+        return f"{minutes // 60} h ago"
+    return f"{minutes // 1440} d ago"
 
 
-def _plural(n: int, one: str, few: str, many: str) -> str:
-    """1 лид, 2 лида, 5 лидов -- the page is read in Russian."""
-    tail = n % 100
-    if 11 <= tail <= 14:
-        word = many
-    elif n % 10 == 1:
-        word = one
-    elif 2 <= n % 10 <= 4:
-        word = few
-    else:
-        word = many
-    return f"{n} {word}"
+def _plural(n: int, one: str, many: str) -> str:
+    """1 lead, 0 leads, 5 leads: the singular only for exactly one."""
+    return f"{n} {one if n == 1 else many}"
 
 
 def _community_link(community_id: int | None) -> dict | None:
@@ -123,19 +116,19 @@ def _heartbeat(ctx: Ctx) -> list[dict]:
         if at is not None and (ctx.now - at).total_seconds() <= limit:
             continue
         if not raw:
-            text, state = "ни разу не отчитывался", "never"
+            text, state = "never reported", "never"
         elif at is None:
-            text, state = "непонятная отметка времени", "unreadable"
+            text, state = "unreadable timestamp", "unreadable"
         else:
-            text, state = f"молчит {_ago(ctx.now, at)} (порог {limit // 60} мин)", "stale"
+            text, state = f"silent, last heard {_ago(ctx.now, at)} (limit {limit // 60} min)", "stale"
         host = (ctx.runtime.get(name) or {}).get("host")
         items.append(_item(name, fingerprint(state, raw), f"{name}: {text}",
-                           detail=f"последний хост: {host}" if host else None, at=at))
+                           detail=f"last host: {host}" if host else None, at=at))
     return items
 
 
-STAGE_LABELS = {"harvest": "Сбор", "icp_classification": "ICP и обогащение",
-                "join_type": "Проверка типа входа"}
+STAGE_LABELS = {"harvest": "Harvest", "icp_classification": "ICP and enrichment",
+                "join_type": "Join type check"}
 
 
 def _stage_error(ctx: Ctx) -> list[dict]:
@@ -153,7 +146,7 @@ def _stage_error(ctx: Ctx) -> list[dict]:
         if finished_at is not None and failed_at is not None and finished_at > failed_at:
             continue  # it has worked since
         text = str(error.get("error") or "")
-        items.append(_item(stage, fingerprint(_shape(text)), f"{label}: упал",
+        items.append(_item(stage, fingerprint(_shape(text)), f"{label}: failed",
                            detail=text, at=failed_at))
     return items
 
@@ -174,11 +167,11 @@ def _harvest_interrupted(ctx: Ctx) -> list[dict]:
     # wait past the longest one seen (~8 h) before calling it interrupted.
     if running_for < (timedelta(minutes=15) if fresh else timedelta(hours=8)):
         return []
-    detail = f"начат {_ago(ctx.now, started)}, конца нет"
+    detail = f"started {_ago(ctx.now, started)}, no finish recorded"
     if fresh:
-        detail += f"; воркер сейчас: {stage or 'ждёт'}"
+        detail += f"; worker now: {stage or 'idle'}"
     return [_item("harvest", fingerprint(ctx.settings.get("harvest_last_run")),
-                  "Сбор прервался", detail=detail, at=started)]
+                  "Harvest interrupted", detail=detail, at=started)]
 
 
 def _runtime_env(ctx: Ctx) -> list[dict]:
@@ -191,12 +184,12 @@ def _runtime_env(ctx: Ctx) -> list[dict]:
         missing = [k for k in ("VINI_API_SECRET", "SUPABASE_ANON_KEY") if env.get(k) is False]
         if missing:
             items.append(_item(f"{service}:vini", "missing",
-                               f"{service}: нет ключей Vini — лиды не уходят",
+                               f"{service}: no Vini keys — leads are not sent",
                                detail=", ".join(missing)))
         if not (snap.get("llm") or {}).get("backend"):
             items.append(_item(f"{service}:llm", "missing",
-                               f"{service}: нет модели — решают только правила",
-                               detail="ни OPENAI_API_KEY, ни ANTHROPIC_API_KEY не заданы"))
+                               f"{service}: no model — only the rules decide",
+                               detail="neither OPENAI_API_KEY nor ANTHROPIC_API_KEY is set"))
     return items
 
 
@@ -209,8 +202,8 @@ def _circle_throttled(ctx: Ctx) -> list[dict]:
         if until and float(until) > now_ms:
             until_dt = datetime.fromtimestamp(float(until) / 1000, tz=timezone.utc).replace(tzinfo=None)
             items.append(_item(f"{service}:cooldown", fingerprint(until),
-                               f"{service}: Circle притормозил нас",
-                               detail=f"пауза до {until_dt:%H:%M} UTC; {gov.get('cooldownReason') or ''}".strip("; "),
+                               f"{service}: Circle is throttling us",
+                               detail=f"paused until {until_dt:%H:%M} UTC; {gov.get('cooldownReason') or ''}".strip("; "),
                                at=until_dt))
     recent = ctx.s.scalar(select(func.count(WatchState.id)).where(
         WatchState.last_status.in_(("ratelimited", "challenge")),
@@ -218,16 +211,16 @@ def _circle_throttled(ctx: Ctx) -> list[dict]:
     )) or 0
     if recent >= 3:
         items.append(_item("watch", "watch",
-                           f"Опрос: {_plural(recent, 'сообщество', 'сообщества', 'сообществ')} "
-                           "ответили 429 или Cloudflare за 30 мин",
+                           f"Polling: {_plural(recent, 'community', 'communities')} "
+                           "hit 429 or Cloudflare in the last 30 min",
                            link={"section": "monitoring", "status": "problem"}))
     return items
 
 
 # --- Sessions and the feed watcher --------------------------------------------
 
-CONN_LABELS = {"session_expired": "сессия истекла", "access_denied": "нет доступа",
-               "error": "ошибка чтения"}
+CONN_LABELS = {"session_expired": "session expired", "access_denied": "access denied",
+               "error": "read error"}
 
 
 def _accounts_by_host(ctx: Ctx) -> dict[str, str]:
@@ -244,10 +237,10 @@ def _accounts_by_host(ctx: Ctx) -> dict[str, str]:
 
 def _refresh_as(account: str | None) -> str:
     if not account:
-        return " — аккаунт не записан"
+        return " — account not recorded"
     if is_retired(account):
-        return f" — вход был аккаунтом {account}, он больше не используется: нужен новый вход"
-    return f" — обновить под аккаунтом {account}"
+        return f" — logged in as account {account}, which is no longer in use: new login needed"
+    return f" — refresh as account {account}"
 
 
 def _sessions(ctx: Ctx, *, cloudflare: bool) -> list[dict]:
@@ -268,7 +261,7 @@ def _sessions(ctx: Ctx, *, cloudflare: bool) -> list[dict]:
         blocked = connection_bucket(r.state, r.state_detail) == "cloudflare_blocked"
         if blocked != cloudflare or r.host in left_circle:
             continue
-        label = "Cloudflare не пускает сервер" if blocked else (
+        label = "Cloudflare blocks the server" if blocked else (
             CONN_LABELS.get(r.state, r.state) + _refresh_as(accounts.get(r.host)))
         items[r.host] = _item(f"conn:{r.host}", fingerprint(r.state, _shape(r.state_detail)),
                               f"{r.host}: {label}", detail=r.state_detail, at=r.last_sync_at,
@@ -289,7 +282,7 @@ def _sessions(ctx: Ctx, *, cloudflare: bool) -> list[dict]:
                 continue
             items.setdefault(host, _item(
                 f"conn:{host}", fingerprint("unauthorized"),
-                f"{host}: сессия не пускает (401 при опросе){_refresh_as(accounts.get(host))}",
+                f"{host}: session rejected (401 while polling){_refresh_as(accounts.get(host))}",
                 detail=detail, at=at, link=_community_link(cid)))
     return list(items.values())
 
@@ -315,10 +308,10 @@ def _watch_cookie_feed(ctx: Ctx) -> list[dict]:
         CircleConnection.spaces_readable > 0,
     ).order_by(WatchState.consecutive_errors.desc())).all()
     return [_item(f"watchfeed:{r.community_id}", fingerprint("unauthorized"),
-                  f"{r.host}: лента по сессии отвечает «нет доступа» уже "
-                  f"{_plural(r.consecutive_errors, 'раз', 'раза', 'раз')} подряд, "
-                  f"а полный проход по этой же сессии читает",
-                  detail=f"Наблюдатель: {r.last_detail or '—'}. Полный проход по сессии "
+                  f"{r.host}: feed with a session answered “access denied” "
+                  f"{_plural(r.consecutive_errors, 'time', 'times')} in a row, "
+                  f"but the cookie scan reads with the same session",
+                  detail=f"Watcher: {r.last_detail or '—'}. Cookie scan "
                          f"{_ago(ctx.now, r.last_sync_at)}: {r.state_detail or '—'}",
                   at=r.last_checked_at, link=_community_link(r.community_id)) for r in rows]
 
@@ -341,9 +334,9 @@ def _session_reads_nothing(ctx: Ctx) -> list[dict]:
         CircleConnection.priority != ConnectionPriority.PAUSED.value,
     ).order_by(CircleConnection.host)).all()
     return [_item(f"empty:{r.host}", fingerprint(r.spaces_total),
-                  f"{r.host}: сессия живая, но не читается ни один из разделов "
+                  f"{r.host}: session is live, but none of the spaces can be read "
                   f"({r.spaces_total})"
-                  + (f", аккаунт {accounts[r.host]}" if accounts.get(r.host) else ""),
+                  + (f", account {accounts[r.host]}" if accounts.get(r.host) else ""),
                   detail=r.state_detail, at=r.last_sync_at,
                   link=_community_link(r.community_id)
                   or {"section": "monitoring", "q": r.host}) for r in rows]
@@ -366,7 +359,7 @@ def _watch_failing(ctx: Ctx) -> list[dict]:
         WatchState.last_status.notin_(("ratelimited", "challenge", "unauthorized")),
     ).order_by(WatchState.consecutive_errors.desc())).all()
     return [_item(f"watch:{r.community_id}", fingerprint(r.mode, r.last_status),
-                  f"{r.host}: {_plural(r.consecutive_errors, 'ошибка', 'ошибки', 'ошибок')} подряд "
+                  f"{r.host}: {_plural(r.consecutive_errors, 'error', 'errors')} in a row "
                   f"({r.last_status})",
                   detail=r.last_detail, at=r.last_checked_at,
                   link=_community_link(r.community_id)) for r in rows]
@@ -381,7 +374,7 @@ def _watch_member_off(ctx: Ctx) -> list[dict]:
         (Community.join_status == JoinStatus.JOINED.value) | has_session(),
     )).all()
     return [_item(f"watch:{r.community_id}", fingerprint("off", r.last_status),
-                  f"{r.host}: мы участники, а опрос выключен ({r.last_status})",
+                  f"{r.host}: we are members, but polling is off ({r.last_status})",
                   detail=r.last_detail, at=r.last_checked_at,
                   link=_community_link(r.community_id)) for r in rows]
 
@@ -389,9 +382,9 @@ def _watch_member_off(ctx: Ctx) -> list[dict]:
 # --- Joins ----------------------------------------------------------------------
 
 JOIN_LABELS = {
-    JoinStatus.PROFILE_PENDING.value: "вступили, но не заполнен профиль / код из письма",
-    JoinStatus.NEEDS_HUMAN.value: "анкета требует решения человека",
-    JoinStatus.EXTERNAL_LOGIN.value: "вход через свой сайт сообщества — нужен аккаунт там",
+    JoinStatus.PROFILE_PENDING.value: "joined, but the profile / email code is still pending",
+    JoinStatus.NEEDS_HUMAN.value: "join form needs a person's decision",
+    JoinStatus.EXTERNAL_LOGIN.value: "login via the community's own site — needs an account there",
 }
 # Handoff outcomes where the bot itself could not tell what it saw.
 UNCLEAR_HANDOFFS = ("unclear", "driver_error", "nav_failed")
@@ -415,7 +408,8 @@ def _join_pending_long(ctx: Ctx) -> list[dict]:
     ).where(Community.join_status == JoinStatus.PENDING_APPROVAL.value,
             Community.join_attempted_at < ctx.now - timedelta(days=7))).all()
     return [_item(f"join:{r.id}", fingerprint(iso(r.join_attempted_at)),
-                  f"{r.name or r.slug}: заявка ждёт одобрения {_ago(ctx.now, r.join_attempted_at)}",
+                  f"{r.name or r.slug}: join request sent {_ago(ctx.now, r.join_attempted_at)}, "
+                  "still awaiting approval",
                   at=r.join_attempted_at, link=_community_link(r.id)) for r in rows]
 
 
@@ -428,10 +422,10 @@ def _join_handoff(ctx: Ctx) -> list[dict]:
     for r in rows:
         rest = (r.join_status_detail or "")[len(JOIN_HANDOFF_PREFIX):].strip()
         outcome = rest.split(" ", 1)[0] if rest else ""
-        why = ("причина неизвестна" if outcome in UNCLEAR_HANDOFFS or not outcome
+        why = ("reason unknown" if outcome in UNCLEAR_HANDOFFS or not outcome
                else outcome)
         items.append(_item(f"join:{r.id}", fingerprint(outcome),
-                           f"{r.name or r.slug}: бот остановился — {why}",
+                           f"{r.name or r.slug}: join bot stopped — {why}",
                            detail=r.join_status_detail, link=_community_link(r.id)))
     return items
 
@@ -454,7 +448,7 @@ def _form_needs_human(ctx: Ctx) -> list[dict]:
     for q in open_questions.values():
         by_host.setdefault(q["host"] or "?", []).append(q)
     return [_item(f"form:{host}", fingerprint(*sorted(q["label"] for q in qs)),
-                  f"{host}: анкета спрашивает то, на что у бота нет ответа",
+                  f"{host}: join form asks something the join bot has no answer for",
                   detail="; ".join(q["label"] for q in qs),
                   at=max(q["at"] for q in qs), link=_community_link(qs[0]["cid"]))
             for host, qs in by_host.items()]
@@ -463,9 +457,9 @@ def _form_needs_human(ctx: Ctx) -> list[dict]:
 # --- Leads ------------------------------------------------------------------------
 
 UNSENT_LABELS = {
-    "held_for_review": "придержаны: модель не дала вердикт",
-    "no_author": "нет автора — не отправляются никогда",
-    "pending": "ждут отправки дольше часа",
+    "held_for_review": "held for review — the model gave no verdict",
+    "no_author": "no author — will never be sent",
+    "pending": "waiting to be sent for over an hour",
 }
 
 
@@ -479,13 +473,13 @@ def _lead_unsent(ctx: Ctx) -> list[dict]:
         .group_by(reason)
     ).all()
     return [_item(f"unsent:{r}", fingerprint(newest),
-                  f"{_plural(n, 'лид', 'лида', 'лидов')}: {UNSENT_LABELS.get(r, r)}", at=oldest,
+                  f"{_plural(n, 'lead', 'leads')}: {UNSENT_LABELS.get(r, r)}", at=oldest,
                   link={"section": "leads", "segment": "not_sent", "reason": r})
             for r, n, newest, oldest in rows]
 
 
-VINI_LABELS = {"held": "Vini запарковал", "rejected": "Vini отклонил",
-               "error": "не дошли до Vini"}
+VINI_LABELS = {"held": "held by Vini", "rejected": "rejected by Vini",
+               "error": "not delivered to Vini"}
 
 
 def _vini_not_accepted(ctx: Ctx) -> list[dict]:
@@ -497,20 +491,20 @@ def _vini_not_accepted(ctx: Ctx) -> list[dict]:
         .order_by(func.count(Lead.id).desc())
     ).all()
     return [_item(f"vini:{status}:{fingerprint(_shape(reason))}", fingerprint(newest),
-                  f"{_plural(n, 'лид', 'лида', 'лидов')}: {VINI_LABELS[status]}",
-                  detail=reason or "без причины",
+                  f"{_plural(n, 'lead', 'leads')}: {VINI_LABELS[status]}",
+                  detail=reason or "no reason given",
                   at=last, link={"section": "leads", "segment": status, "reason": reason or ""})
             for status, reason, n, newest, last in rows]
 
 
 # --- Queues and the log ------------------------------------------------------------
 
-QUEUE_LABELS = {"name": "поиск названий", "join_type_recheck": "перепроверка типа входа",
-                "read": "первое чтение", "join": "вступление"}
+QUEUE_LABELS = {"name": "name lookup", "join_type_recheck": "join type recheck",
+                "read": "first read", "join": "join"}
 
 
 def _scan_jobs(ctx: Ctx) -> list[dict]:
-    items = [_item(f"job:{j.id}", "error", f"Задача {j.kind} {j.host or ''} упала".replace("  ", " "),
+    items = [_item(f"job:{j.id}", "error", f"Job {j.kind} {j.host or ''} failed".replace("  ", " "),
                    detail=j.detail, at=j.finished_at)
              for j in ctx.s.scalars(select(ScanJob).where(
                  ScanJob.state == "error",
@@ -520,16 +514,16 @@ def _scan_jobs(ctx: Ctx) -> list[dict]:
     worker = ctx.runtime.get("worker") or {}
     busy = bool((worker.get("stage") or {}).get("stage"))
     if waiting is not None and ctx.now - waiting > timedelta(minutes=30) and not busy:
-        items.append(_item("queue", "waiting", "Очередь задач не разбирается больше 30 мин",
-                           detail="воркер не берёт задачи: проверь, жив ли он", at=waiting))
+        items.append(_item("queue", "waiting", "Job queue not processed for over 30 min",
+                           detail="the worker is not picking up jobs: check that it is alive", at=waiting))
     return items
 
 
 def _queue_stale(ctx: Ctx) -> list[dict]:
     named = and_(Community.name.is_not(None), Community.name != "")
     return [_item(f"queue:{q['key']}", fingerprint(q["last_moved"]),
-                  f"Очередь «{QUEUE_LABELS.get(q['key'], q['key'])}»: ждут {q['waiting']}, "
-                  f"не двигалась {_ago(ctx.now, _parse(q['last_moved']))}",
+                  f"Queue “{QUEUE_LABELS.get(q['key'], q['key'])}”: {q['waiting']} waiting, "
+                  f"last moved {_ago(ctx.now, _parse(q['last_moved']))}",
                   at=q["last_moved"])
             for q in build_queues(ctx.s, ctx.now, named=named) if q["stale"]]
 
@@ -559,7 +553,7 @@ def _log_problems(ctx: Ctx) -> list[dict]:
     items = []
     for g in ranked[:20]:
         where = sorted(g["communities"])
-        detail = f"{g['count']}× за сутки ({g['kind']})"
+        detail = f"{g['count']}× in 24 h ({g['kind']})"
         if where:
             detail += ": " + ", ".join(where[:5]) + ("…" if len(where) > 5 else "")
         items.append(_item(f"log:{g['kind']}:{fingerprint(g['shape'])}", fingerprint(g["shape"]),
@@ -581,80 +575,80 @@ def _plaintext_cookies(ctx: Ctx) -> list[dict]:
     if not hosts:
         return []
     return [_item("plain", fingerprint(*hosts),
-                  f"{_plural(len(hosts), 'сессия хранится', 'сессии хранятся', 'сессий хранятся')} "
-                  "без шифрования",
+                  f"{_plural(len(hosts), 'session is', 'sessions are')} "
+                  "stored unencrypted",
                   detail=", ".join(hosts[:20]) + ("…" if len(hosts) > 20 else ""))]
 
 
 RULES: list[Rule] = [
-    Rule("heartbeat", "crit", "Служба молчит",
-         "Проверь, запущены ли воркер и наблюдатель на сервере. Пока они молчат, ничего не читается и лиды не уходят.",
+    Rule("heartbeat", "crit", "Service is silent",
+         "Check that the worker and the watcher are running on the server. While they are silent, nothing is read and no leads go out.",
          _heartbeat),
-    Rule("stage_error", "crit", "Этап воркера упал",
-         "Текст ошибки ниже. Этап повторится по расписанию; если ошибка та же — чинить код или ключи.",
+    Rule("stage_error", "crit", "Worker stage failed",
+         "The error text is below. The stage reruns on schedule; if the error stays the same, fix the code or the keys.",
          _stage_error),
-    Rule("runtime_env", "crit", "Сервису не хватает ключей",
-         "Добавь переменные в окружение сервиса и перезапусти его. Значения ключей сюда не попадают — только есть/нет.",
+    Rule("runtime_env", "crit", "Service is missing keys",
+         "Add the variables to the service's environment and restart it. Key values never reach this page — only whether each is set.",
          _runtime_env),
-    Rule("lead_unsent", "crit", "Лиды не ушли в Vini",
-         "«Придержаны» — после сбоя модели, их надо переоценить. «Нет автора» — пост сохранён без автора, Vini такой не примет.",
+    Rule("lead_unsent", "crit", "Leads not sent to Vini",
+         "“Held for review” — left after a model failure; they need re-evaluating. “No author” — the post was saved without an author, and Vini will not accept it.",
          _lead_unsent),
-    Rule("harvest_interrupted", "warn", "Сбор не закончился",
-         "Воркер перезапускали посреди сбора. Следующий начнётся через 10 минут; если повторяется — смотри журнал воркера.",
+    Rule("harvest_interrupted", "warn", "Harvest did not finish",
+         "The worker was restarted mid-harvest. The next harvest starts in 10 minutes; if this keeps happening, check the worker's log.",
          _harvest_interrupted),
-    Rule("vini_not_accepted", "warn", "Vini не принял лиды",
-         "Причина — словами Vini. «Отложено» за отсутствующее поле исправляется в коде отправки; остальное решает заказчик.",
+    Rule("vini_not_accepted", "warn", "Vini did not accept leads",
+         "The reason is in Vini's words. “Held” for a missing field is fixed in our sending code; the rest is the client's call.",
          _vini_not_accepted),
-    Rule("join_handoff", "warn", "Вступление не получилось",
-         "Бот остановился и не решил сам. Открой сообщество, посмотри, что там, и вступи руками или поправь бота.",
+    Rule("join_handoff", "warn", "Join did not go through",
+         "The join bot stopped and could not decide on its own. Open the community, see what is there, and join by hand or fix the join bot.",
          _join_handoff),
-    Rule("join_needs_human", "warn", "Вступление ждёт человека",
-         "Профиль, код из письма, анкета или вход через чужой сайт — бот сам не может.",
+    Rule("join_needs_human", "warn", "Join needs a person",
+         "A profile, an email code, a join form or a login via an external site — the join bot cannot do these on its own.",
          _join_needs_human),
-    Rule("join_pending_long", "info", "Заявка на вступление висит",
-         "Больше недели без одобрения. Проверь сообщество вручную: могли отказать молча.",
+    Rule("join_pending_long", "info", "Join request still pending",
+         "Over a week without approval. Check the community by hand: they may have declined silently.",
          _join_pending_long),
-    Rule("form_needs_human", "warn", "Вопросы анкеты без ответа",
-         "Добавь ответ в join_form_answers — бот подставит его в следующий раз.",
+    Rule("form_needs_human", "warn", "Unanswered join form questions",
+         "Add an answer to join_form_answers — the join bot will use it next time.",
          _form_needs_human),
-    Rule("session_dead", "warn", "Сессия сообщества умерла",
-         "Войди в сообщество под указанным аккаунтом и сохрани свежую сессию через "
-         "расширение (или вставь куки в карточке). Под другим аккаунтом не выйдет: "
-         "он там не участник. Аккаунт не записан — укажи его в карточке сообщества. "
-         "Аккаунт больше не используется — вступи заново действующим аккаунтом бота.",
+    Rule("session_dead", "warn", "Community session died",
+         "Log in to the community as the account shown and save a fresh session with the "
+         "extension (or paste the cookies into the community card). Another account will not "
+         "work: it is not a member there. Account not recorded — set it on the community card. "
+         "Account no longer in use — join again with an active join bot account.",
          _session_dead),
-    Rule("session_reads_nothing", "warn", "Сессия живая, но ничего не читает",
-         "Куки обновлять не надо. Зайди в сообщество под этим аккаунтом и посмотри "
-         "разделы: пустые, закрытые или в них надо вступить отдельно (Join space).",
+    Rule("session_reads_nothing", "warn", "Session is live but reads nothing",
+         "No need to refresh the cookies. Log in to the community as this account and check "
+         "its spaces: they may be empty, closed, or need a separate join (Join space).",
          _session_reads_nothing),
-    Rule("watch_cookie_feed", "warn", "Лента по сессии не читается, а сессия живая",
-         "Куки обновлять не надо: по ним же читает полный проход. Наблюдатель не "
-         "прочитал ни ленту, ни разделы по отдельности — это наша ошибка, текст ниже. "
-         "Пока так, новые посты отсюда приходят только раз в 6 ч.",
+    Rule("watch_cookie_feed", "warn", "Feed with a session fails, but the session is live",
+         "No need to refresh the cookies: the cookie scan reads with the same ones. The watcher "
+         "could read neither the feed nor the spaces one by one — the bug is on our side, error "
+         "text below. Until it is fixed, new posts from here arrive only once every 6 h.",
          _watch_cookie_feed),
-    Rule("watch_failing", "warn", "Опрос сообщества падает",
-         "Пять и больше ошибок подряд. Открой сообщество: жив ли адрес, не сменился ли домен.",
+    Rule("watch_failing", "warn", "Community polling is failing",
+         "Five or more errors in a row. Open the community: is the address alive, has the domain changed?",
          _watch_failing),
-    Rule("watch_member_off", "warn", "Мы участники, а опрос выключен",
-         "Проверь сессию и адрес: сообщество, где мы внутри, должно читаться каждые 2 минуты.",
+    Rule("watch_member_off", "warn", "We are members, but polling is off",
+         "Check the session and the address: a community we are in should be read every 2 minutes.",
          _watch_member_off),
-    Rule("scan_jobs", "warn", "Задачи воркера",
-         "Упавшая задача — текст ошибки ниже. Очередь стоит — воркер не берёт задачи.",
+    Rule("scan_jobs", "warn", "Worker jobs",
+         "Failed job — the error text is below. Stuck queue — the worker is not picking up jobs.",
          _scan_jobs),
-    Rule("queue_stale", "warn", "Очередь не двигается",
-         "Сутки без движения при непустой очереди: этап не работает или ему нечем работать.",
+    Rule("queue_stale", "warn", "Queue is not moving",
+         "A day without movement while the queue is not empty: the stage is not running or has nothing to work on.",
          _queue_stale),
-    Rule("log_problems", "info", "Предупреждения в журнале за сутки",
-         "Сгруппировано по тексту. Нажми, чтобы открыть эти записи в журнале.",
+    Rule("log_problems", "info", "Log warnings in the last 24 h",
+         "Grouped by text. Click to open these entries in the Log.",
          _log_problems),
-    Rule("circle_throttled", "info", "Circle ограничивает наш адрес",
-         "Лимит запросов сработал. Ничего не делать: пауза снимется сама; если часто — снизить частоту.",
+    Rule("circle_throttled", "info", "Circle is rate-limiting our IP",
+         "The request limit kicked in. Nothing to do: the pause lifts on its own; if it happens often, lower the request rate.",
          _circle_throttled),
-    Rule("session_cloudflare", "info", "Cloudflare не пускает сервер по сессии",
-         "Куки живые, блокируют IP сервера. Обновлять сессию бесполезно.",
+    Rule("session_cloudflare", "info", "Cloudflare blocks session reads from the server",
+         "The cookies are live; the server's IP is blocked. Refreshing the session will not help.",
          _session_cloudflare),
-    Rule("plaintext_cookies", "info", "Куки без шифрования",
-         "Задай CIRCLE_CRED_KEY (одинаковый на Vercel и воркере) и пересохрани сессии.",
+    Rule("plaintext_cookies", "info", "Unencrypted cookies",
+         "Set CIRCLE_CRED_KEY (the same on Vercel and the worker) and re-save the sessions.",
          _plaintext_cookies),
 ]
 RULES_BY_KEY = {rule.key: rule for rule in RULES}

@@ -1,4 +1,4 @@
-// The count beside "Требует внимания" in the menu: open items that are
+// The count beside "Needs attention" in the menu: open items that are
 // critical or need attention. Informational ones do not raise it.
 
 import { $ } from './dom.js';
@@ -12,5 +12,5 @@ export function setBadge(data) {
   badge.hidden = n === 0;
   badge.textContent = String(n);
   badge.className = `badge ${crit ? 'badge-critical' : 'badge-warning'}`;
-  badge.title = `критично: ${crit}, внимание: ${warn}`;
+  badge.title = `critical: ${crit}, warning: ${warn}`;
 }

@@ -13,16 +13,16 @@ import { icon } from '../icons.js';
 import { NOT_SENT, SEGMENT, label, viniReason } from '../labels.js';
 import { navigate, toObject } from '../router.js';
 
-export const title = 'Лиды';
-export const subtitle = 'Все лиды в базе: что принял Vini, что нет и почему.';
+export const title = 'Leads';
+export const subtitle = 'Every lead in the database: what Vini accepted, what it did not, and why.';
 
 const TABS = [
-  { key: '', name: 'Все', segments: null },
-  { key: 'accepted', name: 'Принял Vini', segments: ['accepted'] },
-  { key: 'held,rejected,error', name: 'Не принял', segments: ['held', 'rejected', 'error'] },
-  { key: 'duplicate', name: 'Уже был у Vini', segments: ['duplicate'] },
-  { key: 'not_sent', name: 'Не отправлен', segments: ['not_sent'] },
-  { key: 'no_data', name: 'Нет данных', segments: ['no_data'] },
+  { key: '', name: 'All', segments: null },
+  { key: 'accepted', name: 'Accepted by Vini', segments: ['accepted'] },
+  { key: 'held,rejected,error', name: 'Not accepted', segments: ['held', 'rejected', 'error'] },
+  { key: 'duplicate', name: 'Already at Vini', segments: ['duplicate'] },
+  { key: 'not_sent', name: 'Not sent', segments: ['not_sent'] },
+  { key: 'no_data', name: 'No data', segments: ['no_data'] },
 ];
 const LIMIT = 50;
 
@@ -34,23 +34,23 @@ export function mount(context) {
   render(ctx.body, html`
     <div class="tabs" data-tabs></div>
     <div class="toolbar">
-      <input type="search" data-f="q" placeholder="Поиск: текст поста, автор, компания, сообщество">
+      <input type="search" data-f="q" placeholder="Search: post text, author, company, community">
       <select data-f="classification">
-        <option value="">лиды и не лиды</option>
-        <option value="LEAD">только лиды</option>
-        <option value="NOT_LEAD">только «не лид»</option>
+        <option value="">leads and non-leads</option>
+        <option value="LEAD">leads only</option>
+        <option value="NOT_LEAD">non-leads only</option>
       </select>
-      <label class="field-inline">с <input type="date" data-f="since"></label>
-      <label class="field-inline">по <input type="date" data-f="until"></label>
+      <label class="field-inline">from <input type="date" data-f="since"></label>
+      <label class="field-inline">to <input type="date" data-f="until"></label>
       <select data-f="sort">
-        <option value="found">сначала новые</option>
-        <option value="published">по дате поста</option>
-        <option value="score">по оценке</option>
+        <option value="found">newest first</option>
+        <option value="published">by post date</option>
+        <option value="score">by score</option>
       </select>
     </div>
     <div class="chips" data-reasons></div>
     <div class="leads-count" data-count></div>
-    <div class="lc-grid" data-cards>${empty('Загрузка…')}</div>
+    <div class="lc-grid" data-cards>${empty('Loading…')}</div>
     <div data-pager></div>`);
 
   const push = (extra = {}) => {
@@ -75,7 +75,7 @@ export function mount(context) {
       const text = more.previousElementSibling;
       const open = text.classList.toggle('open');
       more.setAttribute('aria-expanded', String(open));
-      more.textContent = open ? 'Свернуть' : 'Показать ещё';
+      more.textContent = open ? 'Show less' : 'Show more';
       return;
     }
     const card = e.target.closest('[data-lead]');
@@ -131,12 +131,12 @@ function reasonsFor(data) {
   const showOurs = !segs.length || segs.includes('not_sent');
   if (showVini) {
     for (const r of data.reasons.vini) {
-      chips.push({ key: r.reason, text: `${label(SEGMENT, r.segment)}: ${viniReason(r.reason) || 'без причины'}`, count: r.count, title: r.reason });
+      chips.push({ key: r.reason, text: `${label(SEGMENT, r.segment)}: ${viniReason(r.reason) || 'no reason given'}`, count: r.count, title: r.reason });
     }
   }
   if (showOurs) {
     for (const r of data.reasons.not_sent) {
-      chips.push({ key: r.reason, text: `не отправлен: ${label(NOT_SENT, r.reason)}`, count: r.count, title: r.reason });
+      chips.push({ key: r.reason, text: `not sent: ${label(NOT_SENT, r.reason)}`, count: r.count, title: r.reason });
     }
   }
   return chips;
@@ -144,9 +144,9 @@ function reasonsFor(data) {
 
 // --- the lead card ------------------------------------------------------------------
 
-const PRIORITY_WORD = { HIGH: 'Высокий приоритет', MEDIUM: 'Средний приоритет', LOW: 'Низкий приоритет' };
+const PRIORITY_WORD = { HIGH: 'High priority', MEDIUM: 'Medium priority', LOW: 'Low priority' };
 const AVATAR_COLORS = ['#c026d3', '#0891b2', '#7a5af8', '#b54708', '#067647', '#2970ff', '#e11d48'];
-const TEXT_CLAMP = 240;  // a longer post gets "Показать ещё"
+const TEXT_CLAMP = 240;  // a longer post gets "Show more"
 
 function initials(name) {
   const words = String(name || '').trim().split(/\s+/).filter(Boolean);
@@ -167,8 +167,8 @@ function dateWord(iso, withTime) {
   if (Number.isNaN(d.getTime())) return '—';
   const opts = { day: 'numeric', month: 'short', year: 'numeric' };
   return withTime
-    ? d.toLocaleString('ru-RU', { ...opts, hour: '2-digit', minute: '2-digit' })
-    : d.toLocaleDateString('ru-RU', opts);
+    ? d.toLocaleString('en-US', { ...opts, hour: '2-digit', minute: '2-digit' })
+    : d.toLocaleDateString('en-US', opts);
 }
 
 function spaceOf(url) {
@@ -187,7 +187,7 @@ function leadCard(r) {
   }
   const cut = rawTitle.length > 110 ? `${rawTitle.slice(0, 110)}…` : rawTitle;
   const title = cut ? cut.charAt(0).toUpperCase() + cut.slice(1) : '—';
-  const author = r.author || 'Автор неизвестен';
+  const author = r.author || 'Unknown author';
   const isLead = r.classification === 'LEAD';
   const priority = ['HIGH', 'MEDIUM', 'LOW'].includes(r.priority) ? r.priority : 'LOW';
   const isLlm = r.decided_by === 'llm';
@@ -198,14 +198,14 @@ function leadCard(r) {
   const space = spaceOf(r.post_url);
 
   const chips = [
-    !isLead && html`<span class="lc-chip verdict">${r.classification === 'NOT_LEAD' ? 'не лид' : 'не уверен'}</span>`,
-    html`<span class="lc-chip ${isLlm ? 'ai' : 'rules'}" title="${r.reason || ''}">${icon(isLlm ? 'bot' : 'rules')} ${isLlm ? 'AI' : 'Правила'}</span>`,
+    !isLead && html`<span class="lc-chip verdict">${r.classification === 'NOT_LEAD' ? 'not a lead' : 'unsure'}</span>`,
+    html`<span class="lc-chip ${isLlm ? 'ai' : 'rules'}" title="${r.reason || ''}">${icon(isLlm ? 'bot' : 'rules')} ${isLlm ? 'AI' : 'Rules'}</span>`,
     r.lead_score !== null && r.lead_score !== undefined
-      && html`<span class="lc-chip score" title="Уверенность: ${r.confidence || '—'}">${icon('gauge')} Оценка ${r.lead_score}</span>`,
+      && html`<span class="lc-chip score" title="Confidence: ${r.confidence || '—'}">${icon('gauge')} Score ${r.lead_score}</span>`,
     employment && html`<span class="lc-chip">${icon('briefcase')} ${employment}</span>`,
     r.hire_target && html`<span class="lc-chip">${r.hire_target}</span>`,
     r.budget && html`<span class="lc-chip money">${icon('money')} ${r.budget}</span>`,
-    r.urgency === 'High' && html`<span class="lc-chip urgent">Срочно</span>`,
+    r.urgency === 'High' && html`<span class="lc-chip urgent">Urgent</span>`,
     ...skills.map((s) => html`<span class="lc-chip">${s}</span>`),
     moreSkills > 0 && html`<span class="lc-chip">+${moreSkills}</span>`,
   ].filter(Boolean);
@@ -231,13 +231,13 @@ function leadCard(r) {
     <div class="lc-chips">${chips}</div>
     <h3 class="lc-title">${titleHtml}</h3>
     <p class="lc-text">${content || '—'}</p>
-    ${content.length > TEXT_CLAMP ? html`<button class="lc-more" type="button" aria-expanded="false">Показать ещё</button>` : ''}
+    ${content.length > TEXT_CLAMP ? html`<button class="lc-more" type="button" aria-expanded="false">Show more</button>` : ''}
     <div class="lc-source">${source}</div>
     <div class="lc-vini"><span class="muted">Vini:</span> ${segmentCell(r)}</div>
     <div class="lc-foot">
-      <span title="Когда мы нашли лид">${icon('found')} Найден ${dateWord(r.created_at, false)}</span>
-      <span title="Номер лида">#${r.id}</span>
-      <span title="Когда опубликован пост">${icon('clock')} ${dateWord(r.published_at, true)}</span>
+      <span title="When we found this lead">${icon('found')} Found ${dateWord(r.created_at, false)}</span>
+      <span title="Lead number">#${r.id}</span>
+      <span title="When the post was published">${icon('clock')} ${dateWord(r.published_at, true)}</span>
     </div>
   </article>`;
 }
@@ -251,14 +251,14 @@ function draw(data, page) {
 
   const chips = reasonsFor(data);
   render($('[data-reasons]', ctx.body), chips.length ? html`
-    <span class="muted small">Причина:</span>
+    <span class="muted small">Reason:</span>
     ${chips.map((c) => html`<button class="chip-btn" data-reason="${c.key}" title="${c.title}"
       aria-pressed="${state.reason === c.key ? 'true' : 'false'}">${c.text} <b>${num(c.count)}</b></button>`)}` : '');
 
   render($('[data-count]', ctx.body), data.rows.length
-    ? `Показано ${num(data.rows.length)} из ${num(data.filtered)}` : '');
+    ? `Showing ${num(data.rows.length)} of ${num(data.filtered)}` : '');
   render($('[data-cards]', ctx.body), data.rows.length
-    ? data.rows.map(leadCard) : empty('Ничего не найдено.'));
+    ? data.rows.map(leadCard) : empty('Nothing found.'));
 
   const pagerHost = $('[data-pager]', ctx.body);
   pagerHost.replaceChildren(pager(page, LIMIT, data.filtered, (p) => {

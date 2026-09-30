@@ -40,13 +40,13 @@ export async function api(path, { method = 'GET', body, params } = {}) {
   if (res.status === 401) {
     remember(location.hash);
     location.href = '/login';
-    throw new ApiError(401, 'Нужно войти заново');
+    throw new ApiError(401, 'Please sign in again');
   }
   let data = null;
   try { data = await res.json(); } catch { /* empty body */ }
   if (!res.ok) {
     const detail = data && (data.detail || data.error);
-    throw new ApiError(res.status, typeof detail === 'string' ? detail : `Ошибка ${res.status}`);
+    throw new ApiError(res.status, typeof detail === 'string' ? detail : `Error ${res.status}`);
   }
   return data;
 }

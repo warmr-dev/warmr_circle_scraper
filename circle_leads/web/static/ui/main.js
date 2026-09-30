@@ -32,7 +32,7 @@ function makeContext(module) {
       </div>
       <div class="page-meta">
         <span class="muted" data-updated></span>
-        <button class="btn btn-ghost" data-refresh title="Обновить">↻ Обновить</button>
+        <button class="btn btn-ghost" data-refresh title="Refresh">↻ Refresh</button>
       </div>
     </header>
     <div class="page-body"></div>`);
@@ -42,10 +42,10 @@ function makeContext(module) {
     body: $('.page-body', view),
     setUpdated(iso) {
       stamp = iso || new Date().toISOString();
-      updated.textContent = `обновлено ${ago(stamp)}`;
+      updated.textContent = `updated ${ago(stamp)}`;
     },
     tick() {
-      if (stamp) updated.textContent = `обновлено ${ago(stamp)}`;
+      if (stamp) updated.textContent = `updated ${ago(stamp)}`;
     },
   };
   $('[data-refresh]', view).addEventListener('click', () => module.refresh?.());
@@ -68,7 +68,7 @@ async function show(route) {
     try {
       module.mount(current.ctx);
     } catch (err) {
-      toast(`Раздел не открылся: ${err.message}`, 'error');
+      toast(`Could not open the section: ${err.message}`, 'error');
     }
   }
   try {

@@ -10,8 +10,8 @@ import { openCommunity } from '../drawers.js';
 import { CONN_BUCKET, JOIN_STATUS, WATCH_MODE, WATCH_TIER, label, watchStatus } from '../labels.js';
 import { navigate, toObject } from '../router.js';
 
-export const title = 'Мониторинг';
-export const subtitle = 'Сообщества, которые мы читаем или читали: как читаем, чем ответили, сколько лидов дали.';
+export const title = 'Monitoring';
+export const subtitle = 'Communities we read now or read before: how we read them, what they answered, how many leads they gave.';
 export const autoRefresh = true;
 
 const SORTS = {
@@ -34,36 +34,36 @@ export function mount(context) {
   render(ctx.body, html`
     <div class="kpis" data-kpis></div>
     <div class="toolbar">
-      <input type="search" data-f="q" placeholder="Поиск: название или адрес">
+      <input type="search" data-f="q" placeholder="Search: name or URL">
       <select data-f="status">
-        <option value="">читаем или читали</option>
-        <option value="ok">читаем сейчас</option>
-        <option value="broken">перестали читаться</option>
-        <option value="private">приватные — ни разу не читали</option>
-        <option value="other">другие — не читали</option>
-        <option value="all">все</option>
+        <option value="">reading now or before</option>
+        <option value="ok">reading now</option>
+        <option value="broken">stopped reading</option>
+        <option value="private">private — never read</option>
+        <option value="other">other — not read</option>
+        <option value="all">all</option>
       </select>
       <select data-f="mode">
-        <option value="">любой способ</option>
-        <option value="anon">лента анонимно</option>
-        <option value="cookie">лента по сессии</option>
-        <option value="session">есть рабочая сессия</option>
+        <option value="">any method</option>
+        <option value="anon">feed anonymously</option>
+        <option value="cookie">feed with a session</option>
+        <option value="session">has a working session</option>
       </select>
       <select data-f="tier">
-        <option value="">любая частота</option>
-        <option value="fast">каждые 2 мин</option>
-        <option value="slow">каждые 15 мин</option>
+        <option value="">any frequency</option>
+        <option value="fast">every 2 min</option>
+        <option value="slow">every 15 min</option>
       </select>
       <select data-f="sort">
-        <option value="leads">по лидам</option>
-        <option value="today">по лидам за сегодня</option>
-        <option value="checked">по времени проверки</option>
-        <option value="errors">по ошибкам подряд</option>
-        <option value="name">по названию</option>
+        <option value="leads">by leads</option>
+        <option value="today">by leads today</option>
+        <option value="checked">by last check</option>
+        <option value="errors">by errors in a row</option>
+        <option value="name">by name</option>
       </select>
-      <label class="check"><input type="checkbox" data-f="with_leads"> только с лидами</label>
+      <label class="check"><input type="checkbox" data-f="with_leads"> only with leads</label>
     </div>
-    <div data-table>${empty('Загрузка…')}</div>
+    <div data-table>${empty('Loading…')}</div>
     <div data-unwatched></div>`);
   const push = () => {
     const next = {};
@@ -125,20 +125,20 @@ function statusCell(row) {
 // session) and the session's full read of every space inside the 6-hour pass.
 function readCell(row) {
   const feed = row.mode === 'off'
-    ? html`<span class="muted">лента не читается</span>`
-    : html`лента ${label(WATCH_MODE, row.mode)}<div class="muted small">${label(WATCH_TIER, row.tier)}</div>`;
+    ? html`<span class="muted">feed not read</span>`
+    : html`feed ${label(WATCH_MODE, row.mode)}<div class="muted small">${label(WATCH_TIER, row.tier)}</div>`;
   let session = '';
-  if (row.session_ok) session = html`<div class="small">по сессии — всё, раз в 6 ч</div>`;
-  else if (row.has_session) session = html`<div class="small warn-text">сессия не работает</div>`;
+  if (row.session_ok) session = html`<div class="small">with a session — all spaces, every 6 h</div>`;
+  else if (row.has_session) session = html`<div class="small warn-text">session not working</div>`;
   return html`${feed}${session}`;
 }
 
 function insideCell(row) {
-  const who = row.account ? html`<div class="muted small">аккаунт: ${row.account}</div>` : '';
-  if (row.join_status === 'joined') return html`${pill('вступили', 'good')}${who || html`<div class="muted small">аккаунт не записан</div>`}`;
+  const who = row.account ? html`<div class="muted small">account: ${row.account}</div>` : '';
+  if (row.join_status === 'joined') return html`${pill('joined', 'good')}${who || html`<div class="muted small">account not recorded</div>`}`;
   if (row.has_session) {
     const bucket = row.conn?.bucket;
-    return html`${pill(bucket ? label(CONN_BUCKET, bucket) : 'сессия', bucket && bucket !== 'working' ? 'warning' : 'good', row.conn?.detail || '')}${who}`;
+    return html`${pill(bucket ? label(CONN_BUCKET, bucket) : 'session', bucket && bucket !== 'working' ? 'warning' : 'good', row.conn?.detail || '')}${who}`;
   }
   return html`<span class="muted small">${label(JOIN_STATUS, row.join_status)}</span>`;
 }
@@ -146,13 +146,13 @@ function insideCell(row) {
 function draw() {
   const s = data.summary;
   render($('[data-kpis]', ctx.body), html`
-    <div class="kpi"><b>${num(s.reading)}</b><span>читаем сейчас</span></div>
-    <div class="kpi"><b>${num(s.feed_fast)}</b><span>лента каждые 2 мин</span></div>
-    <div class="kpi"><b>${num(s.feed_slow)}</b><span>лента каждые 15 мин</span></div>
-    <div class="kpi"><b>${num(s.session_ok)}</b><span>по сессии — всё, раз в 6 ч</span></div>
-    <div class="kpi ${s.broken ? 'kpi-warn' : ''}"><b>${num(s.broken)}</b><span>перестали читаться</span></div>
-    <div class="kpi"><b>${num(s.private)}</b><span>приватные, не читаем</span></div>
-    <div class="kpi"><b>${num(s.leads_today)}</b><span>лидов сегодня · из ${num(s.communities_with_leads_today)} сообществ</span></div>`);
+    <div class="kpi"><b>${num(s.reading)}</b><span>reading now</span></div>
+    <div class="kpi"><b>${num(s.feed_fast)}</b><span>feed every 2 min</span></div>
+    <div class="kpi"><b>${num(s.feed_slow)}</b><span>feed every 15 min</span></div>
+    <div class="kpi"><b>${num(s.session_ok)}</b><span>with a session — all spaces, every 6 h</span></div>
+    <div class="kpi ${s.broken ? 'kpi-warn' : ''}"><b>${num(s.broken)}</b><span>stopped reading</span></div>
+    <div class="kpi"><b>${num(s.private)}</b><span>private, not read</span></div>
+    <div class="kpi"><b>${num(s.leads_today)}</b><span>leads today · from ${num(s.communities_with_leads_today)} ${s.communities_with_leads_today === 1 ? 'community' : 'communities'}</span></div>`);
 
   const q = (state.q || '').toLowerCase();
   const status = state.status || '';
@@ -168,11 +168,11 @@ function draw() {
   rows = rows.sort(SORTS[state.sort] || SORTS.leads);
 
   render($('[data-table]', ctx.body), rows.length ? html`
-    <p class="muted small">Показано ${num(rows.length)} из ${num(data.rows.length)}</p>
+    <p class="muted small">Showing ${num(rows.length)} of ${num(data.rows.length)}</p>
     <div class="table-wrap"><table class="table">
       <thead><tr>
-        <th>Сообщество</th><th>Как читаем</th><th>Последний ответ</th><th>Внутри</th>
-        <th class="num">Лидов</th><th class="num">Сегодня</th><th>Последний лид</th>
+        <th>Community</th><th>How we read</th><th>Last response</th><th>Access</th>
+        <th class="num">Leads</th><th class="num">Today</th><th>Last lead</th>
       </tr></thead>
       <tbody>${rows.map((r) => html`
         <tr data-cid="${r.community_id}" class="row-link">
@@ -184,15 +184,15 @@ function draw() {
           <td class="num">${r.leads_today ? html`<b class="up">+${num(r.leads_today)}</b>` : html`<span class="muted">0</span>`}</td>
           <td class="small">${r.last_lead_at ? when(r.last_lead_at) : html`<span class="muted">—</span>`}</td>
         </tr>`)}</tbody>
-    </table></div>` : empty('Ничего не подходит под фильтр.'));
+    </table></div>` : empty('Nothing matches the filter.'));
 
   const unwatched = data.unwatched_connections || [];
   render($('[data-unwatched]', ctx.body), unwatched.length ? html`
     <section class="panel">
-      <h2>Сессии без опроса (${num(unwatched.length)})</h2>
-      <p class="muted small">Для этих адресов сохранена сессия или заведено подключение, но наблюдатель их не опрашивает — обычно это сообщество, которого нет в базе под этим адресом.</p>
+      <h2>Sessions not polled (${num(unwatched.length)})</h2>
+      <p class="muted small">These hosts have a saved session or a connection, but the watcher does not poll them — usually the community is not in the database under this host.</p>
       <div class="table-wrap"><table class="table"><tbody>${unwatched.map((u) => html`
         <tr><td>${u.host}</td><td>${u.conn ? pill(label(CONN_BUCKET, u.conn.bucket), u.conn.bucket === 'working' ? 'good' : 'warning', u.conn.detail || '') : ''}</td>
-        <td class="small muted">${u.session ? `куки сохранены ${when(u.session.created_at)}` : 'кук нет'}</td></tr>`)}</tbody></table></div>
+        <td class="small muted">${u.session ? `cookies saved ${when(u.session.created_at)}` : 'no cookies'}</td></tr>`)}</tbody></table></div>
     </section>` : '');
 }

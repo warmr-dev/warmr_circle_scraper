@@ -8,8 +8,8 @@ import { $, ago, debounce, empty, html, num, pill, render, toast, when } from '.
 import { KIND, LEVEL, LEVEL_TONE, SEVERITY, SEVERITY_TONE, label } from '../labels.js';
 import { follow, navigate, toObject } from '../router.js';
 
-export const title = 'Требует внимания';
-export const subtitle = 'Что проверить руками, и журнал всего, что делала система.';
+export const title = 'Needs attention';
+export const subtitle = 'What to check by hand, and a log of everything the system did.';
 export const autoRefresh = true;
 
 let ctx = null;
@@ -22,8 +22,8 @@ export function mount(context) {
   ctx = context;
   render(ctx.body, html`
     <div class="tabs">
-      <button class="tab" data-tab="">Требует внимания</button>
-      <button class="tab" data-tab="log">Журнал</button>
+      <button class="tab" data-tab="">Needs attention</button>
+      <button class="tab" data-tab="log">Log</button>
     </div>
     <div data-pane></div>`);
   ctx.body.addEventListener('click', onClick);
@@ -91,16 +91,16 @@ async function loadAttention() {
 }
 
 function itemView(rule, item) {
-  const link = item.link ? html`<button class="btn btn-small" data-follow="${JSON.stringify(item.link)}">Открыть</button>` : '';
+  const link = item.link ? html`<button class="btn btn-small" data-follow="${JSON.stringify(item.link)}">Open</button>` : '';
   const ack = item.acked
-    ? html`<button class="btn btn-small btn-ghost" data-ack="off" data-rule="${rule.key}" data-key="${item.key}">Вернуть</button>`
-    : html`<button class="btn btn-small btn-ghost" data-ack="on" data-rule="${rule.key}" data-key="${item.key}" data-fp="${item.fp}" title="Скрыть, пока состояние не изменится">Проверено</button>`;
+    ? html`<button class="btn btn-small btn-ghost" data-ack="off" data-rule="${rule.key}" data-key="${item.key}">Unmark</button>`
+    : html`<button class="btn btn-small btn-ghost" data-ack="on" data-rule="${rule.key}" data-key="${item.key}" data-fp="${item.fp}" title="Hide until its state changes">Mark seen</button>`;
   return html`
     <li class="item${item.acked ? ' acked' : ''}">
       <div class="item-main">
         <div class="strong">${item.title}</div>
         ${item.detail ? html`<div class="muted small detail" title="${item.detail}">${item.detail}</div>` : ''}
-        <div class="muted small">${item.at ? `${when(item.at)} · ${ago(item.at)}` : ''}${item.acked ? ` · отмечено ${ago(item.acked_at)}` : ''}</div>
+        <div class="muted small">${item.at ? `${when(item.at)} · ${ago(item.at)}` : ''}${item.acked ? ` · marked seen ${ago(item.acked_at)}` : ''}</div>
       </div>
       <div class="item-actions">${link}${ack}</div>
     </li>`;
@@ -117,20 +117,20 @@ function draw(data) {
   render($('[data-pane]', ctx.body), html`
     <div class="toolbar">
       ${['crit', 'warn', 'info'].map((s) => pill(`${SEVERITY[s]}: ${num(bySeverity[s] || 0)}`, bySeverity[s] ? SEVERITY_TONE[s] : 'muted'))}
-      <label class="check"><input type="checkbox" data-show-acked ${showAcked ? 'checked' : ''}> показать отмеченные (${num(acked)})</label>
+      <label class="check"><input type="checkbox" data-show-acked ${showAcked ? 'checked' : ''}> show marked (${num(acked)})</label>
     </div>
     ${visible.length ? visible.map((r) => html`
       <section class="panel rule rule-${r.severity}">
         <header class="rule-head">
           ${pill(SEVERITY[r.severity], SEVERITY_TONE[r.severity])}
           <h2>${r.title}</h2>
-          <span class="muted">${num(r.open)}${r.count !== r.open ? ` из ${num(r.count)}` : ''}</span>
+          <span class="muted">${num(r.open)}${r.count !== r.open ? ` of ${num(r.count)}` : ''}</span>
         </header>
         <p class="muted small">${r.todo}</p>
-        ${r.error ? html`<p class="error small">Правило не сработало: ${r.error}</p>` : ''}
+        ${r.error ? html`<p class="error small">Rule failed: ${r.error}</p>` : ''}
         <ul class="items">${r.items.filter((i) => showAcked || !i.acked).map((i) => itemView(r, i))}</ul>
-        ${r.count > r.items.length ? html`<p class="muted small">Показано ${num(r.items.length)} из ${num(r.count)}.</p>` : ''}
-      </section>`) : empty('Всё в порядке: проверять нечего.')}`);
+        ${r.count > r.items.length ? html`<p class="muted small">Showing ${num(r.items.length)} of ${num(r.count)}.</p>` : ''}
+      </section>`) : empty('All clear: nothing to check.')}`);
   const box = $('[data-show-acked]', ctx.body);
   if (box) box.checked = showAcked;
 }
@@ -140,19 +140,19 @@ function draw(data) {
 function logFilters() {
   return html`
     <div class="toolbar">
-      <input type="search" data-lf="q" placeholder="Поиск: сообщество или текст" value="${state.q || ''}">
+      <input type="search" data-lf="q" placeholder="Search: community or text" value="${state.q || ''}">
       <select data-lf="kind">
-        <option value="">все виды</option>
+        <option value="">all kinds</option>
         ${Object.entries(KIND).map(([k, t]) => html`<option value="${k}" ${state.kind === k ? 'selected' : ''}>${t}</option>`)}
       </select>
       <select data-lf="level">
-        <option value="">любой уровень</option>
-        <option value="warning,error" ${state.level === 'warning,error' ? 'selected' : ''}>только проблемы</option>
+        <option value="">any level</option>
+        <option value="warning,error" ${state.level === 'warning,error' ? 'selected' : ''}>problems only</option>
         ${Object.entries(LEVEL).map(([k, t]) => html`<option value="${k}" ${state.level === k ? 'selected' : ''}>${t}</option>`)}
       </select>
       <select data-lf="hours">
-        <option value="">за всё время</option>
-        ${[['1', 'за час'], ['24', 'за сутки'], ['168', 'за неделю'], ['720', 'за месяц']].map(([v, t]) => html`
+        <option value="">all time</option>
+        ${[['1', 'last hour'], ['24', 'last 24 hours'], ['168', 'last week'], ['720', 'last month']].map(([v, t]) => html`
           <option value="${v}" ${state.hours === v ? 'selected' : ''}>${t}</option>`)}
       </select>
     </div>`;
@@ -183,11 +183,11 @@ async function loadLog(more) {
     ${logFilters()}
     ${logRows.length ? html`
       <div class="table-wrap"><table class="table log">
-        <thead><tr><th>Когда</th><th>Вид</th><th>Уровень</th><th>Сообщество</th><th>Что</th></tr></thead>
+        <thead><tr><th>When</th><th>Kind</th><th>Level</th><th>Community</th><th>What</th></tr></thead>
         <tbody>${logRows.map(logRow)}</tbody>
       </table></div>
-      ${nextBefore ? html`<div class="pager"><button class="btn" data-more>Показать ещё</button></div>` : ''}`
-      : empty('Записей нет.')}`);
+      ${nextBefore ? html`<div class="pager"><button class="btn" data-more>Show more</button></div>` : ''}`
+      : empty('No entries.')}`);
   if (focused) {
     const el = $(`[data-lf="${focused}"]`, pane);
     if (el) { el.focus(); if (el.type === 'search') el.setSelectionRange(el.value.length, el.value.length); }
