@@ -120,9 +120,9 @@ function view(d) {
                  note: `${pct(c.fit.all, c.found.all)} of those found`,
                  link: { section: 'communities', icp: 'fit' }, hero: true })}
         <span class="arrow" aria-hidden="true">→</span>
-        ${tile({ name: 'Got in', all: c.access.all, todayCount: c.access.today,
-                 note: `${num(c.access.fit_all)} ICP fit · ${num(c.access.joined)} via the join bot · ${num(c.access.with_session)} with a session`,
-                 link: { section: 'communities', access: '1' } })}
+        ${tile({ name: 'Reading now', all: r.all, todayCount: r.today,
+                 note: `${num(r.anonymous)} anonymously · ${num(r.with_session)} with a session · ${num(r.fit)} ICP fit`,
+                 link: { section: 'monitoring', status: 'ok' } })}
       </div>
       <h3>Of the ICP fit: paid, free, closed</h3>
       ${splitBar(fitParts, c.fit.all)}
@@ -144,7 +144,7 @@ function view(d) {
                  link: { section: 'monitoring', status: 'ok', tier: 'slow' } })}
         ${tile({ name: 'New posts today', all: r.today, note: 'communities whose feed brought new posts' })}
       </div>
-      <p class="muted small">“Got in” means we are members: the join bot joined, or a session is saved. “Reading now” means the feed answers or the session works. Open communities are read anonymously, without joining, so “Reading now” is larger than “Got in”. With a session, the cookie scan reads the whole community every 6 hours, including closed spaces and comments.</p>
+      <p class="muted small">“Reading now” means the feed answers or a session works — joining is not required, since an open community is read anonymously. We are members in ${num(c.access.joined)} communities (the join bot joined) and hold a saved session for ${num(c.access.with_session)} more; with a session, the cookie scan reads the whole community every 6 hours, including closed spaces and comments.</p>
     </section>
 
     <section class="panel">
