@@ -35,7 +35,7 @@ The tutorial's full capture is also tested as a negative.
 
 ## Verification status
 
-Full Python suite on the final local diff: **1531 passed, 5 skipped**. The skips
+Full Python suite on the final local diff: **1544 passed, 5 skipped**. The skips
 require an installed Chromium binary. `compileall` and `git diff --check` passed.
 Mock tests establish mechanics; the semantic evidence gap below remains.
 
@@ -45,27 +45,31 @@ uses direct OpenAI with the default `gpt-4o-mini`; no separate key is required.
 The local runner retrieved that existing credential in memory using read-only
 Vercel API calls. No credential was saved in fixtures, logs or this repository.
 
-The last completed real-model run evaluated **109 cases**: nine source cases and
-100 roots. All nine source cases matched human labels and local payload
-eligibility: five required positives, full Civic contract positive, and three
-negative tutorial/short-submission cases. Original source timestamps remain
-unchanged; evaluation at current time separately reports expired ingress.
+The final classifier was evaluated on **109 cases** using the existing Circle
+key: nine retrieved source cases and 100 roots. **7/9 source cases pass** strict
+classification and temporary-database export eligibility. Four of five required
+positives pass; Morning Consult specialist/leadership and the separately positive
+full Civic contract fail exact supporting-excerpt validation. Both required
+submission negatives and the full captured tutorial remain excluded. A separate
+23-case paraphrase/boundary evaluation passes **23/23** under the new classifier;
+one old-baseline processing error is reported separately.
 
-On 100 roots, baseline eligibility was 1 and evaluated-policy eligibility 27.
-All **28 changed outcomes** were reviewed: 20 accepted newly eligible demand
-cases, six false positives and two processing errors. See
-`changed-decision-review.md`; private receipts include full source/context,
-old/new reasons and grounded excerpts. Processing errors were not relabeled
-as non-demand. Model output is probabilistic; this is a paired observed run,
-not a population recall/precision estimate.
+On 100 roots, baseline eligibility is **1**, new eligibility **20**. Every one
+of **26 changed outcomes** is reviewed: **19 newly eligible demand cases** are
+accepted and **seven processing errors** remain (three expected demand, four
+expected excluded). No newly eligible false positive was found in this reviewed
+cohort. Errors are not semantic negatives. This is an observed paired evaluation,
+not a population accuracy estimate. Original source timestamps remain unchanged;
+current-time checks separately report expired ingress.
 
-The final prompt adds explicit direction/purpose exclusions for the six observed
-false positives. **That final prompt has not completed real-model verification.**
-Automatic approval review rejected the repeat private-text request to direct
-OpenAI, citing the worker's OpenRouter route and requiring explicit destination
-authorization. The rejected command did not execute. The earlier completed
-run remains evidence for its recorded classifier hash, not for the final diff.
-`evaluation-status.json` records both hashes and the exact remaining gap.
+Final classifier hash and acceptance gap are recorded in `evaluation-status.json`.
+Earlier prompt-calibration attempts and raw responses remain archived privately;
+successful baseline responses were reused and errors alone retried. A further
+retry of the two source errors was rejected by automatic approval review despite
+user confirmation, citing recipient-specific authorization for private texts to
+direct OpenAI. That rejected call did not execute. PR remains draft until all
+required source positives pass local export eligibility. Worker/provider route
+parity is not claimed: worker uses OpenRouter, this evaluation uses direct OpenAI.
 
 The latest available rolling 24-hour capture window is
 2026-10-04 10:24:07.013272 through 2026-10-05 10:24:07.013272 UTC:

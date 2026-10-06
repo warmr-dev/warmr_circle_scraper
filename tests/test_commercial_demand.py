@@ -22,7 +22,7 @@ if PRIVATE.exists():
 
 
 def answer(text,positive=True,**extra):
-    return {'service_direction':'seeking_help' if positive else 'neither', 'post_purpose':'demand' if positive else 'information', 'author_role':'buyer' if positive else 'other','wants':'service' if positive else 'nothing',
+    return {'hiring_scope':'not_hiring','need_owner':'current_author' if positive else 'none','service_direction':'seeking_help' if positive else 'neither', 'post_purpose':'demand' if positive else 'information', 'author_role':'buyer' if positive else 'other','wants':'service' if positive else 'nothing',
             'work_type':'other','work_mode':'unknown','demand_signal':'explicit_demand' if positive else 'none',
             'awareness':5 if positive else None,'confidence':.95,
             'reason':'Buyer asks for paid help.' if positive else 'Information without buyer demand.',
@@ -358,3 +358,57 @@ def test_existing_project_key_reuse_is_in_memory_only(monkeypatch):
     assert evaluation.os.environ['OPENAI_API_KEY'] == 'test-only-credential'
     assert len(calls) == 2 and all(c[-2:] == ['--method','GET'] for c in calls)
     assert all('test-only-credential' not in str(c) for c in calls)
+
+
+def test_parallel_evaluation_fixture_replays_keep_answers_and_context_isolated():
+    import importlib.util
+    from concurrent.futures import ThreadPoolExecutor
+    path = Path(__file__).parents[1]/'scripts/evaluate_commercial_demand.py'
+    spec = importlib.util.spec_from_file_location('commercial_evaluation_parallel', path)
+    evaluation = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(evaluation)
+    cases = [
+        {'text':'We need a freelance webinar manager.', 'expected':True},
+        {'text':'Here is a tutorial about webinars.', 'expected':False},
+    ] * 4
+    def replay(case):
+        return evaluation.local_export(case, json.dumps(answer(case['text'],case['expected'])),
+                                       'test-model', load_requirements())
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        receipts = list(pool.map(replay, cases))
+    import hashlib
+    for case, receipt in zip(cases, receipts):
+        assert receipt['export_eligible'] == case['expected']
+        assert receipt['stats']['errors'] == 0
+        assert receipt['audit']['content_hash'] == hashlib.sha256(case['text'].encode()).hexdigest()
+        assert receipt['audit']['outcome'] == ('lead' if case['expected'] else 'not_lead')
+
+
+@pytest.mark.parametrize('classification,error,outcome', [
+    ('UNCERTAIN','unverified_evidence','error'),
+    ('LEAD',None,'filtered_confidence'),
+])
+def test_evaluation_does_not_count_errors_or_low_confidence_as_correct_negatives(classification,error,outcome):
+    import importlib.util
+    path = Path(__file__).parents[1]/'scripts/evaluate_commercial_demand.py'
+    spec = importlib.util.spec_from_file_location('commercial_evaluation_acceptance', path)
+    evaluation = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(evaluation)
+    data={'new':{'eligible':False,'result':{'classification':classification,'llm_error':error}},
+          'local_export':{'export_eligible':False,'stats':{'errors':int(bool(error))},
+                          'audit':{'outcome':outcome}}}
+    assert not evaluation.regression_matches({'expected':False}, data)
+
+
+def test_offline_payload_keeps_source_author_attribution():
+    import importlib.util
+    path = Path(__file__).parents[1]/'scripts/evaluate_commercial_demand.py'
+    spec = importlib.util.spec_from_file_location('commercial_evaluation_attribution', path)
+    evaluation = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(evaluation)
+    case={'text':'We need a freelance webinar manager.', 'expected':True,
+          'source_author_id':'source-actor-42','display_name':'Source author'}
+    receipt=evaluation.local_export(case,json.dumps(answer(case['text'])),
+                                    'test-model',load_requirements())
+    assert receipt['payload']['source_author_id']=='source-actor-42'
+    assert receipt['payload']['name']=='Source author'

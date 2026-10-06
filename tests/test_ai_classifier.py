@@ -34,7 +34,7 @@ def described(author_role="buyer", wants="employee", work_type="software", **ext
     """A model reply in the describe-only format; the rule decides from it."""
     quote = extra.get("evidence_quote", POST)
     positive = author_role == "buyer" and wants != "nothing"
-    return {"service_direction": "seeking_help" if positive else "neither", "post_purpose": "demand" if positive else "information", "author_role": author_role, "wants": wants, "work_type": work_type,
+    return {"hiring_scope": "not_hiring", "need_owner": "current_author" if positive else "none", "service_direction": "seeking_help" if positive else "neither", "post_purpose": "demand" if positive else "information", "author_role": author_role, "wants": wants, "work_type": work_type,
             "work_mode": "remote", "confidence": 0.9,
             "demand_signal": "explicit_demand" if positive else "none",
             "awareness": 5 if positive else None,
@@ -226,3 +226,10 @@ def test_an_llm_outage_is_flagged_on_the_result():
     result = classify("We are hiring a Flutter developer for our team.", reqs, llm=backend)
     assert result.decided_by == "llm" and result.llm_error
     assert classify("We are hiring a Flutter developer for our team.", reqs).llm_error is None
+
+
+@pytest.mark.parametrize('changes', [{'need_owner':'none'}, {'demand_signal':'none'}])
+def test_conflicting_demand_description_is_retryable_not_a_negative(changes):
+    result=classify_with_llm(POST,StubBackend(described(**changes)))
+    assert result.error == 'Conflicting demand purpose, ownership or signal.'
+    assert result.classification == 'UNCERTAIN'

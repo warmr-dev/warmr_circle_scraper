@@ -40,9 +40,15 @@ context-window guarantee.
 
 Both positive and negative model responses need a reason and grounded excerpts,
 including an excerpt from the current record. Quotes must occur in their named
-source (case/whitespace normalization is allowed). Semantic `service_direction` and `post_purpose` distinguish buyer requests from
+source (case/whitespace normalization is allowed). Semantic `need_owner`, `hiring_scope`, `service_direction` and `post_purpose` distinguish buyer requests from
 supplier offers, tutorials, surveys, networking and career advice. Mixed content
-requires an actual current-author need. Positive responses include
+requires an actual current-author or explicitly represented buyer need. A helper
+can describe that represented need without being the direct buyer. Reader/customer
+pain in a provider survey is not the author's demand. The model first summarizes
+the complete post and explains intent, then assigns descriptive fields. Generic
+in-house hiring scope only excludes a hiring signal; it cannot suppress a
+separate commercial need in a mixed post. Contradictory positive-purpose versus
+non-demand ownership/signal descriptions are processing errors, not negatives. Positive responses include
 `demand_signal` and awareness 1–5. Descriptive fields and extracted facts remain;
 budget and company must be supported by the current text.
 
@@ -90,9 +96,14 @@ establish real-model semantic accuracy.
 classifier on the nine fixtures and frozen 100-root cohort, using one provider and
 model configuration. It records raw responses, errors and old/new eligibility.
 A temporary SQLite database runs real candidate creation and payload serialization;
-ingest and notification functions are blocked, `export=False`, and source times
-are preserved. Decision time is frozen at original capture for regressions.
+ingest and notification functions are blocked, `export=False`, and source times and available source-author attribution
+are preserved. Storage identity uses a temporary evaluation namespace. Decision time is frozen at original capture for regressions.
 `--local-only` replays already cached model responses without provider calls.
+Local pipeline replays are serialized because their temporary module patches are
+process-global; model inference remains parallel. Regression acceptance requires
+a successful semantic label AND the matching local audit/export outcome. Errors
+and low-confidence demand cannot pass as correct negatives. `--output` selects
+a separate private results file for another evaluation cohort.
 Current-time expired ingress is reported separately; no old timestamp is rewritten
 to admit historical demand into live ingestion.
 

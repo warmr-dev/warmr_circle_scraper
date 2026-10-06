@@ -14,6 +14,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 from types import ModuleType
 from unittest.mock import patch
 from urllib.parse import quote
@@ -32,6 +33,7 @@ BASELINE = '0268e44670804036cb5faa3a367c5a04bdb960da'
 CLASSIFIER_HASH = hashlib.sha256(b''.join((ROOT/p).read_bytes() for p in [
     'circle_leads/classifier/ai_classifier.py', 'circle_leads/classifier/lead_classifier.py',
     'circle_leads/classifier/keyword_rules.py', 'circle_leads/classifier/decisions.py'])).hexdigest()
+LOCAL_EXPORT_LOCK = threading.Lock()
 
 
 def baseline_classifier():
@@ -75,12 +77,22 @@ def context(case):
 
 
 def local_export(case,raw,model,req):
+    # patch() changes module globals: concurrent fixture replays could swap
+    # their recorded answers/context. Provider inference stays parallel; local
+    # pipeline verification must run under one lock.
+    with LOCAL_EXPORT_LOCK:
+        return _local_export(case,raw,model,req)
+
+
+def _local_export(case,raw,model,req):
     with tempfile.TemporaryDirectory() as tmp:
         db = Database(f'sqlite:///{tmp}/eval.db')
         capture = datetime.fromisoformat(case.get('scraped_at') or '2026-09-29 12:01:00')
         with db.session() as session:
             c = get_or_create_community(session,slug='evaluation',url='https://evaluation.circle.so')
-            author = get_or_create_author(session,community_id=c.id,source_author_id='fixture-author',display_name='Fixture buyer')
+            author = get_or_create_author(session,community_id=c.id,
+                source_author_id=case.get('source_author_id') or 'fixture-author',
+                display_name=case.get('display_name') or 'Fixture buyer')
             post,_ = upsert_post(session,community_id=c.id,record={
                 'source_content_id':'fixture','content':case['text'],
                 'url':case.get('url') or case.get('provenance',{}).get('url') or 'https://evaluation.circle.so/c/post/fixture',
@@ -141,6 +153,15 @@ def preflight_provider(backend):
         ) from None
 
 
+def regression_matches(case, data):
+    expected = case['expected']
+    new, replay = data['new'], data['local_export']
+    return (not new['result']['llm_error'] and replay['stats']['errors'] == 0
+            and new['result']['classification'] == ('LEAD' if expected else 'NOT_LEAD')
+            and replay['audit']['outcome'] == ('lead' if expected else 'not_lead')
+            and new['eligible'] == expected and replay['export_eligible'] == expected)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--provider',choices=['anthropic','openai','openrouter'],required=True)
@@ -150,6 +171,7 @@ def main():
     parser.add_argument('--vercel-team', help='Explicit Vercel team ID for read-only credential retrieval')
     parser.add_argument('--fixtures', type=Path, default=ROOT/'reports/commercial-demand/private/regressions.json')
     parser.add_argument('--cohort', type=Path, default=ROOT/'reports/commercial-demand/private/exit-five-100.json')
+    parser.add_argument('--output', type=Path, help='Private comparison output path for a separate evaluation cohort')
     parser.add_argument('--regressions-only',action='store_true')
     parser.add_argument('--local-only',action='store_true',help='Replay existing responses; never call a provider')
     parser.add_argument('--retry-errors',action='store_true',help='Retry cached processing failures; retain prior receipts')
@@ -187,6 +209,10 @@ def main():
             if data['model']!=args.model or data['baseline_ref']!=BASELINE or data.get('input_hash')!=input_hash or data['provider']!=args.provider:
                 raise ValueError('Cache model/baseline mismatch')
             if data.get('classifier_hash')==CLASSIFIER_HASH and not (args.retry_errors and data.get('processing_failure')):
+                if case.get('expected') is not None and data['new']['raw']:
+                    data['local_export']=local_export(case,data['new']['raw'],args.model,req)
+                    data['regression_pass']=regression_matches(case,data)
+                    path.write_text(json.dumps(data,ensure_ascii=False,indent=2))
                 return data
             if args.local_only:
                 raise ValueError('Cannot refresh changed classifier or retry provider errors in local-only mode')
@@ -216,12 +242,12 @@ def main():
         data['processing_failure']=bool(data['old']['result']['llm_error'] or data['new']['result']['llm_error'])
         if case.get('expected') is not None and data['new']['raw']:
             data['local_export']=local_export(case,data['new']['raw'],args.model,req)
-            data['regression_pass']=data['new']['eligible']==case['expected'] and data['local_export']['export_eligible']==case['expected']
+            data['regression_pass']=regression_matches(case,data)
         path.write_text(json.dumps(data,ensure_ascii=False,indent=2))
         print(f"{case['case']}: {data['old']['eligible']} -> {data['new']['eligible']}; error={data['processing_failure']}",flush=True)
         return data
     with ThreadPoolExecutor(max_workers=3) as pool: results=list(pool.map(evaluate,cases))
-    (folder/'comparison.json').write_text(json.dumps(results,ensure_ascii=False,indent=2))
+    (args.output or folder/'comparison.json').write_text(json.dumps(results,ensure_ascii=False,indent=2))
     print(json.dumps({'evaluated':len(results),'changed':sum(x['changed'] for x in results),
                       'errors':sum(x['processing_failure'] for x in results),
                       'regressions_passed':sum(x.get('regression_pass',False) for x in results)}))

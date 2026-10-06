@@ -33,6 +33,9 @@ DEFAULT_MODEL = os.environ.get("CIRCLE_LEADS_MODEL", "claude-sonnet-5")
 # Descriptive categories are routing metadata, never an admission whitelist.
 DESCRIPTION_VALUES: dict[str, tuple[str, ...]] = {
     "author_role": ("buyer", "seller", "job_seeker", "other"),
+    "need_owner": ("current_author", "represented_buyer", "other_people", "none"),
+    "hiring_scope": ("specialist_or_leadership", "contract_or_external_service",
+                     "generic_inhouse", "not_hiring"),
     "service_direction": ("seeking_help", "offering_help", "neither", "mixed"),
     "post_purpose": ("demand", "mixed_demand", "information", "supplier_offer",
                      "social", "career_advice", "generic_inhouse_hiring", "closed_need"),
@@ -45,7 +48,10 @@ DESCRIPTION_VALUES: dict[str, tuple[str, ...]] = {
                       "hiring_signal", "none"),
 }
 LEAD_RULE = {
-    "author_role": frozenset({"buyer"}),
+    # "other" can be a person explicitly representing someone else's buyer
+    # need. The three semantic intent fields must still establish that need.
+    "author_role": frozenset({"buyer", "other"}),
+    "need_owner": frozenset({"current_author", "represented_buyer"}),
     "post_purpose": frozenset({"demand", "mixed_demand"}),
     "service_direction": frozenset({"seeking_help", "mixed"}),
     "demand_signal": frozenset(set(DESCRIPTION_VALUES["demand_signal"]) - {"none"}),
@@ -75,6 +81,17 @@ product/UX consulting, Webflow, webinars, videography, recruiting and every othe
 commercial category qualify. The category is metadata, never a whitelist.
 Missing budget, missing timeline, no matching vendor, freelancer/part-time format
 and early-stage readiness are NEVER grounds for rejection.
+The EMPLOYER purchases work when hiring. A job opportunity is therefore buyer
+demand when it names a specialist, a leadership role or a contractor/freelancer.
+This does NOT require requesting an external recruiting agency. A part-time
+growth marketer, director of product marketing, marketing operations leader,
+customer-success specialist or webinar coordinator are examples of specialist
+buyer demand even when hired in-house. Generic in-house hiring means an
+unspecified/non-specialist office vacancy; it NEVER covers these specialist
+or leadership roles or freelance contracts. Set author_role=buyer,
+service_direction=seeking_help, post_purpose=demand and demand_signal=hiring_signal
+for such hiring. A supplier hiring for their own team is buying that work.
+A person asking on behalf of a friend/client represents that buyer's need.
 
 Exclude informational content without buyer demand, tutorials, supplier
 self-promotion, showcases, generic social discussion, career/job-search advice,
@@ -103,6 +120,18 @@ method is not an unresolved problem. Other commenters' questions are not this
 author's demand.
 
 Examples (apply the intent, not these keywords):
+- "Should we outsource our UX research?" -> current_author / buyer / demand /
+  buying_research or solution_exploration, awareness=3. Considering future
+  outsourcing is an actual buyer decision, even with no named project, budget,
+  timeline or existing problem. Do not set need_owner=none for that decision.
+- "Our accountant keeps missing deadlines." -> current_author / buyer /
+  demand / problem_intent, awareness=2. A concrete unresolved problem with a
+  commercial provider qualifies WITHOUT an explicit request to hire or switch.
+  It is not information merely because the author did not ask a question.
+- "We are hiring a receptionist for our in-house office." -> neither /
+  generic_inhouse_hiring / other / none. An ordinary office vacancy with no
+  specialist skill, contractor or external-service signal is excluded. Merely
+  naming a job title does not make it specialist hiring.
 - "I'm joining a new industry. Who else works here? Let's connect, I have
   questions." -> neither / social / other / none. Unspecified questions and
   peer networking do not express a concrete business problem.
@@ -131,6 +160,26 @@ A company/product introduction alone is not demand. An actual paid freelance
 marketing role is demand, even when preceded by a long company introduction.
 
 Return ONLY a JSON object with these fields:
+- hiring_scope: "specialist_or_leadership" | "contract_or_external_service" |
+  "generic_inhouse" | "not_hiring"
+  Independently describe any hiring in THIS post. A specialized professional
+  skill/function or leadership responsibility qualifies; any freelancer,
+  contractor, staffing agency or external service request qualifies. Ordinary
+  office staffing without those signals is generic_inhouse. Merely naming a
+  receptionist/office vacancy is not a specialized professional skill signal.
+  Example: an in-house receptionist vacancy with no further service/skill need
+  is generic_inhouse even though the employer wants to hire somebody.
+  This scope concerns hiring ONLY, not requests for advice about a concrete
+  unresolved business problem: such non-hiring requests use not_hiring.
+- need_owner: "current_author" | "represented_buyer" | "other_people" | "none"
+  Who owns the UNMET COMMERCIAL NEED, not who asks the question? A provider or
+  researcher asking readers about THEIR challenges has need_owner=other_people.
+  The desire to learn about customers' needs is not the author's buyer need.
+  Survey participation, customer anecdotes and headshot votes are informational
+  input, not a commercial solution sought for the author. A post sharing a
+  chosen tool and its results has need_owner=none unless it states a remaining
+  unmet need. An employer seeking a specialist has need_owner=current_author;
+  requesting a vendor for a friend/client has need_owner=represented_buyer.
 - service_direction: "seeking_help" | "offering_help" | "neither" | "mixed"
   seeking_help means work, advice about an unresolved business problem, a
   solution, vendor or specialist is sought FOR the current author/company.
@@ -142,6 +191,10 @@ Return ONLY a JSON object with these fields:
   Use mixed_demand only if the CURRENT AUTHOR also expresses a real request or
   unresolved commercial problem alongside other content. Tips, tutorials and
   successful completed solutions with no remaining need are information.
+  For an actual unresolved commercial problem, use post_purpose="demand" and
+  demand_signal="problem_intent". NEVER put problem_intent, buying_research,
+  solution_exploration or hiring_signal into post_purpose; those belong ONLY
+  in demand_signal. Every positive purpose is demand or mixed_demand.
 - author_role: "buyer" | "seller" | "job_seeker" | "other"
 - wants: "service" | "employee" | "cofounder" | "nothing"
   A problem or research ask can have wants="nothing" and still be demand.
@@ -150,6 +203,12 @@ Return ONLY a JSON object with these fields:
 - work_mode: "remote" | "onsite" | "hybrid" | "unknown"
 - demand_signal: "explicit_demand" | "recommendation_request" | "buying_research" |
   "switching_intent" | "problem_intent" | "solution_exploration" | "hiring_signal" | "none"
+  buying_research means evaluating products/providers/purchase options FOR the
+  author's own commercial need, not conducting a survey OF other people's needs.
+  problem_intent and solution_exploration concern the author's OWN unresolved
+  business need. Collecting audience anecdotes to publish research/advice is
+  information with demand_signal=none, even if the author calls it research or
+  plans to publish how-to solutions. It is not research into buying services.
 - awareness: integer 1..5 for demand, null otherwise (2=problem, 3=exploring,
   4=comparing/recommendations, 5=explicit ask; 1=latent commercial need)
 - confidence: number 0..1
@@ -167,14 +226,23 @@ Return ONLY a JSON object with these fields:
 - job_title, employment_type, hire_target, company, budget, location, urgency:
   string or null; skills: list of strings.
 Before returning, check every quote by literal copying from the source.
+Do not fix spelling or punctuation in quoted evidence. Prefer a short body span.
 Do not summarize a list of roles inside a quote: copy only a short part of one
 sentence. NEVER put "..." in a quote unless those literal dots are in the source.
 All listed JSON keys are required. Never omit summary, reason or excerpts.
+Begin the response with summary and reason BEFORE assigning the intent labels.
+Summarize the complete post, including whether an earlier wish is already met.
+The reason must say whose problem is described and whether help is still sought
+FOR this author. Asking readers about THEIR problems is research participation,
+not the researcher's buyer demand. Offering advice and reporting a chosen tool's
+tasks/results is information unless a separate unmet need is actually stated.
+Choose the subsequent purpose/direction/role/signal to match that assessment.
 Use this complete shape, replacing values with the actual assessment:
-{"service_direction":"neither","post_purpose":"information","author_role":"other","wants":"nothing","work_type":"other",
+{"summary":"Summarize the complete current post.",
+ "reason":"Explain whose unmet need is expressed, or why this is excluded.",
+ "hiring_scope":"not_hiring","need_owner":"none","service_direction":"neither","post_purpose":"information","author_role":"other","wants":"nothing","work_type":"other",
  "work_mode":"unknown","demand_signal":"none","awareness":null,
- "confidence":0.9,"summary":"Describe the current post.",
- "reason":"Explain current author intent and the inclusion/exclusion.",
+ "confidence":0.9,
  "supporting_excerpts":[{"source_id":"current","quote":"COPY EXACT SOURCE SPAN"}],
  "evidence_quote":"COPY EXACT CURRENT SPAN","job_title":null,"skills":[],
  "employment_type":null,"hire_target":null,"company":null,"budget":null,
@@ -383,13 +451,19 @@ def read_description(data: dict[str, Any]) -> dict[str, str] | None:
 
 def is_lead(described: dict[str, str]) -> bool:
     """The lead rule: every field in LEAD_RULE has one of its allowed values."""
-    return all(described.get(key) in allowed for key, allowed in LEAD_RULE.items())
+    return (all(described.get(key) in allowed for key, allowed in LEAD_RULE.items())
+            and not (described.get("demand_signal") == "hiring_signal"
+                     and described.get("hiring_scope") == "generic_inhouse"))
 
 
 def lead_reason(described: dict[str, str], job_title: str | None = None) -> str:
     if is_lead(described):
         return f"Lead: current or future commercial demand ({described['demand_signal']})."
-    return f"Not a lead: author_role={described.get('author_role')}, post_purpose={described.get('post_purpose')}, service_direction={described.get('service_direction')}, demand_signal={described.get('demand_signal')}."
+    rejected = [f"{key}={described.get(key)}" for key, allowed in LEAD_RULE.items()
+                if described.get(key) not in allowed]
+    if described.get("demand_signal") == "hiring_signal" and described.get("hiring_scope") == "generic_inhouse":
+        rejected.append("hiring_scope=generic_inhouse")
+    return "Not a lead: " + ", ".join(rejected) + "."
 
 
 def classify_with_llm(
@@ -430,6 +504,11 @@ def classify_with_llm(
             model=model_name,
         )
     classification = "LEAD" if is_lead(described) else "NOT_LEAD"
+    if (described["post_purpose"] in {"demand", "mixed_demand"}
+            and (described["need_owner"] not in LEAD_RULE["need_owner"]
+                 or described["demand_signal"] == "none")):
+        return AiVerdict(error="Conflicting demand purpose, ownership or signal.",
+                         described=described, model=model_name)
 
     try:
         raw_confidence = float(data["confidence"])

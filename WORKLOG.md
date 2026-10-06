@@ -4755,3 +4755,11 @@ HTTP-код. **Отвергнутый лид записывался как до�
    `www`) + SQL-чистка мусора.
 5. P12 — подключить cookie для `forum`, `trigify-social-circle`, `skl-club`.
 6. P3/P4 — прибраться в хостинге (Render, перенос Railway-проекта).
+
+## 2026-10-06 - Commercial-demand final local validation
+
+- Unified buyer-demand policy and ownership/hiring descriptors; conflicting semantic labels and unsupported quotes remain retryable errors.
+- Evaluation local replays serialized to isolate fixtures; strict acceptance rejects model errors and confidence-filtered negatives; payload uses original source author attribution.
+- Final GPT-4o-mini run: source 7/9, boundary 23/23; 100-root cohort 1 -> 20 eligible, 26 changed decisions reviewed, seven processing errors.
+- Full Python suite: 1544 passed, 5 Chromium-dependent skips. Source Morning Consult and full Civic evidence errors remain; additional retry was rejected by automatic approval review despite confirmation.
+- Draft PR only. No migration application, deployment, production replay or outbound ingest/notifications.
