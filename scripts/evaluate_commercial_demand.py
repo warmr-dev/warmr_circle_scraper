@@ -175,6 +175,8 @@ def main():
     parser.add_argument('--regressions-only',action='store_true')
     parser.add_argument('--local-only',action='store_true',help='Replay existing responses; never call a provider')
     parser.add_argument('--retry-errors',action='store_true',help='Retry cached processing failures; retain prior receipts')
+    parser.add_argument('--workers', type=int, default=1, choices=[1, 2, 3],
+                        help='Concurrent evaluations; default 1 protects the shared production model budget')
     args = parser.parse_args()
     if args.vercel_project or args.vercel_team:
         if not args.vercel_project or not args.vercel_team or args.provider != 'openai':
@@ -246,7 +248,7 @@ def main():
         path.write_text(json.dumps(data,ensure_ascii=False,indent=2))
         print(f"{case['case']}: {data['old']['eligible']} -> {data['new']['eligible']}; error={data['processing_failure']}",flush=True)
         return data
-    with ThreadPoolExecutor(max_workers=3) as pool: results=list(pool.map(evaluate,cases))
+    with ThreadPoolExecutor(max_workers=args.workers) as pool: results=list(pool.map(evaluate,cases))
     (args.output or folder/'comparison.json').write_text(json.dumps(results,ensure_ascii=False,indent=2))
     print(json.dumps({'evaluated':len(results),'changed':sum(x['changed'] for x in results),
                       'errors':sum(x['processing_failure'] for x in results),
