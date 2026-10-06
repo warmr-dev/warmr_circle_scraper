@@ -58,3 +58,46 @@ headless is what Cloudflare stops -- and it keeps Chrome's sandbox through the
 setuid `chrome_sandbox` helper, because Ubuntu 24.04 blocks the namespace
 sandbox for unprivileged users. The full story, including what has and has not
 been verified, is in [`docs/joining.md`](../../docs/joining.md).
+
+
+## Independent maintenance after long-harvest starvation
+
+Install `warmr-recovery.service` and `warmr-communities.service` alongside the
+worker and watcher. The worker runs with `--external-maintenance`; its default
+CLI mode retains the old single-process schedule for compatibility. Run exactly
+one instance of each maintenance lane against a database. Recovery never claims
+scan jobs or resets historical classification flags.
+
+- Recovery checks due durable classification retries (at most 25) and previously
+  attempted transport errors (at most 25) each loop, with independent error
+  handling. Existing 1/5/15/60-minute backoff is retained. A batch may take longer
+  than the nominal 60-second polling interval; harvest cannot delay it.
+- Export retry selects only unsynced, nonduplicate LEADs whose post is classified,
+  source timestamp is within 48 hours, and prior error attempt is recent and due.
+  Normal payload/audit gates and stable ingress identity still apply. Held,
+  rejected, acknowledged and never-attempted rows are excluded. No historical replay.
+- Communities runs the existing due enrichment/ICP and join-type batches. It
+  shares the worker's cross-process Circle governor file; request budgets,
+  schedule settings and auto-join approval gates remain unchanged.
+- Each lane writes its own runtime/heartbeat plus durable stage finish/error.
+  Needs attention reports a lane that stops after its first heartbeat.
+
+The release script installs all four runtime units and checks their active state.
+It does not enable the join timer or browser. Explicitly select the new target:
+
+```sh
+CIRCLE_DEPLOY_HOST=root@157.230.181.187 \
+CIRCLE_DEPLOY_SSH_IDENTITY="$HOME/.ssh/id_ed25519_warmr_ops" \
+  deploy/droplet/deploy_release.sh <reviewed-commit>
+```
+
+For rollback to a release without maintenance delegation, stop and disable
+`warmr-recovery` and `warmr-communities`, restore the previous worker unit, then
+switch the release symlinks and restart worker/watcher. This prevents concurrent
+owners of the legacy schedule. No migration is required by this patch.
+
+Attention no longer treats old/empty connected scans as proof of live cookies.
+Readable scans must be within 24 hours and follow the stored credential update.
+Access denied may reflect authentication or community permissions; the dashboard
+cannot establish which from a connected flag alone. Classification failures are
+grouped by their actual error cause, and parsed descriptions survive in the audit.

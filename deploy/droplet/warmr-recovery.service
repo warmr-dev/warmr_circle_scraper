@@ -1,5 +1,5 @@
 [Unit]
-Description=Warmr Circle worker: drains the scan-job queue, runs scheduled harvests
+Description=Warmr Circle recovery: bounded maintenance independent of harvest
 Documentation=https://github.com/warmr-dev/warmr_circle_scraper
 After=network-online.target
 Wants=network-online.target
@@ -23,7 +23,7 @@ EnvironmentFile=/etc/warmr/warmr.env
 Environment=CIRCLE_GOVERNOR_FILE=/var/lib/warmr/circle-governor.json
 # /opt/warmr/current is a symlink to the release; systemd resolves it at start,
 # so a deploy is: swap the link, restart.
-ExecStart=/opt/warmr/current/venv/bin/circle-leads worker --external-maintenance
+ExecStart=/opt/warmr/current/venv/bin/circle-leads maintenance --lane recovery
 Restart=always
 RestartSec=15
 # Long jobs (a harvest pass runs for hours) must finish, not be killed mid-write.
@@ -39,11 +39,11 @@ ReadWritePaths=/var/lib/warmr
 ProtectKernelTunables=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true
-MemoryMax=2G
+MemoryMax=1G
 
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=warmr-worker
+SyslogIdentifier=warmr-recovery
 
 [Install]
 WantedBy=multi-user.target

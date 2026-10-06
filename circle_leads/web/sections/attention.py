@@ -109,7 +109,14 @@ def _community_link(community_id: int | None) -> dict | None:
 
 def _heartbeat(ctx: Ctx) -> list[dict]:
     items = []
-    for key, limit in HEARTBEAT_LIMITS_S.items():
+    limits = dict(HEARTBEAT_LIMITS_S)
+    # Older deployments do not have these services. Once a lane has reported,
+    # its disappearance is actionable rather than a permanent silent gap.
+    for lane in ("recovery", "communities"):
+        key = f"maintenance_{lane}_heartbeat"
+        if key in ctx.settings:
+            limits[key] = 900
+    for key, limit in limits.items():
         name = key.replace("_heartbeat", "")
         raw = ctx.settings.get(key)
         at = _parse(raw)
@@ -243,6 +250,20 @@ def _refresh_as(account: str | None) -> str:
     return f" — refresh as account {account}"
 
 
+def _recent_readable_sessions(ctx: Ctx) -> set[str]:
+    """A connected flag alone is not current authentication evidence."""
+    return set(ctx.s.scalars(select(CircleConnection.host).join(
+        ReplaySession, ReplaySession.host == CircleConnection.host
+    ).where(
+        CircleConnection.state == ConnectionState.CONNECTED.value,
+        CircleConnection.last_sync_at >= ctx.now - timedelta(hours=24),
+        ReplaySession.updated_at <= CircleConnection.last_sync_at,
+        CircleConnection.state_detail.is_not(None),
+        ~CircleConnection.state_detail.startswith("No readable posts"),
+        CircleConnection.spaces_readable > 0,
+    )).all())
+
+
 def _sessions(ctx: Ctx, *, cloudflare: bool) -> list[dict]:
     items: dict[str, dict] = {}
     accounts = {} if cloudflare else _accounts_by_host(ctx)
@@ -268,12 +289,10 @@ def _sessions(ctx: Ctx, *, cloudflare: bool) -> list[dict]:
                               link=_community_link(r.community_id)
                               or {"section": "monitoring", "q": r.host})
     if not cloudflare:
-        # The watcher reading with a stored session and getting 401: the
-        # session is dead even if no cookie scan has run since -- unless the
-        # cookie scan reads with that same session. Then the session is fine
-        # and the feed request is what fails (watch_cookie_feed).
-        scanned = set(ctx.s.scalars(select(CircleConnection.host).where(
-            CircleConnection.state == ConnectionState.CONNECTED.value)).all())
+        # Access-denied polling needs verification unless a recent readable
+        # scan used credentials that have not since been replaced. A connected
+        # flag from an old or empty scan cannot establish current access.
+        scanned = _recent_readable_sessions(ctx)
         for host, cid, detail, at in ctx.s.execute(select(
             WatchState.host, WatchState.community_id, WatchState.last_detail,
             WatchState.last_checked_at,
@@ -282,21 +301,14 @@ def _sessions(ctx: Ctx, *, cloudflare: bool) -> list[dict]:
                 continue
             items.setdefault(host, _item(
                 f"conn:{host}", fingerprint("unauthorized"),
-                f"{host}: session rejected (401 while polling){_refresh_as(accounts.get(host))}",
+                f"{host}: session/feed access needs verification{_refresh_as(accounts.get(host))}",
                 detail=detail, at=at, link=_community_link(cid)))
     return list(items.values())
 
 
 def _watch_cookie_feed(ctx: Ctx) -> list[dict]:
-    """The watcher cannot read a session the cookie scan reads with.
-
-    Seen on 2026-09-29: onstartups, talentcollective, future-of-saas and
-    engage.techsoup were read by the scan that morning, while the watcher's
-    home_page_posts request with the same cookies had got 401 280 times in a
-    row. Refreshing the cookies would not help; the cause is on our side.
-    Since then the watcher reads such members space by space, so this fires
-    only when that fails too.
-    """
+    """Feed access failed after a recent readable scan of unchanged credentials."""
+    readable = _recent_readable_sessions(ctx)
     rows = ctx.s.execute(select(
         WatchState.community_id, WatchState.host, WatchState.consecutive_errors,
         WatchState.last_checked_at, WatchState.last_detail,
@@ -308,10 +320,10 @@ def _watch_cookie_feed(ctx: Ctx) -> list[dict]:
     return [_item(f"watchfeed:{r.community_id}", fingerprint("unauthorized"),
                   f"{r.host}: feed with a session answered “access denied” "
                   f"{_plural(r.consecutive_errors, 'time', 'times')} in a row, "
-                  f"but the cookie scan reads with the same session",
+                  f"after a recent readable cookie scan",
                   detail=f"Watcher: {r.last_detail or '—'}. Cookie scan "
                          f"{_ago(ctx.now, r.last_sync_at)}: {r.state_detail or '—'}",
-                  at=r.last_checked_at, link=_community_link(r.community_id)) for r in rows]
+                  at=r.last_checked_at, link=_community_link(r.community_id)) for r in rows if r.host in readable]
 
 
 def _session_dead(ctx: Ctx) -> list[dict]:
@@ -505,15 +517,17 @@ def _log_problems(ctx: Ctx) -> list[dict]:
     grouped by what they say."""
     rows = ctx.s.execute(select(
         ActivityLog.kind, ActivityLog.level, ActivityLog.community, ActivityLog.summary,
-        ActivityLog.created_at,
+        ActivityLog.created_at, ActivityLog.detail,
     ).where(
         ActivityLog.level.in_(("warning", "error")),
         ActivityLog.created_at >= ctx.now - timedelta(hours=24),
         ActivityLog.kind.notin_(("export", "join")),  # rules of their own
     ).order_by(ActivityLog.id.desc()).limit(2000)).all()
     groups: dict[tuple, dict] = {}
-    for kind, level, community, summary, at in rows:
+    for kind, level, community, summary, at, audit in rows:
         problem = _problem_text(summary)
+        if kind == "classify" and isinstance(audit, dict) and audit.get("error"):
+            problem = f"Classification: {audit['error']}"
         shape = _shape(problem)
         group = groups.setdefault((kind, level, shape), {
             "kind": kind, "level": level, "shape": shape, "sample": problem,
@@ -530,7 +544,7 @@ def _log_problems(ctx: Ctx) -> list[dict]:
             detail += ": " + ", ".join(where[:5]) + ("…" if len(where) > 5 else "")
         items.append(_item(f"log:{g['kind']}:{fingerprint(g['shape'])}", fingerprint(g["shape"]),
                            g["sample"][:160], detail=detail, at=g["last"],
-                           link={"section": "log", "q": g["sample"][:40]}))
+                           link={"section": "log", "q": g["kind"] if g["kind"] == "classify" else g["sample"][:40]}))
     return items
 
 
@@ -583,16 +597,15 @@ RULES: list[Rule] = [
     Rule("form_needs_human", "warn", "Unanswered join form questions",
          "Add an answer to join_form_answers — the join bot will use it next time.",
          _form_needs_human),
-    Rule("session_dead", "warn", "Community session died",
+    Rule("session_dead", "warn", "Community session/access needs verification",
          "Log in to the community as the account shown and save a fresh session with the "
          "extension (or paste the cookies into the community card). Another account will not "
          "work: it is not a member there. Account not recorded — set it on the community card. "
          "Account no longer in use — join again with an active join bot account.",
          _session_dead),
-    Rule("watch_cookie_feed", "warn", "Feed with a session fails, but the session is live",
-         "No need to refresh the cookies: the cookie scan reads with the same ones. The watcher "
-         "could read neither the feed nor the spaces one by one — the bug is on our side, error "
-         "text below. Until it is fixed, new posts from here arrive only once every 6 h.",
+    Rule("watch_cookie_feed", "warn", "Feed access fails after a recent readable scan",
+         "The recent scan read spaces with credentials unchanged since that scan. "
+         "Check the feed error and community permissions; successful scanning does not prove every endpoint is accessible.",
          _watch_cookie_feed),
     Rule("watch_failing", "warn", "Community polling is failing",
          "Five or more errors in a row. Open the community: is the address alive, has the domain changed?",
@@ -625,7 +638,7 @@ RULES_BY_KEY = {rule.key: rule for rule in RULES}
 def _context(s: Session, now: datetime) -> Ctx:
     settings = dict(s.execute(select(Setting.key, Setting.value)).all())
     runtime = {}
-    for service in ("worker", "watcher"):
+    for service in ("worker", "watcher", "maintenance_recovery", "maintenance_communities"):
         try:
             runtime[service] = json.loads(settings.get(f"{service}_runtime") or "null")
         except (TypeError, ValueError):
