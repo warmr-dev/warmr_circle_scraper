@@ -24,9 +24,17 @@ from typing import Any, Protocol
 
 logger = logging.getLogger(__name__)
 
-CLASSIFIER_VERSION = "ai-v3.1"
+CLASSIFIER_VERSION = "ai-v3.2"
 POLICY_VERSION = "commercial-demand-v1"
 SCOUT_POLICY_REF = "c4d9dfffa193aea05e1929668dec34946f79f5d5"
+REQUEST_SCOPE_VALUES = frozenset({
+    "author_commercial_project", "represented_commercial_need",
+    "personal_career_or_networking", "reader_feedback_or_supplier_research",
+    "other_participant_need", "no_current_need", "generic_inhouse_hiring",
+})
+DEMAND_REQUEST_SCOPES = frozenset({
+    "author_commercial_project", "represented_commercial_need",
+})
 MAX_CONTEXT_CHARS = 100000
 DEFAULT_MODEL = os.environ.get("CIRCLE_LEADS_MODEL", "claude-sonnet-5")
 
@@ -137,6 +145,14 @@ method is not an unresolved problem. Other commenters' questions are not this
 author's demand.
 
 Examples (apply the intent, not these keywords):
+- "We are building a thought-leadership program for our SVP. Should our company
+  use LinkedIn articles or short posts to publish his expertise?" ->
+  current_author / buyer / demand / seeking_help / solution_exploration,
+  awareness=3, wants=nothing. The company is exploring approaches for its actual
+  business project; no additional request to hire a provider is required.
+- "Here are five website optimization tips. What other levers have you found?"
+  -> none / other / information / neither / none, awareness=null. Instructions
+  to readers and an engagement question do not express the writer's own project.
 - "Should we outsource our UX research?" -> current_author / buyer / demand /
   buying_research or solution_exploration, awareness=3. Considering future
   outsourcing is an actual buyer decision, even with no named project, budget,
@@ -176,7 +192,42 @@ Examples (apply the intent, not these keywords):
 A company/product introduction alone is not demand. An actual paid freelance
 marketing role is demand, even when preceded by a long company introduction.
 
-Return ONLY a JSON object with these fields:
+Return ONLY a JSON object. FIRST write request_scope: identify what the question
+or need actually concerns from the complete current post, before judging demand.
+request_scope is one of:
+- author_commercial_project: an actual unresolved commercial problem OR a
+  provider/specialist/product decision OR advice/reference examples for the
+  author's actual company work/project. A stated problem qualifies even WITHOUT
+  a question or request for help: "Our accountant keeps missing deadlines".
+- represented_commercial_need: a friend/client needs work or a commercial solution
+  delivered TO them. They are the BUYER, not a candidate trying to sell labour.
+  "Where can my friend find marketing jobs?" is job-search/career information,
+  personal_career_or_networking, post_purpose=career_advice, demand_signal=none,
+  need_owner=none, author_role=job_seeker/other. Seeking employment is not buying
+  an employee. Contrast a friend/company seeking to HIRE a marketer or supplier.
+- personal_career_or_networking: career development or meeting/exchanging with peers.
+- reader_feedback_or_supplier_research: instructional tips inviting other readers'
+  experiences, a provider surveying readers' needs or inviting prototype feedback.
+- other_participant_need: the demand belongs only to another thread participant.
+- no_current_need: only information, promotion, completed work or a closed need.
+- generic_inhouse_hiring: an ordinary non-specialist in-house office vacancy.
+A tutorial addressed to "your website" plus "what other levers have you found?"
+is reader_feedback_or_supplier_research, not author_commercial_project. A company
+asking how to publish its executive content is author_commercial_project even
+without a provider request. An introduction about interests and services with
+no distinct commercial project/request is personal_career_or_networking or
+no_current_need. Do not invent an actual project from professional curiosity.
+Then write summary/reason and these fields consistently with request_scope.
+The first two scopes are buyer demand; the other scopes are excluded.
+Keep these paired assessments consistent:
+- A company advertising a paid freelance/1099 role is represented_commercial_need,
+  post_purpose=demand, hiring_scope=contract_or_external_service,
+  service_direction=seeking_help, demand_signal=hiring_signal. It is seeking work
+  from the specialist, even when written as a company introduction/job listing.
+- A friend looking FOR jobs is personal_career_or_networking,
+  post_purpose=career_advice, need_owner=none, service_direction=neither,
+  demand_signal=none. A job candidate is not a represented buyer.
+Fields:
 - hiring_scope: "specialist_or_leadership" | "contract_or_external_service" |
   "generic_inhouse" | "not_hiring"
   Independently describe any hiring in THIS post. A specialized professional
@@ -247,15 +298,36 @@ Do not fix spelling or punctuation in quoted evidence. Prefer a short body span.
 Do not summarize a list of roles inside a quote: copy only a short part of one
 sentence. NEVER put "..." in a quote unless those literal dots are in the source.
 All listed JSON keys are required. Never omit summary, reason or excerpts.
-Begin the response with summary and reason BEFORE assigning the intent labels.
+Write request_scope first, then summary and reason BEFORE assigning the intent labels.
 Summarize the complete post, including whether an earlier wish is already met.
 The reason must say whose problem is described and whether help is still sought
 FOR this author. Asking readers about THEIR problems is research participation,
 not the researcher's buyer demand. Offering advice and reporting a chosen tool's
 tasks/results is information unless a separate unmet need is actually stated.
+Distinguish the author's expressed commercial decision from professional curiosity.
+For a positive verdict, identify the actual work, business problem, solution or
+specialist role the author/company is trying to obtain or resolve. Do not infer
+an unmet business problem from their profession, limited bandwidth, desire to
+learn, or potential benefit of consulting. Wanting to exchange ideas, learn more
+about an industry, meet peers or collaborate someday is social/networking unless
+a separate concrete commercial need is expressed. Offering to help marketers or
+partner with agencies is supplier networking, not buying their services.
+A tips/tutorial post ending "What other techniques have you found?" invites
+reader experiences; that engagement question alone does not establish an unmet
+commercial need belonging to the author. Another participant's problem cannot
+supply that missing need. Use information/social/supplier_offer, demand_signal=none
+and awareness=null consistently for these excluded cases.
+Contrast actual business solution exploration: "Our newsletter has 20,000
+subscribers; how should our team use it to generate pipeline?", "Our UK outbound
+and HQ inbound teams disagree on MQL reporting; how should we define it?", or
+"We need product-page layouts for our B2B SaaS redesign; what structures work?"
+These express concrete commercial projects/problems and qualify without a
+vendor request. Seeking a publishing strategy for the company's executive
+thought-leadership program also qualifies. Do not suppress commercial advice
+requests merely because advice could be free, or an agency is the buyer.
 Choose the subsequent purpose/direction/role/signal to match that assessment.
 Use this complete shape, replacing values with the actual assessment:
-{"summary":"Summarize the complete current post.",
+{"request_scope":"no_current_need","summary":"Summarize the complete current post.",
  "reason":"Explain whose unmet need is expressed, or why this is excluded.",
  "hiring_scope":"not_hiring","need_owner":"none","service_direction":"neither","post_purpose":"information","author_role":"other","wants":"nothing","work_type":"other",
  "work_mode":"unknown","demand_signal":"none","awareness":null,
@@ -463,6 +535,13 @@ def read_description(data: dict[str, Any]) -> dict[str, str] | None:
                 return None
             value = "unknown"
         described[key] = value
+    # Optional for compatibility with recorded replies from the previous schema.
+    # Current prompts request this independent ownership assessment first.
+    if "request_scope" in data:
+        scope = str(data["request_scope"]).strip().lower()
+        if scope not in REQUEST_SCOPE_VALUES:
+            return None
+        described["request_scope"] = scope
     return described
 
 
@@ -521,6 +600,10 @@ def classify_with_llm(
             model=model_name,
         )
     classification = "LEAD" if is_lead(described) else "NOT_LEAD"
+    scope = described.get("request_scope")
+    if scope is not None and ((scope in DEMAND_REQUEST_SCOPES) != (classification == "LEAD")):
+        return AiVerdict(error="Conflicting request scope and demand description.",
+                         described=described, model=model_name)
     if (described["post_purpose"] in {"demand", "mixed_demand"}
             and (described["need_owner"] not in LEAD_RULE["need_owner"]
                  or described["demand_signal"] == "none")):

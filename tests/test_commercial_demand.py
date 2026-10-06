@@ -412,3 +412,28 @@ def test_offline_payload_keeps_source_author_attribution():
                                     'test-model',load_requirements())
     assert receipt['payload']['source_author_id']=='source-actor-42'
     assert receipt['payload']['name']=='Source author'
+
+
+@pytest.mark.parametrize('positive,scope',[
+    (True, 'reader_feedback_or_supplier_research'),
+    (False, 'author_commercial_project'),
+    (True, 'unsupported_scope'),
+])
+def test_request_scope_conflicts_remain_processing_errors(positive,scope,dev_requirements):
+    text='Our company is considering a new publishing approach.'
+    result=classify(text,dev_requirements,llm=Backend(answer(text,positive,request_scope=scope)))
+    assert result.classification == 'UNCERTAIN'
+    assert result.llm_error
+    assert not result.is_lead
+
+
+@pytest.mark.parametrize('positive,scope',[
+    (True, 'author_commercial_project'),
+    (False, 'reader_feedback_or_supplier_research'),
+])
+def test_consistent_request_scope_is_preserved_in_description(positive,scope,dev_requirements):
+    text='Publishing strategy and reader feedback are different intentions.'
+    result=classify(text,dev_requirements,llm=Backend(answer(text,positive,request_scope=scope)))
+    assert not result.llm_error
+    assert result.is_lead == positive
+    assert result.described['request_scope'] == scope

@@ -44,8 +44,13 @@ source (case/whitespace normalization is allowed). Semantic `need_owner`, `hirin
 supplier offers, tutorials, surveys, networking and career advice. Mixed content
 requires an actual current-author or explicitly represented buyer need. A helper
 can describe that represented need without being the direct buyer. Reader/customer
-pain in a provider survey is not the author's demand. The model first summarizes
-the complete post and explains intent, then assigns descriptive fields. Generic
+pain in a provider survey is not the author's demand. The model first identifies `request_scope` (own commercial project, represented
+buyer, networking/career, audience feedback/research, another participant's need,
+generic in-house vacancy or no current need), then summarizes the complete post,
+explains intent and assigns descriptive fields. A supplied scope that conflicts
+with the demand description is a retryable processing error in either direction;
+it cannot silently become an exportable lead or a permanent rejection. Older
+recorded responses without this added field retain their existing schema contract. Generic
 in-house hiring scope only excludes a hiring signal; it cannot suppress a
 separate commercial need in a mixed post. Contradictory positive-purpose versus
 non-demand ownership/signal descriptions are processing errors, not negatives. Positive responses include
@@ -100,7 +105,9 @@ ingest and notification functions are blocked, `export=False`, and source times 
 are preserved. Storage identity uses a temporary evaluation namespace. Decision time is frozen at original capture for regressions.
 `--local-only` replays already cached model responses without provider calls.
 Local pipeline replays are serialized because their temporary module patches are
-process-global; model inference remains parallel. Regression acceptance requires
+process-global. Model inference defaults to one worker to protect the shared
+production provider budget; `--workers 2` or `--workers 3` explicitly enables
+bounded parallelism. Avoid simultaneous cohort jobs using the same account. Regression acceptance requires
 a successful semantic label AND the matching local audit/export outcome. Errors
 and low-confidence demand cannot pass as correct negatives. `--output` selects
 a separate private results file for another evaluation cohort.
@@ -109,8 +116,9 @@ to admit historical demand into live ingestion.
 
 Run only after authorization to disclose these private texts to the chosen model
 provider. Reuse Circle's existing model and credential; a separate API key is not
-required. Worker runtime uses `openai/gpt-4o-mini` via OpenRouter; the Vercel
-validator uses `gpt-4o-mini` directly via OpenAI. Match or explicitly authorize
+required. The new NYC worker and Vercel validator use `gpt-4o-mini` directly
+via OpenAI. Older runtime configurations may use OpenRouter. Verify and match
+or explicitly authorize
 the chosen route before sending private texts. For example, with the existing
 Circle OpenAI credential available in the shell:
 
@@ -132,4 +140,7 @@ receipt and reevaluates only the new policy, reusing the successful fixed
 baseline. Local-only mode refuses stale-policy caches.
 Review every changed cohort decision, including excerpts and reviewer assessment,
 and separate provider errors from semantic changes before marking the PR ready.
-No merge, deployment, production schema application or replay is part of this PR.
+Evaluation does not apply migrations or replay posts. Each later prompt release
+needs its own explicit rollout and live readback; see
+[boundary validation](../reports/demand-boundaries/README.md) for the current
+local-versus-deployed receipt.

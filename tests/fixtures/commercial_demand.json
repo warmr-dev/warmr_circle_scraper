@@ -90,6 +90,102 @@
         "label_authority": "explicit user-confirmed labels"
       },
       "context": []
+    },
+    {
+      "case": "professional-introduction-learning",
+      "expected": false,
+      "text": "I just joined as marketing director. I made 55 ads with AI last week. I am here to exchange notes, learn more about enterprise sales cycles and meet peers. I can help with positioning. Connect if you enjoy travel.",
+      "context": [],
+      "provenance": {
+        "kind": "synthetic_paraphrase",
+        "label_authority": "commercial-demand policy review of retrieved cohort source and context",
+        "source_content_sha256": "6418951c4b03bbe671d32125f4220042da89bd9b150634ddf789933cb6f4db21",
+        "source_context_sha256": "60e18bb82d040c54b6decf0f8427a4a306ab8f59e5f992d599bbf6dace56c8aa"
+      }
+    },
+    {
+      "case": "agency-introduction-networking",
+      "expected": false,
+      "text": "I run engagement at a web design and SEO agency. We have launched hundreds of sites. I would love to meet marketers and help them if they need, share ideas with other agencies and collaborate if it makes sense.",
+      "context": [],
+      "provenance": {
+        "kind": "synthetic_paraphrase",
+        "label_authority": "commercial-demand policy review of retrieved cohort source and context",
+        "source_content_sha256": "3454caf3de59461be4265e5b2a7c0fd48a8c6d5d740916ed09ca0712dea8002f",
+        "source_context_sha256": "3ecdce195cd21e43aaa707e7e5bedbd5043835acab545b0ddd9fc005fa94a4ba"
+      }
+    },
+    {
+      "case": "tutorial-engagement-question",
+      "expected": false,
+      "text": "Here are five ways to improve B2B website conversions: test headlines, add proof, create landing pages, optimize forms and publish sales FAQs. What other strong levers have you found?",
+      "context": [],
+      "provenance": {
+        "kind": "synthetic_paraphrase",
+        "label_authority": "commercial-demand policy review of retrieved cohort source and context",
+        "source_content_sha256": "c003122eb269f1309b81ec697495f85ea95084224cf6969ae6fbd35278991669",
+        "source_context_sha256": "47e8597297945aac3ee3b32ed0bbc780585dc8ca51b2680537cd4fc3ecdefc2c"
+      }
+    },
+    {
+      "case": "newsletter-project-exploration",
+      "expected": true,
+      "text": "Our company newsletter has 20,000 subscribers. I am our only marketer. How should we use this audience to generate pipeline for our business?",
+      "context": [],
+      "provenance": {
+        "kind": "synthetic_paraphrase",
+        "label_authority": "commercial-demand policy review of retrieved cohort source and context",
+        "source_content_sha256": "a66960e3abed381aef905851c0b0f1af2c174a9737ac867900cbe05376644905",
+        "source_context_sha256": "41c4d100071b475e132dcb973267a063595117b39ee6f192505888086d5405c7"
+      }
+    },
+    {
+      "case": "mql-reporting-problem",
+      "expected": true,
+      "text": "Our UK outbound team and HQ inbound team disagree on how to count MQLs. This is causing inconsistent business reporting. How should we define the qualification rules?",
+      "context": [],
+      "provenance": {
+        "kind": "synthetic_paraphrase",
+        "label_authority": "commercial-demand policy review of retrieved cohort source and context",
+        "source_content_sha256": "5adede4d5255b9bd4dcf202ee85c747972e776c171d7264d4f7160641182997f",
+        "source_context_sha256": "c90d29f832d19098d889dad18d6ae932dd878245c637427e0b45bafa866f77ef"
+      }
+    },
+    {
+      "case": "product-page-project-reference",
+      "expected": true,
+      "text": "We are redesigning product and feature pages for our B2B SaaS company. What page templates or information architectures would you recommend for this project?",
+      "context": [],
+      "provenance": {
+        "kind": "synthetic_paraphrase",
+        "label_authority": "commercial-demand policy review of retrieved cohort source and context",
+        "source_content_sha256": "20b74992fa515871d3e25c7ff113cb86df4682796431b273aa7d1fafce4159eb",
+        "source_context_sha256": "1c049b0f530e5bd80a2dd9fb58027d02e67db6437dbdef8651c942e85f20041c"
+      }
+    },
+    {
+      "case": "executive-publishing-strategy",
+      "expected": true,
+      "text": "We are building a thought-leadership program for our SVP. Should our company use LinkedIn articles or short posts to publish his expertise?",
+      "context": [],
+      "provenance": {
+        "kind": "synthetic_paraphrase",
+        "label_authority": "commercial-demand policy review of retrieved cohort source and context",
+        "source_content_sha256": "a9e16d6b45cae7fd53a32b45bdbd87decf7a47c5ede03d53c42d3bda3b5cdb40",
+        "source_context_sha256": "ddf5ab15d8c74c83a0337cad88f2c1e153be41c63878ccb996f4e35c17fb5ee1"
+      }
+    },
+    {
+      "case": "personal-leadership-transition",
+      "expected": false,
+      "text": "I want to get promoted from individual contributor to marketing leadership someday. How do I improve my CV and interviews and think like a CMO? Any advice for my personal career development?",
+      "context": [],
+      "provenance": {
+        "kind": "synthetic_paraphrase",
+        "label_authority": "commercial-demand policy career-advice exclusion; synthetic career-only adjacent variant",
+        "source_content_sha256": "1e868c740e10959fa6bd393340f116fe111aab455e4bd4af75b39b7114c8727c",
+        "source_context_sha256": "a491efe1370d5e4addf2ec519bffbbcfaa206b76c066b702656fb72456d77c76"
+      }
     }
   ]
 }
