@@ -24,7 +24,7 @@ from typing import Any, Protocol
 
 logger = logging.getLogger(__name__)
 
-CLASSIFIER_VERSION = "ai-v3"
+CLASSIFIER_VERSION = "ai-v3.1"
 POLICY_VERSION = "commercial-demand-v1"
 SCOUT_POLICY_REF = "c4d9dfffa193aea05e1929668dec34946f79f5d5"
 MAX_CONTEXT_CHARS = 100000
@@ -72,6 +72,23 @@ Only classify demand attributable to the CURRENT POST's author or the buyer
 explicitly represented by them. Context is not a new lead: a supplier reply,
 recommendation offered by another person, or social acknowledgement in a buyer
 thread is NOT buyer demand by that replying author.
+Resolve short acknowledgements against context without transferring ownership:
+- CURRENT POST "Sure", "Thanks" or "Happy to help" in somebody else's demand
+  thread: information, need_owner=other_people, service_direction=neither,
+  demand_signal=none. Quote the CURRENT POST itself as negative evidence.
+- CURRENT POST offers a free audit in reply to a buyer: supplier_offer,
+  need_owner=other_people or none, service_direction=offering_help,
+  demand_signal=none. The buyer's request is context, not this author's need.
+- Feedback on the author's interview presentation or job search is career_advice,
+  not a commercial product/UX consulting request.
+Before returning JSON, check consistency: demand/mixed_demand must describe a
+CURRENT AUTHOR or REPRESENTED BUYER need and a non-none demand_signal. If the
+only demand belongs to other thread participants, use an excluded post purpose.
+For every verdict include a short exact continuous quote from source_id=current;
+context excerpts are additional evidence only. Prefer 3-12 words copied from
+inside a sentence. Never add sentence punctuation that is absent from that
+source span, rewrite words, or join fragments.
+
 
 Include requests for vendors, agencies, consultants, contractors and freelancers;
 provider recommendations/comparisons/switching; concrete commercial problems
@@ -516,7 +533,7 @@ def classify_with_llm(
             raise ValueError("non-finite confidence")
         confidence = max(0.0, min(1.0, raw_confidence))
     except (KeyError, TypeError, ValueError):
-        return AiVerdict(error="Invalid or missing confidence.", model=model_name)
+        return AiVerdict(error="Invalid or missing confidence.", described=described, model=model_name)
 
     excerpts = data.get("supporting_excerpts")
     reason = data.get("reason")
@@ -534,11 +551,11 @@ def classify_with_llm(
                 not isinstance(excerpt.get("quote"), str) or
                 not isinstance(excerpt.get("source_id"), str) or
                 not verify_evidence(excerpt.get("quote"), sources.get(excerpt.get("source_id"), ""))):
-            return AiVerdict(error="unverified_evidence", model=model_name,
+            return AiVerdict(error="unverified_evidence", described=described, model=model_name,
                              disqualifiers=["unverified_evidence"])
     current = [x["quote"] for x in excerpts if x.get("source_id") == "current"]
     if not current:
-        return AiVerdict(error="Evidence must include the current post.", model=model_name)
+        return AiVerdict(error="Evidence must include the current post.", described=described, model=model_name)
     quote = current[0]
 
     skills = data.get("skills") or []

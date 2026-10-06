@@ -233,3 +233,12 @@ def test_conflicting_demand_description_is_retryable_not_a_negative(changes):
     result=classify_with_llm(POST,StubBackend(described(**changes)))
     assert result.error == 'Conflicting demand purpose, ownership or signal.'
     assert result.classification == 'UNCERTAIN'
+
+
+@pytest.mark.parametrize("bad", [{"need_owner":"none"}, {"supporting_excerpts":[{"source_id":"current","quote":"invented paid contract"}]}])
+def test_processing_error_keeps_description_for_durable_diagnosis(bad):
+    result = classify(POST, load_requirements(), llm=StubBackend(described(**bad)))
+    assert result.llm_error
+    assert result.classification == "UNCERTAIN"
+    assert result.described["post_purpose"] == "demand"
+    assert result.supporting_excerpts == []  # unverified evidence is not approved evidence

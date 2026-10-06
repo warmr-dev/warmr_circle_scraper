@@ -373,3 +373,37 @@ def test_worker_runs_bounded_due_classification_retry(monkeypatch):
     result = _run_worker(url, monkeypatch)
     assert result.exit_code == 0
     assert calls == [{'use_llm':False, 'limit':25, 'retry_only':True}]
+
+
+def test_external_maintenance_keeps_worker_from_claiming_retries_or_community_schedules(monkeypatch):
+    from circle_leads.cli import main
+    url = _worker_db(monkeypatch)
+    monkeypatch.setattr(main, "classify_pending", lambda *a, **kw: (_ for _ in ()).throw(AssertionError("worker retry")))
+    monkeypatch.setattr(main, "_run_community_maintenance", lambda *a, **kw: (_ for _ in ()).throw(AssertionError("worker communities")))
+    result = _run_worker(url, monkeypatch, extra_args=("--external-maintenance",))
+    assert result.exit_code == 0
+
+
+def test_recovery_runs_when_harvest_is_busy_and_model_failure_does_not_block_export(monkeypatch):
+    from circle_leads.cli import main
+    from circle_leads.storage import settings_store
+    from circle_leads.export import vini_ingest
+    from circle_leads.storage.models import Setting
+    url = _worker_db(monkeypatch)
+    db = Database(url)
+    settings_store.set_setting(db, "worker_runtime", '{"stage":"harvest"}')
+    calls = []
+    def failed_model(*args, **kwargs):
+        calls.append(kwargs)
+        raise RuntimeError("provider unavailable")
+    monkeypatch.setattr(main, "classify_pending", failed_model)
+    import circle_leads.harvest as harvest_module
+    monkeypatch.setattr(harvest_module, "harvest", lambda *a, **kw: (_ for _ in ()).throw(AssertionError("capture called")))
+    monkeypatch.setattr(vini_ingest, "retry_failed_leads", lambda s, **kw: calls.append(("export",kw)))
+    monkeypatch.setattr(time, "sleep", lambda *_: (_ for _ in ()).throw(_StopWorker()))
+    result = CliRunner().invoke(cli, ["--db",url,"maintenance","--lane","recovery"])
+    assert result.exit_code == 0
+    assert calls == [{"use_llm":False,"limit":25,"retry_only":True},("export",{"limit":25})]
+    with db.session() as s:
+        assert s.get(Setting,"worker_runtime").value == '{"stage":"harvest"}'
+        assert "provider unavailable" in s.get(Setting,"classification_retry_last_error").value

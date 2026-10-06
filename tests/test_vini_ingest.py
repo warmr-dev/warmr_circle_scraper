@@ -746,3 +746,80 @@ def test_the_triage_path_leaves_one_export_row(db, monkeypatch):
     assert result.leads
     rows = _export_rows(db)
     assert len(rows) == 1 and rows[0][1] == "Vini answered: accepted 1"
+
+
+@pytest.mark.parametrize("status,age,attempts,minutes,classified,audit,duplicate,synced,expected", [
+    ("error", 1, 1, 2, True, "lead", False, False, 1),
+    ("error", 1, 2, 4, True, "lead", False, False, 0),
+    ("error", 1, 2, 6, True, "lead", False, False, 1),
+    ("error", 1, 3, 14, True, "lead", False, False, 0),
+    ("error", 1, 4, 59, True, "lead", False, False, 0),
+    ("error", 1, 4, 61, True, "lead", False, False, 1),
+    ("error", 49, 1, 2, True, "lead", False, False, 0),
+    ("held", 1, 1, 2, True, "lead", False, False, 0),
+    ("rejected", 1, 1, 2, True, "lead", False, False, 0),
+    (None, 1, 0, 2, True, "lead", False, False, 0),
+    ("error", 1, 1, 2, False, "error", False, False, 0),
+    ("error", 1, 1, 2, True, "not_lead", False, False, 0),
+    ("error", 1, 1, 2, True, "lead", True, False, 0),
+    ("error", 1, 1, 2, True, "lead", False, True, 0),
+])
+def test_transport_retry_preserves_freshness_verdict_and_reconciliation_gates(
+    db, status, age, attempts, minutes, classified, audit, duplicate, synced, expected
+):
+    from datetime import timedelta
+    from circle_leads.export.vini_ingest import retry_failed_leads
+    now = datetime(2026, 10, 6, 17)
+    lead_id = _seed_lead(db)
+    config = ViniIngestConfig("https://example.test", "anon", "secret")
+    with db.session() as s:
+        lead = s.get(Lead, lead_id)
+        post = s.get(Post, lead.post_id)
+        post.published_at = now - timedelta(hours=age)
+        post.classified = classified
+        post.classification_audit = {"outcome": audit}
+        lead.vini_status = status
+        lead.vini_attempts = attempts
+        lead.vini_last_attempt_at = now - timedelta(minutes=minutes)
+        lead.duplicate_of_id = lead_id if duplicate else None
+        lead.external_synced_at = now if synced else None
+    with patch("circle_leads.export.vini_ingest.post_leads_to_vini", return_value=[{"status":"duplicate"}]) as outbound:
+        with db.session() as s:
+            result = retry_failed_leads(s, now=now, config=config)
+            assert result.attempted == expected
+        assert outbound.call_count == expected
+        if expected:
+            original = outbound.call_args.args[0][0]["external_id"]
+            with db.session() as s:
+                assert s.get(Lead, lead_id).vini_status == "duplicate"
+                assert retry_failed_leads(s, now=now, config=config).attempted == 0
+            assert original == "circle:acme:lead:post-1"
+
+
+def test_transport_retry_bound_does_not_touch_unattempted_history(db):
+    from datetime import timedelta
+    from circle_leads.export.vini_ingest import retry_failed_leads
+    now = datetime(2026, 10, 6, 17)
+    seed_id = _seed_lead(db)
+    with db.session() as s:
+        seed = s.get(Lead, seed_id)
+        post = s.get(Post, seed.post_id)
+        post.published_at = now - timedelta(hours=1)
+        post.classification_audit = {"outcome":"lead"}
+        for i in range(30):
+            copy = Post(community_id=post.community_id, author_id=post.author_id,
+                        source_content_id=f"retry-{i}", content="Need a vendor", url=post.url,
+                        dedup_hash=f"retry-{i}", published_at=post.published_at,
+                        classified=True, classification_audit={"outcome":"lead"})
+            s.add(copy)
+            s.flush()
+            s.add(Lead(post_id=copy.id,classification="LEAD",confidence=.9,lead_score=80,
+                       vini_status="error",vini_attempts=1,
+                       vini_last_attempt_at=now-timedelta(minutes=40-i)))
+    with patch("circle_leads.export.vini_ingest.push_leads_by_ids", return_value=None) as push:
+        with db.session() as s:
+            retry_failed_leads(s, now=now, limit=100,
+                               config=ViniIngestConfig("https://example.test","a","s"))
+        ids = push.call_args.args[1]
+        assert len(ids) == 25 and seed_id not in ids
+        assert ids == sorted(ids)

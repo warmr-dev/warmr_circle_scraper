@@ -1515,12 +1515,89 @@ def _leave_after(seconds: float, *, leave=os._exit) -> threading.Timer:
     return timer
 
 
+def _run_community_maintenance(db, req, *, use_llm):
+    """Bounded scheduled community work, independent of harvest when delegated."""
+    from circle_leads.storage import runtime
+    from circle_leads.storage.settings_store import (
+        is_icp_classification_due, is_join_type_check_due,
+        mark_icp_classification_run, mark_join_type_check_run,
+        record_stage_error, record_stage_finish,
+    )
+    step = "enrichment"
+    try:
+        if is_icp_classification_due(db):
+            mark_icp_classification_run(db)
+            # Enrichment first, and on the same due-check: a community
+            # can only be judged on the text it has, so classifying a
+            # blank row before anyone has tried to fetch its name just
+            # files it as "not ICP" with no evidence either way. Both
+            # stages are bounded per run (one enrichment batch, one
+            # re-score batch), so the pair stays a fixed cost.
+            with runtime.stage("enrichment"):
+                enriched = enrich_pending(db)
+            click.echo(f"  scheduled enrichment: {enriched}")
+            step = "icp"
+            # use_llm: this scheduled sweep is the only ICP path that
+            # runs unattended, and leaving it off is why icp_decided_by
+            # was 'rules' for every row in prod. classify_icp_pending
+            # degrades to rules-only when no key is set, so this is
+            # safe on a machine without one.
+            # rescore_llm_eligible: on a database where every row has
+            # already been stamped once, the default "unchecked only"
+            # selection matches nothing forever -- see
+            # pipeline._llm_eligible_icp_ids. It also caps this tick at
+            # pipeline.ICP_SCHEDULED_BATCH rows across both selections,
+            # so a fresh directory crawl cannot turn one tick into
+            # thousands of LLM calls.
+            # No trust_llm_flags: an LLM-decided fit is recorded for
+            # review but stays out of the auto-join queue. Nothing here
+            # is supervised, and the join bot drives the user's real
+            # account -- growing that queue is a human's decision.
+            with runtime.stage("icp_classification"):
+                stats = classify_icp_pending(
+                    db, req, use_llm=use_llm, rescore_llm_eligible=True
+                )
+            click.echo(f"  scheduled ICP classification: {stats}")
+            record_stage_finish(db, "icp_classification",
+                                result={"enrichment": enriched, "icp": stats})
+    except Exception as exc:  # noqa: BLE001
+        record_stage_error(db, "icp_classification", exc, step=step)
+        click.echo(f"  ICP schedule error: {exc.__class__.__name__}", err=True)
+
+    try:
+        if is_join_type_check_due(db):
+            mark_join_type_check_run(db)
+            # Plain HTTP, one GET per host, and it runs at LOW
+            # priority so it yields to reads that can produce a lead.
+            # Nothing scheduled this before: a community whose join
+            # type stays "unknown" is in no queue at all, because
+            # nothing knows whether we could get in. Prod had 446 of
+            # them sitting still for days.
+            from circle_leads.discovery.join_type import (
+                SCHEDULED_BATCH as JOIN_TYPE_BATCH,
+                classify_join_type_pending,
+            )
+
+            with runtime.stage("join_type"):
+                jt = classify_join_type_pending(db, limit=JOIN_TYPE_BATCH, scheduled=True)
+            click.echo(f"  scheduled join-type check: {jt}")
+            record_stage_finish(db, "join_type", result=jt)
+    except Exception as exc:  # noqa: BLE001
+        record_stage_error(db, "join_type", exc)
+        click.echo(
+            f"  join-type schedule error: {exc.__class__.__name__}", err=True
+        )
+
+
+
 @cli.command("worker")
 @click.option("--poll-seconds", type=int, default=5, show_default=True,
               help="Seconds to sleep when the job queue is empty.")
 @click.option("--use-llm", is_flag=True, help="LLM-escalate ambiguous posts.")
+@click.option("--external-maintenance", is_flag=True,
+              help="Delegate retry and community schedules to maintenance services.")
 @click.pass_context
-def worker_cmd(ctx, poll_seconds, use_llm):
+def worker_cmd(ctx, poll_seconds, use_llm, external_maintenance=False):
     """Always-on worker: drain the scan-job queue and run scheduled harvests.
 
     Deploy this as the Railway worker service. The dashboard just enqueues jobs
@@ -1639,7 +1716,7 @@ def worker_cmd(ctx, poll_seconds, use_llm):
 
         # Only posts carrying a new durable classification error are retried.
         # This never selects legacy unclassified captures or resets history.
-        if _t.time() - last_classification_retry >= 60:
+        if not external_maintenance and _t.time() - last_classification_retry >= 60:
             last_classification_retry = _t.time()
             try:
                 with runtime.stage("classification_retry"):
@@ -1702,72 +1779,57 @@ def worker_cmd(ctx, poll_seconds, use_llm):
             except Exception as exc:  # noqa: BLE001
                 record_stage_error(db, "harvest", exc)
                 click.echo(f"  schedule error: {exc.__class__.__name__}", err=True)
-            step = "enrichment"
-            try:
-                if is_icp_classification_due(db):
-                    mark_icp_classification_run(db)
-                    # Enrichment first, and on the same due-check: a community
-                    # can only be judged on the text it has, so classifying a
-                    # blank row before anyone has tried to fetch its name just
-                    # files it as "not ICP" with no evidence either way. Both
-                    # stages are bounded per run (one enrichment batch, one
-                    # re-score batch), so the pair stays a fixed cost.
-                    with runtime.stage("enrichment"):
-                        enriched = enrich_pending(db)
-                    click.echo(f"  scheduled enrichment: {enriched}")
-                    step = "icp"
-                    # use_llm: this scheduled sweep is the only ICP path that
-                    # runs unattended, and leaving it off is why icp_decided_by
-                    # was 'rules' for every row in prod. classify_icp_pending
-                    # degrades to rules-only when no key is set, so this is
-                    # safe on a machine without one.
-                    # rescore_llm_eligible: on a database where every row has
-                    # already been stamped once, the default "unchecked only"
-                    # selection matches nothing forever -- see
-                    # pipeline._llm_eligible_icp_ids. It also caps this tick at
-                    # pipeline.ICP_SCHEDULED_BATCH rows across both selections,
-                    # so a fresh directory crawl cannot turn one tick into
-                    # thousands of LLM calls.
-                    # No trust_llm_flags: an LLM-decided fit is recorded for
-                    # review but stays out of the auto-join queue. Nothing here
-                    # is supervised, and the join bot drives the user's real
-                    # account -- growing that queue is a human's decision.
-                    with runtime.stage("icp_classification"):
-                        stats = classify_icp_pending(
-                            db, req, use_llm=use_llm, rescore_llm_eligible=True
-                        )
-                    click.echo(f"  scheduled ICP classification: {stats}")
-                    record_stage_finish(db, "icp_classification",
-                                        result={"enrichment": enriched, "icp": stats})
-            except Exception as exc:  # noqa: BLE001
-                record_stage_error(db, "icp_classification", exc, step=step)
-                click.echo(f"  ICP schedule error: {exc.__class__.__name__}", err=True)
-
-            try:
-                if is_join_type_check_due(db):
-                    mark_join_type_check_run(db)
-                    # Plain HTTP, one GET per host, and it runs at LOW
-                    # priority so it yields to reads that can produce a lead.
-                    # Nothing scheduled this before: a community whose join
-                    # type stays "unknown" is in no queue at all, because
-                    # nothing knows whether we could get in. Prod had 446 of
-                    # them sitting still for days.
-                    from circle_leads.discovery.join_type import (
-                        SCHEDULED_BATCH as JOIN_TYPE_BATCH,
-                        classify_join_type_pending,
-                    )
-
-                    with runtime.stage("join_type"):
-                        jt = classify_join_type_pending(db, limit=JOIN_TYPE_BATCH, scheduled=True)
-                    click.echo(f"  scheduled join-type check: {jt}")
-                    record_stage_finish(db, "join_type", result=jt)
-            except Exception as exc:  # noqa: BLE001
-                record_stage_error(db, "join_type", exc)
-                click.echo(
-                    f"  join-type schedule error: {exc.__class__.__name__}", err=True
-                )
+            if not external_maintenance:
+                _run_community_maintenance(db, req, use_llm=use_llm)
 
         _t.sleep(max(1, poll_seconds))
+
+
+@cli.command("maintenance")
+@click.option("--lane", type=click.Choice(["recovery", "communities"]), required=True)
+@click.option("--poll-seconds", type=int, default=60, show_default=True)
+@click.pass_context
+def maintenance_cmd(ctx, lane, poll_seconds):
+    """Run bounded maintenance independently of long capture jobs."""
+    import time
+    from circle_leads.storage import runtime
+    from circle_leads.storage.heartbeat import start_heartbeat
+    from circle_leads.storage.settings_store import (
+        load_effective_requirements, record_stage_error, record_stage_finish,
+    )
+    from circle_leads.export.vini_ingest import retry_failed_leads
+
+    db = ctx.obj["db"]
+    name = f"maintenance_{lane}"
+    use_llm = any(os.environ.get(k) for k in
+                  ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY"))
+    start_heartbeat(db, f"{name}_heartbeat", runtime_key=f"{name}_runtime", service=name)
+    while True:
+        req = load_effective_requirements(db)
+        if lane == "communities":
+            _run_community_maintenance(db, req, use_llm=use_llm)
+        else:
+            # Each operation is isolated: a model failure must not starve delivery.
+            for stage, run in (
+                ("classification_retry", lambda: classify_pending(
+                    db, req, use_llm=use_llm, limit=25, retry_only=True)),
+                ("export_retry", lambda: _retry_exports(db, retry_failed_leads)),
+            ):
+                try:
+                    with runtime.stage(stage):
+                        result = run()
+                    receipt = result if isinstance(result, dict) else {
+                        key: getattr(result, key, None) for key in ("attempted", "sent", "skipped")
+                    }
+                    record_stage_finish(db, stage, result=receipt)
+                except Exception as exc:
+                    record_stage_error(db, stage, exc)
+        time.sleep(max(60, poll_seconds))
+
+
+def _retry_exports(db, retry):
+    with db.session() as session:
+        return retry(session, limit=25)
 
 
 @cli.command("watch")

@@ -125,6 +125,7 @@ def classify(
         result.classification = "UNCERTAIN"
         result.llm_error = (verdict.error or verdict.reason or "no verdict")[:200]
         result.reason = result.llm_error
+        result.described = verdict.described
         result.model = model_name or verdict.model or getattr(llm, "model", None)
         result.decided_by = "llm"
         result.classifier_version = CLASSIFIER_VERSION

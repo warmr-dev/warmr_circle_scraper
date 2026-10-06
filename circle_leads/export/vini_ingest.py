@@ -14,7 +14,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
 
 import requests
@@ -626,3 +626,36 @@ def push_unsynced_leads(
         stmt = stmt.limit(limit)
     ids = list(session.scalars(stmt).all())
     return push_leads_by_ids(session, ids, config=cfg)
+
+
+def retry_failed_leads(session: Session, *, limit: int = 25,
+                       config: ViniIngestConfig | None = None,
+                       now: datetime | None = None) -> PushResult:
+    """Retry only recent, previously attempted transport failures, never history.
+
+    The existing stable ingress identity reconciles an ambiguous timeout. Normal
+    push gates still apply; no force, timestamp rewrite or held/rejected replay.
+    """
+    cfg = config or load_vini_ingest_config()
+    if not cfg.enabled:
+        return PushResult()
+    now = (now or utcnow()).replace(tzinfo=None)
+    # Timestamp arithmetic differs between SQLite and PostgreSQL. Four
+    # bounded selections express the durable backoff without dialect-specific SQL.
+    ids = []
+    for attempt_filter, minutes in ((Lead.vini_attempts <= 1, 1),
+                                    (Lead.vini_attempts == 2, 5),
+                                    (Lead.vini_attempts == 3, 15),
+                                    (Lead.vini_attempts >= 4, 60)):
+        rows = session.execute(select(Lead.id, Lead.vini_last_attempt_at).join(Post).where(
+            Lead.classification == "LEAD", Lead.duplicate_of_id.is_(None),
+            Lead.external_synced_at.is_(None), Lead.vini_status == VINI_ERROR,
+            Lead.vini_attempts > 0, attempt_filter,
+            Lead.vini_last_attempt_at >= now - timedelta(hours=48),
+            Lead.vini_last_attempt_at <= now - timedelta(minutes=minutes),
+            Post.published_at >= now - timedelta(hours=48),
+            Post.published_at <= now, Post.classified.is_(True),
+        ).order_by(Lead.vini_last_attempt_at, Lead.id).limit(max(1, min(limit, 25)))).all()
+        ids.extend(rows)
+    ids.sort(key=lambda row: (row[1], row[0]))
+    return push_leads_by_ids(session, [row[0] for row in ids[:max(1, min(limit, 25))]], config=cfg)

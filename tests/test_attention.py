@@ -10,7 +10,7 @@ from datetime import timedelta
 
 import pytest
 
-from circle_leads.storage.models import JOIN_HANDOFF_PREFIX, ActivityLog, JoinFormFill, ScanJob
+from circle_leads.storage.models import JOIN_HANDOFF_PREFIX, ActivityLog, JoinFormFill, ScanJob, ReplaySession
 from tests.dash_fixtures import (
     NOW, community, connection, lead, make_app, session_for, setting, watch,
 )
@@ -155,7 +155,8 @@ def test_a_feed_refusing_a_session_the_scan_still_reads_is_not_a_dead_session(ap
         live = community(s, "live", host="live.circle.so", join_status="joined")
         live_id = live.id
         watch(s, live, mode="cookie", last_status="unauthorized", consecutive_errors=284)
-        session_for(s, "live.circle.so")
+        session_for(s, "live.circle.so", created_at=NOW - timedelta(days=2))
+        s.query(ReplaySession).filter_by(host="live.circle.so").one().updated_at = NOW - timedelta(days=2)
         connection(s, "live.circle.so", "connected", "76 post(s), 0 lead(s) from 2/2 space(s)",
                    spaces_total=2, spaces_readable=2, last_sync_at=NOW - timedelta(hours=3))
         dead = community(s, "dead", host="dead.circle.so", join_status="joined")
@@ -358,3 +359,43 @@ def test_a_broken_rule_is_an_item_not_a_500(app, monkeypatch):
     rules = _rules(client)
     assert "rule exploded" in rules[attention.RULES[0].key]["error"]
     assert all(r["error"] is None for k, r in rules.items() if k != attention.RULES[0].key)
+
+
+@pytest.mark.parametrize("age, readable, changed", [(36, 2, False), (3, 0, False), (3, 2, True)])
+def test_stale_unreadable_or_replaced_session_is_not_reported_as_live(app, age, readable, changed):
+    client, db, app_ = app
+    with db.session() as s:
+        c = community(s, "access")
+        watch(s, c, mode="cookie", last_status="unauthorized", consecutive_errors=1,
+              last_detail="HTTP 403")
+        session_for(s, c.host, created_at=NOW - timedelta(days=3))
+        s.query(ReplaySession).filter_by(host=c.host).one().updated_at = (
+            NOW if changed else NOW - timedelta(days=3))
+        connection(s, c.host, "connected", "No readable posts" if not readable else "76 post(s)",
+                   spaces_readable=readable, last_sync_at=NOW - timedelta(hours=age))
+    _clear_cache(app_)
+    rules = _rules(client)
+    assert not rules["watch_cookie_feed"]["items"]
+    assert "conn:access.circle.so" in {i["key"] for i in rules["session_dead"]["items"]}
+
+
+def test_classification_errors_show_distinct_causes(app):
+    client, db, app_ = app
+    with db.session() as s:
+        for post_id, cause in ((12, "unverified_evidence"), (13, "unverified_evidence"),
+                               (14, "Conflicting demand purpose, ownership or signal.")):
+            s.add(ActivityLog(kind="classify", level="error", summary=f"error: post {post_id}",
+                              detail={"error": cause}, created_at=NOW))
+    _clear_cache(app_)
+    items = _rules(client)["log_problems"]["items"]
+    assert len(items) == 2
+    assert any("unverified_evidence" in i["title"] and "2×" in i["detail"] for i in items)
+    assert any("Conflicting demand" in i["title"] for i in items)
+
+
+def test_started_maintenance_lane_disappearing_is_visible(app):
+    client, db, app_ = app
+    with db.session() as s:
+        setting(s, "maintenance_recovery_heartbeat", (NOW-timedelta(hours=1)).isoformat())
+    _clear_cache(app_)
+    assert "maintenance_recovery" in _keys(client,"heartbeat")
