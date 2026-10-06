@@ -1,18 +1,16 @@
 # Warmr Circle
 
-Finds posts where **someone wants to hire** across Circle.so communities — your
-own private ones and public ones — and filters out people who are **looking for
-work**.
+Detects **current or future commercial buyer demand** across authorized Circle.so
+communities, including provider requests, recommendations, solution exploration
+and specialist hiring. Any commercial category qualifies; seller promotion,
+tutorials and generic social content remain excluded.
 
-```
-"We are looking for a backend developer."         -> LEAD
-"I am looking for a job as a software engineer."  -> NOT_LEAD
-```
+It reads private communities with the operator's session and public communities
+without login, evaluates full posts and available thread context, scores and
+de-duplicates eligible leads, and surfaces them in a dashboard. The heavy work
+runs on an always-on worker; the dashboard stays instant.
 
-It reads your **private paid communities** with your own session, reads **public**
-communities with no login, classifies every post/comment as hire-vs-seek, scores
-and de-duplicates the leads, and surfaces them in a dashboard. The heavy work runs
-on an always-on worker; the dashboard stays instant.
+See [commercial demand policy, evidence and retry](docs/commercial-demand.md).
 
 ---
 

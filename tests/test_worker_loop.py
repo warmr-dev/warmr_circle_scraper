@@ -363,3 +363,13 @@ def test_a_stop_request_leaves_on_its_own_when_the_step_runs_long():
     timeout = next(int(line.split("=", 1)[1]) for line in unit.read_text().splitlines()
                    if line.startswith("TimeoutStopSec="))
     assert WORKER_STOP_GRACE_S < timeout    # gone before systemd would kill it
+
+
+def test_worker_runs_bounded_due_classification_retry(monkeypatch):
+    from circle_leads.cli import main as cli_main
+    url = _worker_db(monkeypatch)
+    calls = []
+    monkeypatch.setattr(cli_main, 'classify_pending', lambda db, req, **kw: calls.append(kw) or {})
+    result = _run_worker(url, monkeypatch)
+    assert result.exit_code == 0
+    assert calls == [{'use_llm':False, 'limit':25, 'retry_only':True}]

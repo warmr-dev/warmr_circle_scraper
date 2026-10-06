@@ -65,3 +65,9 @@ rapiddns exports/
 
 # pip install . writes a copy of the package here
 build/
+
+# Private captured community content and raw model evaluations (public repo).
+reports/commercial-demand/private/
+reports/commercial-demand/decisions/
+reports/commercial-demand/comparison.json
+supabase/.temp/

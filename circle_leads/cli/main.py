@@ -1545,7 +1545,7 @@ def worker_cmd(ctx, poll_seconds, use_llm):
     import time as _t
 
     db = ctx.obj["db"]
-    use_llm = use_llm or bool(os.environ.get("OPENAI_API_KEY"))
+    use_llm = use_llm or any(os.environ.get(k) for k in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY"))
 
     from circle_leads.storage.job_queue import claim_next, complete
     from circle_leads.scanning import cookie_hosts_vip_first, scan_cookie_host
@@ -1591,6 +1591,7 @@ def worker_cmd(ctx, poll_seconds, use_llm):
         return summary
 
     last_schedule_check = 0.0
+    last_classification_retry = 0.0
 
     # Say we are alive somewhere the outside can read: nothing running on this
     # machine can report that the machine itself has stopped, so the
@@ -1635,6 +1636,16 @@ def worker_cmd(ctx, poll_seconds, use_llm):
             req = load_effective_requirements(db)
         except Exception:  # noqa: BLE001 - keep the last good config
             pass
+
+        # Only posts carrying a new durable classification error are retried.
+        # This never selects legacy unclassified captures or resets history.
+        if _t.time() - last_classification_retry >= 60:
+            last_classification_retry = _t.time()
+            try:
+                with runtime.stage("classification_retry"):
+                    classify_pending(db, req, use_llm=use_llm, limit=25, retry_only=True)
+            except Exception as exc:
+                record_stage_error(db, "classification_retry", exc)
 
         job = None
         try:

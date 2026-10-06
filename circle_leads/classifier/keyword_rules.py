@@ -628,3 +628,20 @@ def matched_keywords(text: str, keywords: list[str]) -> list[str]:
 
 def has_hiring_vocabulary(text: str) -> bool:
     return bool(_HIRE_KW.search(text or ""))
+
+
+def requests_commercial_work(text: str) -> bool:
+    """Conservative rule fallback: an explicit request for a named provider.
+
+    Early-stage, mixed or ambiguous messages require semantic evaluation. This
+    recognizes engagement grammar rather than admitting category keywords alone.
+    """
+    if requests_software_work(text):
+        return True
+    return bool(re.search(
+        r"\b(?:need|hire|hiring|looking for|seeking|recommend)\s+"
+        r"(?:(?:a|an|some|good|part.time|freelance)\s+){0,3}"
+        r"(?:[\w/-]+\s+){0,3}"
+        r"(?:agency|consultant|contractor|freelancer|specialist|videographer|"
+        r"designer|recruiter|accountant|lawyer)\b", text, re.I
+    ))

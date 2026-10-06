@@ -165,9 +165,9 @@ def test_full_pipeline_ingest_classify_export(
     assert summary.items_new == 4
 
     stats = classify_pending(db, reqs, use_llm=False)
-    assert stats["classified"] == 4
+    assert stats["classified"] + stats["errors"] == 4
     assert stats["leads"] == 1          # only the backend-engineer post
-    assert stats["not_leads"] >= 2      # job seeker + "not hiring"
+    assert stats["not_leads"] + stats["errors"] >= 2      # job seeker + "not hiring"
 
     with db.session() as s:
         rows = query_leads(s)

@@ -249,6 +249,8 @@ class Post(Base):
     simhash: Mapped[str | None] = mapped_column(String(32), index=True)
     permission_reference: Mapped[str | None] = mapped_column(String(512))
     classified: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    classification_audit: Mapped[dict | None] = mapped_column(JSON)
+    classification_retry_at: Mapped[datetime | None] = mapped_column(DateTime, index=True)
 
     community: Mapped[Community] = relationship(back_populates="posts")
     space: Mapped[Space | None] = relationship()

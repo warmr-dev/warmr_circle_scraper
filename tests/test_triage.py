@@ -150,7 +150,7 @@ def test_triage_finds_leads_and_rejects_the_rest(db, reqs):
     # Dana (needs an app built) and Priya (asking for a referral) are leads.
     # Sam is a job seeker; Jordan posted release notes.
     assert len(result.leads) == 2
-    assert result.not_leads == 2
+    assert result.not_leads + result.errors == 2
 
     authors = {lead["author"] for lead in result.leads}
     assert authors == {"Dana Ops", "Priya N"}
@@ -325,7 +325,7 @@ def _record(content, when):
             "author": {"display_name": "Dana Ops"}}
 
 
-def test_full_text_that_retires_a_sent_lead_keeps_it_as_a_record(db, reqs):
+def test_full_text_that_retires_a_sent_lead_keeps_it_as_a_record(db, reqs, monkeypatch):
     from datetime import datetime
     from sqlalchemy import func, select
     from circle_leads.storage.models import Lead, Post
@@ -338,13 +338,16 @@ def test_full_text_that_retires_a_sent_lead_keeps_it_as_a_record(db, reqs):
     full = (preview[:-1] + " the project. Update: the role has been filled, "
             "thank you all for the messages!")
 
-    first = triage_records(db, [_record(preview, when)], reqs, community="acme")
+    from tests.test_commercial_demand import Backend, answer
+    monkeypatch.setattr("circle_leads.triage.pipeline.make_backend", lambda: Backend(answer(preview)))
+    first = triage_records(db, [_record(preview, when)], reqs, community="acme", use_llm=True)
     assert len(first.leads) == 1
     with db.session() as s:
         lead = s.scalar(select(Lead))
         lead.external_synced_at = datetime(2026, 9, 2)   # production has it
 
-    second = triage_records(db, [_record(full, when)], reqs, community="acme")
+    monkeypatch.setattr("circle_leads.triage.pipeline.make_backend", lambda: Backend(answer(full, False)))
+    second = triage_records(db, [_record(full, when)], reqs, community="acme", use_llm=True)
     assert second.leads == []
     with db.session() as s:
         assert s.scalar(select(func.count()).select_from(Post)) == 1   # upgraded in place
@@ -355,7 +358,7 @@ def test_full_text_that_retires_a_sent_lead_keeps_it_as_a_record(db, reqs):
         assert "sent to Vini" in lead.reason
 
 
-def test_full_text_that_retires_an_unsent_lead_deletes_it(db, reqs):
+def test_full_text_that_retires_an_unsent_lead_deletes_it(db, reqs, monkeypatch):
     from datetime import datetime
     from sqlalchemy import select
     from circle_leads.storage.models import Lead
@@ -367,8 +370,11 @@ def test_full_text_that_retires_an_unsent_lead_deletes_it(db, reqs):
                "and your rate so we can talk this week about the details of…")
     full = preview[:-1] + " the project. Update: the role has been filled."
 
-    triage_records(db, [_record(preview, when)], reqs, community="acme")
-    triage_records(db, [_record(full, when)], reqs, community="acme")
+    from tests.test_commercial_demand import Backend, answer
+    monkeypatch.setattr("circle_leads.triage.pipeline.make_backend", lambda: Backend(answer(preview)))
+    triage_records(db, [_record(preview, when)], reqs, community="acme", use_llm=True)
+    monkeypatch.setattr("circle_leads.triage.pipeline.make_backend", lambda: Backend(answer(full, False)))
+    triage_records(db, [_record(full, when)], reqs, community="acme", use_llm=True)
     with db.session() as s:
         assert s.scalar(select(Lead)) is None
 

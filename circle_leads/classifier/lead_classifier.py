@@ -1,17 +1,13 @@
-"""Orchestrates the classification layers.
+"""Semantic commercial-demand classification with diagnostic keyword signals.
 
-Flow:
-  rules -> a confident NOT_LEAD (negation, job seeker, low score)? use it.
-         -> anything else and an LLM is available? the model describes the
-            post and ai_classifier.LEAD_RULE decides.
-         -> no model, or no usable answer from it: the rule verdict, which
-            files a lead only when the post names software work. Callers
-            hold it for review when a model was asked and stayed silent.
+Only explicit request grammar can provide a conservative no-model fallback.
+Ambiguous content and model failures remain retryable processing errors.
 """
 
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -22,12 +18,12 @@ from circle_leads.classifier.ai_classifier import (
     LlmBackend,
     classify_with_llm,
 )
-from circle_leads.classifier.extraction import extract_all, titles_match
+from circle_leads.classifier.extraction import extract_all
 from circle_leads.config.settings import Requirements
 
 logger = logging.getLogger(__name__)
 
-RULES_VERSION = "rules-v2"
+RULES_VERSION = "rules-v3"
 
 # Rule scores at or beyond these bounds are decisive on their own.
 RULE_CONFIDENT_LEAD = 35
@@ -51,10 +47,12 @@ class ClassificationResult:
     # The model's description the lead rule decided on (author_role, wants,
     # work_type, work_mode, summary). Empty when the rules decided.
     described: dict[str, str] = field(default_factory=dict)
-    # Set when a model was asked and gave no usable verdict (an outage, spent
-    # credits, a quote it could not back up), so the rules decided instead.
-    # Callers hold such a verdict for review rather than act on it.
+    # Provider/schema/evidence failures schedule a durable retry.
     llm_error: str | None = None
+    model: str | None = None
+    demand_signal: str = "none"
+    awareness: int | None = None
+    supporting_excerpts: list[dict] = field(default_factory=list)
 
     @property
     def is_lead(self) -> bool:
@@ -74,7 +72,8 @@ def _first_sentence_with_intent(text: str, matches: list[str]) -> str | None:
     """Pick a verbatim sentence to show the reviewer as evidence."""
     if not matches:
         return None
-    for sentence in [s.strip() for s in text.replace("\n", ". ").split(".") if s.strip()]:
+    for match in re.finditer(r"[^.\n]+[.]?", text):
+        sentence = match.group().strip()
         if keyword_rules.has_hiring_vocabulary(sentence):
             return sentence[:300]
     return None
@@ -86,6 +85,8 @@ def classify(
     *,
     llm: LlmBackend | None = None,
     model_name: str | None = None,
+    context: list[dict] | None = None,
+    current_metadata: dict | None = None,
 ) -> ClassificationResult:
     """Classify one piece of content as LEAD or NOT_LEAD."""
     text = (text or "").strip()
@@ -103,56 +104,38 @@ def classify(
         disqualifiers=rules.disqualifiers,
     )
 
-    # A hard disqualifier ("not hiring", "role filled") ends it immediately.
-    if rules.has_hard_disqualifier:
-        result.classification = "NOT_LEAD"
-        result.confidence = 0.9
-        result.reason = f"Disqualified by: {', '.join(rules.disqualifiers)}."
-        result.extracted = {}
-        return result
-
-    # An explicit job-seeker signal with no competing hiring signal is decisive.
-    if rules.seeker_matches and not rules.hiring_matches:
-        result.classification = "NOT_LEAD"
-        result.confidence = 0.92
-        result.reason = (
-            "Author is seeking work for themselves "
-            f"({', '.join(rules.seeker_matches[:3])})."
+    # Scores, negation, seeker vocabulary and configured exclusions are only
+    # diagnostics. Mixed posts must reach semantic evaluation across categories.
+    if requirements.keywords.exclude:
+        result.rule_signals["config_exclude_matches"] = keyword_rules.matched_keywords(
+            text, requirements.keywords.exclude
         )
+    # Preserve the existing exact fraud-template exclusion, not broad keywords.
+    if "scam_remote_partner" in rules.disqualifiers:
+        result.classification = "NOT_LEAD"
+        result.reason = "Excluded recruitment scam template."
+        result.confidence = 0.99
+        result.evidence_quote = text
+        result.supporting_excerpts = [{"source_id": "current", "quote": text}]
         return result
-
-    # Config-driven keyword lists act as an extra, user-controlled signal on
-    # top of the pattern rules.
-    if requirements.keywords.exclude and keyword_rules.matched_keywords(
-        text, requirements.keywords.exclude
-    ):
-        matched = keyword_rules.matched_keywords(text, requirements.keywords.exclude)
-        result.seeker_matches.append(f"config_exclude:{matched[0]}")
-        result.rule_score -= 30
-        rules.score -= 30
-
-    lead_cutoff = min(RULE_CONFIDENT_LEAD, requirements.llm_escalation_threshold)
-    # Only a confident *not-lead* is left to the rules alone. A confident
-    # rules lead still gets one LLM call when a model is set: re-judged on
-    # 2026-09-19, the LLM confirmed 15 of the 46 leads the rules had filed on
-    # their own -- the rest were articles, welcome posts, job seekers and
-    # vendor pitches, and all of them were pushed to Vini automatically.
-    needs_llm = rules.score > RULE_CONFIDENT_NOT_LEAD
-
-    if needs_llm and llm is not None:
-        verdict = classify_with_llm(text, llm, model_name=model_name)
+    if llm is not None:
+        verdict = classify_with_llm(text, llm, model_name=model_name, context=context, current_metadata=current_metadata)
         if verdict.classification in ("LEAD", "NOT_LEAD") and not verdict.error:
             return _from_ai(verdict, rules, text, requirements, result)
+        result.classification = "UNCERTAIN"
         result.llm_error = (verdict.error or verdict.reason or "no verdict")[:200]
-        logger.debug("LLM inconclusive; falling back to rules")
+        result.reason = result.llm_error
+        result.model = model_name or verdict.model or getattr(llm, "model", None)
+        result.decided_by = "llm"
+        result.classifier_version = CLASSIFIER_VERSION
+        return result
 
-    # Rule-only verdict. It answers to the same lead rule as the model, as
-    # far as patterns can see it: hiring language is not enough, the post
-    # must also name software work. Without that, "we are hiring" filed an
-    # office manager, a Google Ads expert and a venture-studio CEO.
+    lead_cutoff = min(RULE_CONFIDENT_LEAD, requirements.llm_escalation_threshold)
+    # Conservative explicit-request fallback. Other messages require semantic
+    # evaluation rather than becoming permanent keyword-based negatives.
     hiring = rules.score >= lead_cutoff
-    software = keyword_rules.requests_software_work(text)
-    result.classification = "LEAD" if hiring and software else "NOT_LEAD"
+    commercial = keyword_rules.requests_commercial_work(text)
+    result.classification = "LEAD" if hiring and commercial and not rules.disqualifiers and not set(rules.seeker_matches).intersection({"first_person_seeking_employment", "seeking_opportunities_self", "open_to_work", "taking_on_clients", "available_for_work"}) else "UNCERTAIN"
     result.confidence = _rule_confidence(rules.score)
     result.decided_by = "rules"
     result.classifier_version = RULES_VERSION
@@ -163,7 +146,7 @@ def classify(
     elif hiring:
         result.reason = (
             f"Hiring intent ({', '.join(rules.hiring_matches[:3])}), "
-            "but no software work named."
+            "but semantic commercial-demand evaluation is required."
         )
     else:
         result.reason = (
@@ -171,6 +154,12 @@ def classify(
             if not rules.seeker_matches
             else f"Job-seeking signals outweigh hiring signals (score {rules.score})."
         )
+    if result.is_lead:
+        result.demand_signal = "explicit_demand"
+        result.awareness = 5
+        result.supporting_excerpts = [{"source_id": "current", "quote": result.evidence_quote}]
+    else:
+        result.llm_error = "semantic_backend_required"
     return result
 
 
@@ -188,6 +177,10 @@ def _from_ai(
     result.classifier_version = CLASSIFIER_VERSION
     result.evidence_quote = verdict.evidence_quote
     result.described = dict(verdict.described)
+    result.model = verdict.model
+    result.demand_signal = verdict.demand_signal
+    result.awareness = verdict.awareness
+    result.supporting_excerpts = verdict.supporting_excerpts
     if verdict.disqualifiers:
         result.disqualifiers = list(
             dict.fromkeys(result.disqualifiers + verdict.disqualifiers)
@@ -210,16 +203,6 @@ def _from_ai(
     return result
 
 
-# Engagement types that are hiring intent in their own right, independent of
-# any named role or technology.
-NON_ROLE_HIRE_TARGETS = {
-    "software agency",
-    "freelancer",
-    "contractor",
-    "technical cofounder",
-}
-
-
 def meets_requirements(
     result: ClassificationResult, requirements: Requirements
 ) -> bool:
@@ -228,37 +211,5 @@ def meets_requirements(
         return False
     if result.confidence < requirements.minimum_confidence:
         return False
-    # A lead the model described has passed the lead rule, and the rule has
-    # already asked for software work while leaving the kind of hire open.
-    # The configured roles and skills name buyer personas and every service
-    # category, and are matched exactly: checked again here they would only
-    # drop software hires whose title or stack is not on the list -- a
-    # full-time "Senior Go Engineer" with skills ["Go", "gRPC"].
-    if result.described:
-        return True
-    if not requirements.target_roles and not requirements.target_skills:
-        return True
-
-    title = (result.extracted.get("job_title") or "").lower()
-    skills = [s.lower() for s in (result.extracted.get("skills") or [])]
-
-    role_match = bool(title) and any(
-        titles_match(title, r) for r in requirements.roles_lower
-    )
-    skill_match = any(s in requirements.skills_lower for s in skills)
-
-    # A request for an agency, contractor, or technical cofounder often names
-    # no job title and no stack ("we need an agency to rebuild our store").
-    # That is still a hiring lead, so match the engagement type against the
-    # configured roles too rather than dropping it for lack of a title.
-    hire_target = (result.extracted.get("hire_target") or "").lower()
-    target_match = bool(hire_target) and (
-        any(titles_match(hire_target, r) for r in requirements.roles_lower)
-        or hire_target in NON_ROLE_HIRE_TARGETS
-    )
-
-    # A lead qualifies on any axis: requiring all of them would drop good leads
-    # that name a role without listing a stack. An unextractable title is not
-    # a match, so a lead with no signal at all is filtered out rather than
-    # passing vacuously.
-    return role_match or skill_match or target_match
+    # Target roles/skills are routing and score metadata, not admission gates.
+    return True
