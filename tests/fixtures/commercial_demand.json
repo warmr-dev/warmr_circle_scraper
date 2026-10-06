@@ -1,0 +1,95 @@
+{
+  "source": "Synthetic paraphrases of user-provided regression labels; these are not captured source transcripts.",
+  "cases": [
+    {
+      "case": "denver-video",
+      "expected": true,
+      "text": "We need a videographer in Denver for a commercial event tomorrow. Any recommendations?",
+      "provenance": {
+        "kind": "synthetic_paraphrase",
+        "label_authority": "explicit user-confirmed labels"
+      },
+      "context": []
+    },
+    {
+      "case": "plg-consultant",
+      "expected": true,
+      "text": "Looking for a PLG and product experience consultant to review our signup and onboarding flow.",
+      "provenance": {
+        "kind": "synthetic_paraphrase",
+        "label_authority": "explicit user-confirmed labels"
+      },
+      "context": []
+    },
+    {
+      "case": "ai-tutorial",
+      "expected": false,
+      "text": "Tutorial: use AI for lead generation. Here are the steps to create prompts and export research results.",
+      "provenance": {
+        "kind": "synthetic_paraphrase",
+        "label_authority": "explicit user-confirmed labels"
+      },
+      "context": []
+    },
+    {
+      "case": "specialist-leadership",
+      "expected": true,
+      "text": "Our research business is hiring a specialist research analyst and a senior marketing leader. Please recommend experienced candidates or recruiting partners.",
+      "provenance": {
+        "kind": "synthetic_paraphrase",
+        "label_authority": "explicit user-confirmed labels"
+      },
+      "context": []
+    },
+    {
+      "case": "webflow",
+      "expected": true,
+      "text": "Looking for someone to design and develop our new marketing website in Webflow. Agency or independent recommendations welcome.",
+      "provenance": {
+        "kind": "synthetic_paraphrase",
+        "label_authority": "explicit user-confirmed labels"
+      },
+      "context": []
+    },
+    {
+      "case": "webinar",
+      "expected": true,
+      "text": "Our team needs part-time or freelance help to manage our webinar program, speaker scheduling and production.",
+      "provenance": {
+        "kind": "synthetic_paraphrase",
+        "label_authority": "explicit user-confirmed labels"
+      },
+      "context": []
+    },
+    {
+      "case": "civic-full",
+      "expected": true,
+      "text": "Our advocacy platform needs a freelance growth marketer on a 1099 contract: 10-15 hours per week at $100 per hour.",
+      "provenance": {
+        "kind": "synthetic_paraphrase",
+        "label_authority": "explicit user-confirmed labels"
+      },
+      "context": []
+    },
+    {
+      "case": "ai-tutorial-submission",
+      "expected": false,
+      "text": "Informational tutorial explaining how AI can automate lead-generation research.",
+      "provenance": {
+        "kind": "synthetic_paraphrase",
+        "label_authority": "explicit user-confirmed labels"
+      },
+      "context": []
+    },
+    {
+      "case": "civic-submission",
+      "expected": false,
+      "text": "An advocacy platform helps people contact their elected officials and participate in civic campaigns.",
+      "provenance": {
+        "kind": "synthetic_paraphrase",
+        "label_authority": "explicit user-confirmed labels"
+      },
+      "context": []
+    }
+  ]
+}

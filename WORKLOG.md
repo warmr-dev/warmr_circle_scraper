@@ -19,6 +19,19 @@
 
 ---
 
+## 2026-10-06 — Commercial demand policy and durable classification retry (local PR)
+
+- **Что:** единый evaluator для batch/triage; additive nullable JSON audit и
+  индексируемый retry timestamp; append-only receipts; retry в существующем worker.
+- **Зачем:** устранить software-only подавление спроса и terminal решения при
+  provider failure, сохранив identity, attribution и export contract.
+- **Результат:** локальная реализация для review. Production миграция, deploy и
+  replay не выполнялись. Real-model acceptance требует отдельного разрешения
+  на передачу приватных community texts в Anthropic.
+- **Кто:** Николай + Codex.
+- **Детали:** `docs/commercial-demand.md`,
+  `migrations/manual/2026-10-06_p31_commercial_demand.sql`.
+
 ## 2026-09-30 — Выкатка `4f44fbb` на дроплет; шифрование кук не запустилось
 
 - **Что:** пользователь выкатил `main` (`4f44fbb`, PR #46) на `warmr-1`:

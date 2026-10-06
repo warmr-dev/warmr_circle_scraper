@@ -32,8 +32,15 @@ POST = "We are a startup and are looking for a senior backend engineer to build 
 
 def described(author_role="buyer", wants="employee", work_type="software", **extra):
     """A model reply in the describe-only format; the rule decides from it."""
+    quote = extra.get("evidence_quote", POST)
+    positive = author_role == "buyer" and wants != "nothing"
     return {"author_role": author_role, "wants": wants, "work_type": work_type,
-            "work_mode": "remote", "confidence": 0.9, **extra}
+            "work_mode": "remote", "confidence": 0.9,
+            "demand_signal": "explicit_demand" if positive else "none",
+            "awareness": 5 if positive else None,
+            "reason": "Grounded buyer demand." if positive else "No buyer demand.",
+            "supporting_excerpts": [{"source_id": "current", "quote": quote}], **extra}
+
 
 
 def test_verify_evidence_accepts_verbatim_span():
@@ -89,10 +96,10 @@ def test_backend_exception_is_contained():
 
 
 def test_json_in_code_fence_is_parsed():
-    raw = ('```json\n{"author_role": "job_seeker", "wants": "employee", '
-           '"work_type": "software", "confidence": 0.9}\n```')
+    raw = '```json\n' + json.dumps(described(author_role="job_seeker", wants="employee")) + '\n```'
     verdict = classify_with_llm(POST, StubBackend(raw))
     assert verdict.classification == "NOT_LEAD"
+
 
 
 def test_confidence_is_clamped():
@@ -100,15 +107,15 @@ def test_confidence_is_clamped():
     assert classify_with_llm(POST, backend).confidence == 1.0
 
 
-def test_llm_is_skipped_only_for_confident_non_leads():
-    """A clear job seeker costs no request; a clear rules lead gets one check."""
+def test_mixed_keyword_signals_always_reach_the_model():
+    """Seeker vocabulary and positive rule scores both receive semantic checks."""
     reqs = load_requirements()
     backend = StubBackend({"classification": "LEAD", "confidence": 1.0, "reason": ""})
     classify("Open to work.", reqs, llm=backend)
-    assert backend.calls == 0
+    assert backend.calls == 1
 
     classify("We are hiring a Flutter developer for our team.", reqs, llm=backend)
-    assert backend.calls == 1
+    assert backend.calls == 2
 
 
 def test_llm_can_overrule_a_confident_rules_lead():
@@ -116,7 +123,8 @@ def test_llm_can_overrule_a_confident_rules_lead():
     # their own; the rest (articles, intros, job seekers) went to Vini anyway.
     reqs = load_requirements()
     backend = StubBackend(described(author_role="other", wants="nothing",
-                                    summary="An article about hiring, not a request."))
+                                    summary="An article about hiring, not a request.",
+                                    evidence_quote="We are hiring a Flutter developer for our team."))
     result = classify("We are hiring a Flutter developer for our team.", reqs, llm=backend)
     assert result.classification == "NOT_LEAD"
     assert result.decided_by == "llm"
@@ -126,16 +134,16 @@ def test_a_confident_rules_lead_survives_an_llm_outage():
     reqs = load_requirements()
     backend = StubBackend(None, raise_exc=RuntimeError("down"))
     result = classify("We are hiring a Flutter developer for our team.", reqs, llm=backend)
-    assert result.classification == "LEAD"
-    assert result.decided_by == "rules"
+    assert result.classification == "UNCERTAIN"
+    assert result.llm_error
 
 
-def test_llm_failure_falls_back_to_rules():
+def test_llm_failure_remains_a_processing_error():
     reqs = load_requirements()
     backend = StubBackend(None, raise_exc=RuntimeError("down"))
     result = classify("Anyone know a good dev?", reqs, llm=backend)
-    assert result.classification in ("LEAD", "NOT_LEAD")
-    assert result.decided_by == "rules"
+    assert result.classification == "UNCERTAIN"
+    assert result.decided_by == "llm" and result.llm_error
 
 
 # --- Backend selection (OpenAI / Anthropic) ---------------------------------
@@ -216,5 +224,5 @@ def test_an_llm_outage_is_flagged_on_the_result():
     reqs = load_requirements()
     backend = StubBackend(None, raise_exc=RuntimeError("402"))
     result = classify("We are hiring a Flutter developer for our team.", reqs, llm=backend)
-    assert result.decided_by == "rules" and result.llm_error
+    assert result.decided_by == "llm" and result.llm_error
     assert classify("We are hiring a Flutter developer for our team.", reqs).llm_error is None

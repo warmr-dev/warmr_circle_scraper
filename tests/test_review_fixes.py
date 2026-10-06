@@ -115,6 +115,7 @@ def test_confidence_floor_applies_when_job_seekers_included(tmp_path, reqs):
 
     narrow = reqs.model_copy(update={
         "exclude_job_seekers": False,
+        "minimum_confidence": 0.99,
         "target_roles": ["Flutter Developer"],
         "target_skills": ["Flutter"],
     })
@@ -127,7 +128,7 @@ def test_confidence_floor_applies_when_job_seekers_included(tmp_path, reqs):
 # --- 5.4 a filtered post must not keep a stale lead -------------------------
 
 
-def test_edited_post_drops_its_stale_lead(tmp_path, reqs):
+def test_edited_post_drops_its_stale_lead(tmp_path, reqs, monkeypatch):
     from sqlalchemy import select
 
     from circle_leads.pipeline import classify_pending
@@ -151,7 +152,9 @@ def test_edited_post_drops_its_stale_lead(tmp_path, reqs):
             "source_content_id": "p1",
             "content": "Never mind, we filled the role internally.",
         })
-    classify_pending(db, reqs)
+    from tests.test_commercial_demand import Backend, answer
+    monkeypatch.setattr("circle_leads.pipeline.make_backend", lambda: Backend(answer("Never mind, we filled the role internally.", False)))
+    classify_pending(db, reqs, use_llm=True)
     with db.session() as s:
         assert s.scalars(select(Lead)).all() == []
 
@@ -276,4 +279,7 @@ def test_exclude_keywords_from_config_are_applied(reqs):
     tuned = reqs.model_copy(
         update={"keywords": reqs.keywords.model_copy(update={"exclude": ["bananas"]})}
     )
-    assert classify(text, tuned).rule_score < baseline.rule_score
+    result = classify(text, tuned)
+    assert result.rule_signals["config_exclude_matches"] == ["bananas"]
+    assert result.rule_score == baseline.rule_score
+    assert result.is_lead

@@ -29,12 +29,11 @@ def test_hiring_headlines_are_leads(reqs, text):
 ])
 def test_tool_only_headlines_are_left_to_the_model(reqs, text):
     # The headline grammar still reads a hire here, so a model is asked. The
-    # rules alone cannot tell Sigma from a Google Ads account, and since
-    # 2026-09-24 they file only hires that name software work.
+    # rules alone cannot determine the commercial context of tool-only titles.
     result = classify(text, reqs, llm=None)
     assert result.rule_score >= 35
-    assert result.classification == "NOT_LEAD"
-    assert "no software work named" in result.reason
+    assert result.classification in ("NOT_LEAD", "UNCERTAIN")
+    assert result.llm_error == "semantic_backend_required"
 
 
 @pytest.mark.parametrize("text", [

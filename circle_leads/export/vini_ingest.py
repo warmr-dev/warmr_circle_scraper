@@ -162,6 +162,13 @@ def lead_to_ingest_payload(
     author: Author | None,
 ) -> dict[str, Any] | None:
     """Map a stored lead to the Vini ingest body shape. None if unusable."""
+    # Legacy rows keep their existing contract. Every newly evaluated candidate
+    # needs a successful, current decision; force/retry cannot bypass this gate.
+    audit = post.classification_audit
+    if audit is not None and (not post.classified or audit.get("outcome") != "lead"):
+        return None
+    if lead.classification != "LEAD" or lead.duplicate_of_id is not None:
+        return None
     url = (post.url or "").strip()
     content = (post.content or "").strip()
     if not url or not content:

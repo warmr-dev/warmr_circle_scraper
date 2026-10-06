@@ -38,6 +38,7 @@ from circle_leads.authentication.browser_session import (
 from circle_leads.classifier.ai_classifier import LlmBackend, make_backend
 from circle_leads.classifier.icp_relevance import classify_icp_fit
 from circle_leads.classifier.lead_classifier import classify, meets_requirements
+from circle_leads.classifier.decisions import evaluate_post
 from circle_leads.config.settings import CommunityPermission, Requirements
 from circle_leads.discovery.discover_communities import DiscoveredCommunity
 from circle_leads.discovery.join_type import _classify_payload
@@ -399,6 +400,8 @@ def classify_pending(
     *,
     use_llm: bool = False,
     limit: int | None = None,
+    retry_only: bool = False,
+    export: bool = True,
 ) -> dict[str, int]:
     """Classify every unclassified post and score the leads."""
     llm: LlmBackend | None = None
@@ -410,52 +413,55 @@ def classify_pending(
         else:
             logger.warning("Semantic classification requested but no LLM key is set.")
 
-    stats = {"classified": 0, "leads": 0, "not_leads": 0, "duplicates": 0, "filtered": 0}
+    stats = {"classified": 0, "leads": 0, "not_leads": 0, "duplicates": 0, "filtered": 0, "errors": 0}
     pending_external_ids: list[int] = []
 
     with db.session() as s:
         # Select ids only: the ORM objects would be detached once this session
         # closes, and each post is re-loaded in its own transaction below.
-        query = select(Post.id).where(Post.classified.is_(False)).order_by(Post.id)
+        query = select(Post.id).where(Post.classified.is_(False))
+        if retry_only:
+            query = query.where(Post.classification_retry_at <= utcnow().replace(tzinfo=None)).order_by(
+                Post.classification_retry_at, Post.id)
+            limit = min(limit or 25, 25)
+        else:
+            query = query.where(or_(Post.classification_retry_at.is_(None),
+                                    Post.classification_retry_at <= utcnow().replace(tzinfo=None))).order_by(Post.id)
         if limit:
             query = query.limit(limit)
         pending_ids = list(s.scalars(query).all())
 
     for post_pk in pending_ids:
         with db.session() as s:
-            post = s.get(Post, post_pk)
-            if post is None:
+            post = s.scalar(select(Post).where(Post.id == post_pk).with_for_update(skip_locked=True))
+            if post is None or post.classified or (post.classification_retry_at and
+                                                    post.classification_retry_at > utcnow().replace(tzinfo=None)):
                 continue
 
-            result = classify(
-                post.content, requirements, llm=llm, model_name=model_name
-            )
-            post.classified = True
+            result = evaluate_post(s, post, requirements, llm=llm, model_name=model_name,
+                                   semantic_requested=use_llm)
+            if result.llm_error:
+                stats["errors"] += 1
+                continue
             stats["classified"] += 1
-            # No model verdict (an outage, spent credits): the rules decided
-            # alone -- enough to show a lead for review, not to retire an
-            # earlier one or push this one to Vini.
-            held = result.llm_error is not None
 
             if not result.is_lead:
                 stats["not_leads"] += 1
                 existing = s.scalar(select(Lead).where(Lead.post_id == post.id))
-                if existing and not held:
+                if existing:
                     retire_lead(s, existing, reason=result.reason,
                                 decided_by=result.decided_by)
                 continue
 
-            # The confidence floor and role/skill filters always apply.
-            # `exclude_job_seekers` governs job-seeker handling, not whether
-            # requirements are enforced at all.
+            # Confidence gates admission; role/skill scoring only prioritizes.
             if not meets_requirements(result, requirements):
                 stats["filtered"] += 1
                 # Drop any prior lead: after an edit the stored score, evidence
                 # quote, and extracted fields describe text that is now gone.
                 stale = s.scalar(select(Lead).where(Lead.post_id == post.id))
-                if stale and not held:
-                    retire_lead(s, stale, reason="filtered out by the target roles/skills "
-                                f"or confidence floor ({result.reason})",
+                if stale:
+                    retire_lead(s, stale, reason="filtered out by the "
+                                f"confidence floor ({result.reason})",
                                 decided_by=result.decided_by)
                 continue
 
@@ -470,8 +476,6 @@ def classify_pending(
                 stats["duplicates"] += 1
 
             existing = s.scalar(select(Lead).where(Lead.post_id == post.id))
-            if held and existing is not None:
-                continue   # keep the verdict the model gave earlier
             lead = existing or Lead(post_id=post.id)
 
             # A lead once filed as a duplicate stays one. Re-judged on its full
@@ -484,9 +488,6 @@ def classify_pending(
             lead.classification = result.classification
             lead.confidence = result.confidence
             lead.reason = result.reason
-            if held:
-                lead.reason = (f"{result.reason} Held for review, not sent to "
-                               f"Vini: no LLM verdict ({result.llm_error}).")
             lead.classifier_version = result.classifier_version
             lead.decided_by = result.decided_by
             lead.evidence_quote = result.evidence_quote
@@ -512,11 +513,11 @@ def classify_pending(
             lead.urgency = extracted.get("urgency")
             s.add(lead)
             s.flush()
-            if duplicate_lead_id is None and lead.external_synced_at is None and not held:
+            if duplicate_lead_id is None and lead.external_synced_at is None:
                 pending_external_ids.append(lead.id)
             stats["leads"] += 1
 
-    if pending_external_ids:
+    if pending_external_ids and export:
         with db.session() as s:
             push = push_leads_by_ids(s, pending_external_ids)
             if push.errors:

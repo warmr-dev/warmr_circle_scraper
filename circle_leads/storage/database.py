@@ -159,6 +159,8 @@ class Database:
 
         # (table, column, DDL type + default) -- keep in sync with the models.
         additions = [
+            ("posts", "classification_audit", "JSON"),
+            ("posts", "classification_retry_at", "TIMESTAMP"),
             ("communities", "watching", "BOOLEAN DEFAULT FALSE"),
             ("communities", "platform", "VARCHAR(32)"),
             ("communities", "join_type", "VARCHAR(32)"),
@@ -220,6 +222,10 @@ class Database:
                     conn.execute(_text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}"))
                 except Exception:  # noqa: BLE001 - a racing add or dialect quirk
                     pass
+
+        next(i for i in Post.__table__.indexes if i.name == "ix_posts_classification_retry_at").create(
+            self.engine, checkfirst=True
+        )
 
     @contextmanager
     def session(self) -> Iterator[Session]:
@@ -646,6 +652,7 @@ def upsert_post(session: Session, *, community_id: int, record: dict) -> tuple[P
             preview.simhash = simhash(text)
             preview.scraped_at = utcnow()
             preview.classified = False
+            preview.classification_retry_at = None
             session.flush()
             return preview, "updated"
 
@@ -666,6 +673,7 @@ def upsert_post(session: Session, *, community_id: int, record: dict) -> tuple[P
         existing.edited_at = record.get("edited_at") or utcnow()
         existing.scraped_at = utcnow()
         existing.classified = False
+        existing.classification_retry_at = None
         session.flush()
         return existing, "updated"
 

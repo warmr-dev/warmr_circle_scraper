@@ -309,10 +309,11 @@ def test_an_llm_outage_holds_a_rules_lead_instead_of_pushing_it(db, dev_requirem
         dev_requirements, community="acme", use_llm=True)
     with db.session() as s:
         lead = s.scalar(select(Lead))
-        assert lead is not None and lead.classification == "LEAD"
-        assert lead.decided_by == "rules"
-        assert "Held for review" in lead.reason
-        assert lead.external_synced_at is None
+        assert lead is None
+        post = s.scalar(select(Post))
+        assert post.classified is False
+        assert post.classification_audit["outcome"] == "error"
+        assert post.classification_retry_at is not None
     assert pushed == []
 
 

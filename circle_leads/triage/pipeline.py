@@ -20,6 +20,7 @@ from sqlalchemy import select
 
 from circle_leads.classifier.ai_classifier import LlmBackend, make_backend
 from circle_leads.classifier.lead_classifier import classify, meets_requirements
+from circle_leads.classifier.decisions import evaluate_post
 from circle_leads.config.settings import Requirements
 from circle_leads.export.vini_ingest import push_leads_by_ids
 from circle_leads.scoring.lead_scoring import score_lead
@@ -54,6 +55,7 @@ class TriageResult:
     duplicates: int = 0
     already_seen: int = 0
     too_old: int = 0
+    errors: int = 0
 
     @property
     def new_leads(self) -> list[dict]:
@@ -107,6 +109,7 @@ def triage_records(
     use_llm: bool = False,
     your_name: str | None = None,
     verbose_log: bool = False,
+    export: bool = True,
 ) -> TriageResult:
     """Classify already-structured post records (one per post, no splitting).
 
@@ -129,7 +132,15 @@ def triage_records(
             # display name is how every stored author ended up without a
             # stable id: the readers supply one, this step dropped it, and
             # the far end held the lead for "missing_source_author_identity".
-            meta={"url": r.get("url"), "author": r.get("author") or {}},
+            meta={"url": r.get("url"), "thread_id": r.get("thread_id"), "author": r.get("author") or {},
+                  "context": [
+                      {"source_id": f"record:{j}", "content": other["content"],
+                       "url": other.get("url"), "author_id": (other.get("author") or {}).get("source_author_id")}
+                      for j, other in enumerate(records) if j != i and other.get("content")
+                      and ((r.get("thread_id") and other.get("thread_id") == r["thread_id"])
+                           or (not r.get("thread_id") and r.get("url") and "/c/" in r["url"]
+                               and (other.get("url") or "").split("#")[0] == r["url"].split("#")[0]))
+                  ]},
         )
         for i, r in enumerate(records)
         if (r.get("content") or "").strip()
@@ -140,7 +151,7 @@ def triage_records(
     return _triage_posts(
         db, posts, requirements, community=community, space=space,
         source_url=source_url, use_llm=use_llm, your_name=your_name,
-        published_override=published_map, verbose_log=verbose_log,
+        published_override=published_map, verbose_log=verbose_log, export=export,
     )
 
 
@@ -154,12 +165,13 @@ def triage_text(
     source_url: str | None = None,
     use_llm: bool = False,
     your_name: str | None = None,
+    export: bool = True,
 ) -> TriageResult:
     """Split, classify, score and store pasted community text."""
     posts: list[RawPost] = split_posts(text)
     return _triage_posts(
         db, posts, requirements, community=community, space=space,
-        source_url=source_url, use_llm=use_llm, your_name=your_name,
+        source_url=source_url, use_llm=use_llm, your_name=your_name, export=export,
     )
 
 
@@ -175,6 +187,7 @@ def _triage_posts(
     your_name: str | None = None,
     published_override: dict | None = None,
     verbose_log: bool = False,
+    export: bool = True,
 ) -> TriageResult:
     """Shared classify/score/store loop for split or structured posts."""
     result = TriageResult(total_posts=len(posts))
@@ -248,6 +261,7 @@ def _triage_posts(
             record = {
                 "source_content_id": f"triage:{content_hash(raw.content)[:24]}",
                 "content_type": "post",
+                "thread_id": (raw.meta or {}).get("thread_id"),
                 "content": raw.content,
                 "title": None,
                 "url": (raw.meta or {}).get("url") or source_url,
@@ -262,47 +276,22 @@ def _triage_posts(
                 result.already_seen += 1
                 continue
 
-            classification = classify(
-                post.content, requirements, llm=llm, model_name=model_name
+            # A recapture of an unchanged post must respect its durable backoff.
+            if outcome == "unchanged" and post.classification_retry_at and post.classification_retry_at > datetime.now(timezone.utc).replace(tzinfo=None):
+                result.already_seen += 1
+                continue
+            classification = evaluate_post(
+                s, post, requirements, llm=llm, model_name=model_name,
+                semantic_requested=use_llm, supplied_context=(raw.meta or {}).get("context")
             )
-            post.classified = True
-
-            if verbose_log:
-                # Per-post decision trail: which layer decided, and why.
-                preview = " ".join(post.content.split())[:70]
-                matched = ", ".join(
-                    (classification.hiring_matches or [])[:3]
-                ) or "none"
-                log_activity(
-                    s,
-                    kind="classify",
-                    level="success" if classification.is_lead else "info",
-                    community=community,
-                    space=space,
-                    summary=(
-                        f"{classification.classification} "
-                        f"(via {classification.decided_by}): {preview}"
-                    ),
-                    detail={
-                        "decided_by": classification.decided_by,
-                        "rule_score": classification.rule_score,
-                        "confidence": round(classification.confidence, 2),
-                        "hiring_patterns": matched,
-                        "reason": (classification.reason or "")[:120],
-                    },
-                    decided_by=classification.decided_by,
-                )
-
-            # The model was asked and gave no verdict (an outage, spent
-            # credits), so the rules decided alone. Enough to show a lead for
-            # review, not to act on: it neither retires a lead judged earlier
-            # nor goes to Vini on its own.
-            held = classification.llm_error is not None
+            if classification.llm_error:
+                result.errors += 1
+                continue
 
             if not classification.is_lead:
                 result.not_leads += 1
                 stale = s.scalar(select(Lead).where(Lead.post_id == post_pk))
-                if stale and not held:
+                if stale:
                     retire_lead(s, stale, reason=classification.reason,
                                 decided_by=classification.decided_by)
                 continue
@@ -310,9 +299,9 @@ def _triage_posts(
             if not meets_requirements(classification, requirements):
                 result.filtered += 1
                 stale = s.scalar(select(Lead).where(Lead.post_id == post_pk))
-                if stale and not held:
-                    retire_lead(s, stale, reason="filtered out by the target roles/skills "
-                                f"or confidence floor ({classification.reason})",
+                if stale:
+                    retire_lead(s, stale, reason="filtered out by the "
+                                f"confidence floor ({classification.reason})",
                                 decided_by=classification.decided_by)
                 continue
 
@@ -329,8 +318,6 @@ def _triage_posts(
 
             extracted = classification.extracted or {}
             existing = s.scalar(select(Lead).where(Lead.post_id == post_pk))
-            if held and existing is not None:
-                continue   # keep the verdict the model gave earlier
             lead = existing or Lead(post_id=post_pk)
 
             # A lead once filed as a duplicate stays one. Re-judged on its full
@@ -343,9 +330,6 @@ def _triage_posts(
             lead.classification = classification.classification
             lead.confidence = classification.confidence
             lead.reason = classification.reason
-            if held:
-                lead.reason = (f"{classification.reason} Held for review, not sent to "
-                               f"Vini: no LLM verdict ({classification.llm_error}).")
             lead.classifier_version = classification.classifier_version
             lead.decided_by = classification.decided_by
             lead.evidence_quote = classification.evidence_quote
@@ -371,7 +355,7 @@ def _triage_posts(
             s.flush()
             # New non-duplicate leads go to production; already-synced rows are
             # skipped inside the push helper.
-            if duplicate_lead_id is None and lead.external_synced_at is None and not held:
+            if duplicate_lead_id is None and lead.external_synced_at is None:
                 pending_external_ids.append(lead.id)
 
             payload: dict[str, Any] = {
@@ -431,7 +415,7 @@ def _triage_posts(
 
     result.leads.sort(key=lambda x: x["lead_score"], reverse=True)
 
-    if pending_external_ids:
+    if pending_external_ids and export:
         # The push records Vini's answer per lead and writes the export row
         # to the activity log itself, whoever calls it.
         with db.session() as s:
