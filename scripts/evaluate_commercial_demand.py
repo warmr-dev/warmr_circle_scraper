@@ -107,6 +107,18 @@ def local_export(case,raw,model,req):
                     'payload':payload,'audit':post.classification_audit}
 
 
+def preflight_provider(backend):
+    """Fail fast on provider/account access errors; no post content is sent."""
+    try:
+        backend._client.models.list()
+    except Exception as exc:
+        status = getattr(exc, 'status_code', None)
+        raise RuntimeError(
+            f'Provider access preflight failed ({type(exc).__name__}, status={status}); '
+            'no cohort inference requests were scheduled.'
+        ) from None
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--provider',choices=['anthropic','openai','openrouter'],required=True)
@@ -116,6 +128,7 @@ def main():
     parser.add_argument('--cohort', type=Path, default=ROOT/'reports/commercial-demand/private/exit-five-100.json')
     parser.add_argument('--regressions-only',action='store_true')
     parser.add_argument('--local-only',action='store_true',help='Replay existing responses; never call a provider')
+    parser.add_argument('--retry-errors',action='store_true',help='Retry cached processing failures; retain prior receipts')
     args = parser.parse_args()
     if args.env_file:
         from dotenv import load_dotenv
@@ -131,6 +144,10 @@ def main():
                   for p in json.loads(args.cohort.read_text())['posts']]
     cache = folder/'decisions';cache.mkdir(exist_ok=True)
     factory = {'anthropic':AnthropicBackend,'openai':OpenAIBackend,'openrouter':OpenRouterBackend}[args.provider]
+    if not args.local_only:
+        # Check credentials without disclosing community content. A global auth
+        # failure must abort before scheduling the entire private cohort.
+        preflight_provider(factory(model=args.model))
     def evaluate(case):
         path = cache/(case['case']+'.json')
         input_hash = hashlib.sha256(json.dumps(case,sort_keys=True).encode()).hexdigest()
@@ -138,7 +155,13 @@ def main():
             data=json.loads(path.read_text())
             if data['model']!=args.model or data['baseline_ref']!=BASELINE or data.get('classifier_hash')!=CLASSIFIER_HASH or data.get('input_hash')!=input_hash or data['provider']!=args.provider:
                 raise ValueError('Cache model/baseline mismatch')
-            return data
+            if not (args.retry_errors and data.get('processing_failure')):
+                return data
+            if args.local_only:
+                raise ValueError('Cannot retry provider errors in local-only mode')
+            # Preserve error evidence rather than silently replacing a failed run.
+            archive = path.with_name(path.stem + '.attempt-' + datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%f') + '.json')
+            archive.write_text(path.read_text())
         if args.local_only:
             raise ValueError(f'Missing cached response: {path}; local-only forbids provider calls')
         data={'case':case['case'],'model':args.model,'provider':args.provider,

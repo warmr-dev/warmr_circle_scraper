@@ -320,3 +320,20 @@ def test_thread_id_context_does_not_mix_other_threads(tmp_path):
         upsert_post(s, community_id=c.id, record={'source_content_id':'different', 'content':'Other thread',
             'thread_id':'t2', 'url':'https://fixture.circle.so/c/post/root#comment2'})
         assert [x['content'] for x in context_for_post(s, root)] == ['Same thread']
+
+
+def test_evaluation_preflight_stops_before_disclosing_posts():
+    import importlib.util
+    from types import SimpleNamespace
+    path = Path(__file__).parents[1]/'scripts/evaluate_commercial_demand.py'
+    spec = importlib.util.spec_from_file_location('commercial_evaluation_preflight', path)
+    evaluation = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(evaluation)
+    class AuthFailure(Exception):
+        status_code = 401
+    class Models:
+        def list(self):
+            raise AuthFailure('invalid credential')
+    backend = SimpleNamespace(_client=SimpleNamespace(models=Models()))
+    with pytest.raises(RuntimeError, match='status=401.*no cohort inference'):
+        evaluation.preflight_provider(backend)

@@ -102,7 +102,10 @@ provider. For example, with approved Anthropic credentials already in the shell:
   --provider anthropic --model claude-sonnet-4-6
 ```
 
-Caches require matching model, provider, baseline, classifier hash and input hash.
+Provider access is checked before cohort inference requests. `--retry-errors`
+retries cached processing failures while retaining previous receipts; it cannot
+be combined with local-only replay. Caches require matching model, provider,
+baseline, classifier hash and input hash.
 Review every changed cohort decision, including excerpts and reviewer assessment,
 and separate provider errors from semantic changes before marking the PR ready.
 No merge, deployment, production schema application or replay is part of this PR.

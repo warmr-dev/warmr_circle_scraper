@@ -1,0 +1,18 @@
+{
+  "state": "blocked_provider_authentication",
+  "provider": "anthropic",
+  "model": "claude-sonnet-4-6",
+  "destination_authorized": true,
+  "successful_model_responses": 0,
+  "cached_cases": 68,
+  "cached_processing_failures": 68,
+  "logged_authentication_failures": 130,
+  "credentials_checked": {
+    "primary": "HTTP 401",
+    "fallback": "HTTP 401"
+  },
+  "semantic_comparison_complete": false,
+  "cohort_changed_decisions_reviewed": false,
+  "production_mutations": false,
+  "outbound_ingest_notifications": false
+}
