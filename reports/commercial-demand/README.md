@@ -35,29 +35,51 @@ The tutorial's full capture is also tested as a negative.
 
 ## Verification status
 
-Local full Python suite: **1523 passed, 5 skipped** (browser integration tests
-require an installed Chromium binary). After the last backend-selection change,
-**87 relevant tests passed**. `compileall` and `git diff --check` passed.
+Full Python suite on the final local diff: **1531 passed, 5 skipped**. The skips
+require an installed Chromium binary. `compileall` and `git diff --check` passed.
+Mock tests establish mechanics; the semantic evidence gap below remains.
 
-Mock regression tests establish pipeline mechanics and export serialization,
-including original timestamps, 48-hour freshness at capture and expired ingress
-at today's time. They do not establish model semantic accuracy.
+The existing Circle model is **GPT-4o-mini**. Read-only worker runtime reports
+`openai/gpt-4o-mini` through OpenRouter. The existing Circle Vercel validator key
+uses direct OpenAI with the default `gpt-4o-mini`; no separate key is required.
+The local runner retrieved that existing credential in memory using read-only
+Vercel API calls. No credential was saved in fixtures, logs or this repository.
 
-Real-model old/new comparison was attempted after explicit user authorization
-of private-content disclosure to Anthropic. The run was interrupted on repeated
-HTTP 401 authentication failures. Both locally available primary and fallback
-keys also failed the read-only models endpoint. There are **zero successful
-model responses**; 68 cached cases are processing failures, not semantic labels.
-`evaluation-status.json` records the aggregate evidence without private content.
+The last completed real-model run evaluated **109 cases**: nine source cases and
+100 roots. All nine source cases matched human labels and local payload
+eligibility: five required positives, full Civic contract positive, and three
+negative tutorial/short-submission cases. Original source timestamps remain
+unchanged; evaluation at current time separately reports expired ingress.
 
-The runner now checks provider credentials before scheduling cohort inference
-and supports `--retry-errors`, retaining prior error receipts. Authorization is
-resolved; a valid Anthropic credential is the remaining execution dependency.
+On 100 roots, baseline eligibility was 1 and evaluated-policy eligibility 27.
+All **28 changed outcomes** were reviewed: 20 accepted newly eligible demand
+cases, six false positives and two processing errors. See
+`changed-decision-review.md`; private receipts include full source/context,
+old/new reasons and grounded excerpts. Processing errors were not relabeled
+as non-demand. Model output is probabilistic; this is a paired observed run,
+not a population recall/precision estimate.
 
-With valid credentials, run `scripts/evaluate_commercial_demand.py` with the private bundle,
-using `--retry-errors`, record all regression results, separate model errors, and review **every** changed
-cohort decision. Write old/new outcome, grounded excerpts and reviewer assessment.
-Until that evidence exists, this PR remains draft and is not acceptance-complete.
+The final prompt adds explicit direction/purpose exclusions for the six observed
+false positives. **That final prompt has not completed real-model verification.**
+Automatic approval review rejected the repeat private-text request to direct
+OpenAI, citing the worker's OpenRouter route and requiring explicit destination
+authorization. The rejected command did not execute. The earlier completed
+run remains evidence for its recorded classifier hash, not for the final diff.
+`evaluation-status.json` records both hashes and the exact remaining gap.
 
+The latest available rolling 24-hour capture window is
+2026-10-04 10:24:07.013272 through 2026-10-05 10:24:07.013272 UTC:
+five records (one social root and four replies). Manual source/context review
+found no explicit buyer demand. This is anchored to the last available capture,
+not today's live 24 hours; capture freshness is a separate issue.
+
+Read-only source state has the seven cited captured posts marked classified and
+without local candidates. Historical negative receipts were unavailable, so an
+exact original rejection cause cannot be reconstructed from that flag. The
+baseline simulation reproduces multiple software-only suppressions; Webflow was
+accepted by the simulated baseline, so its historical absence needs separate
+capture/processing/duplicate investigation rather than a fabricated explanation.
+
+PR remains draft until final semantic regression/cohort verification passes.
 No production database mutations, migrations, deployment, replay, ingest,
 notifications, merge or live delivery verification were performed.

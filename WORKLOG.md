@@ -26,9 +26,11 @@
 - **Зачем:** устранить software-only подавление спроса и terminal решения при
   provider failure, сохранив identity, attribution и export contract.
 - **Результат:** локальная реализация для review. Production миграция, deploy и
-  replay не выполнялись. Передача приватных community texts в Anthropic
-  одобрена пользователем. Model evaluation остановлен на HTTP 401; основной
-  и резервный локальные ключи не проходят read-only authentication preflight.
+  replay не выполнялись. Использован существующий ключ Circle и GPT-4o-mini
+  без отдельного ключа. Завершено сравнение 109 кейсов, 9 исходных regressions
+  прошли; все 28 изменений cohort разобраны. Финальный semantic repeat
+  остановлен auto-review из-за direct OpenAI вместо worker OpenRouter; PR draft
+  до проверки финального prompt. Подробности: reports/commercial-demand/.
 - **Кто:** Николай + Codex.
 - **Детали:** `docs/commercial-demand.md`,
   `migrations/manual/2026-10-06_p31_commercial_demand.sql`.

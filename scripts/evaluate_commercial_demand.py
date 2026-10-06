@@ -16,6 +16,7 @@ import sys
 import tempfile
 from types import ModuleType
 from unittest.mock import patch
+from urllib.parse import quote
 
 from sqlalchemy import select
 from circle_leads.classifier.ai_classifier import AnthropicBackend, OpenAIBackend, OpenRouterBackend
@@ -107,6 +108,27 @@ def local_export(case,raw,model,req):
                     'payload':payload,'audit':post.classification_audit}
 
 
+def load_existing_vercel_openai_key(project, team):
+    """Reuse a project's production key in memory; never persist or print it."""
+    def get(path):
+        result = subprocess.run(['vercel', 'api', path, '--method', 'GET'],
+                                capture_output=True, text=True, timeout=30)
+        if result.returncode:
+            raise RuntimeError('Vercel read-only credential retrieval failed; check project/scope access')
+        return json.loads(result.stdout)
+    project, team = quote(project, safe=''), quote(team, safe='')
+    envs = get(f'/v9/projects/{project}/env?teamId={team}')['envs']
+    candidates = [x for x in envs if x['key'] == 'OPENAI_API_KEY'
+                  and 'production' in x.get('target', [])]
+    if len(candidates) != 1:
+        raise RuntimeError('Expected one production OPENAI_API_KEY in the selected project')
+    env_id = quote(candidates[0]['id'], safe='')
+    value = get(f'/v1/projects/{project}/env/{env_id}?teamId={team}').get('value')
+    if not isinstance(value, str) or not value:
+        raise RuntimeError('Selected production credential is unavailable')
+    os.environ['OPENAI_API_KEY'] = value
+
+
 def preflight_provider(backend):
     """Fail fast on provider/account access errors; no post content is sent."""
     try:
@@ -124,12 +146,19 @@ def main():
     parser.add_argument('--provider',choices=['anthropic','openai','openrouter'],required=True)
     parser.add_argument('--model',required=True)
     parser.add_argument('--env-file')
+    parser.add_argument('--vercel-project', help='Reuse this existing Circle project production key in memory')
+    parser.add_argument('--vercel-team', help='Explicit Vercel team ID for read-only credential retrieval')
     parser.add_argument('--fixtures', type=Path, default=ROOT/'reports/commercial-demand/private/regressions.json')
     parser.add_argument('--cohort', type=Path, default=ROOT/'reports/commercial-demand/private/exit-five-100.json')
     parser.add_argument('--regressions-only',action='store_true')
     parser.add_argument('--local-only',action='store_true',help='Replay existing responses; never call a provider')
     parser.add_argument('--retry-errors',action='store_true',help='Retry cached processing failures; retain prior receipts')
     args = parser.parse_args()
+    if args.vercel_project or args.vercel_team:
+        if not args.vercel_project or not args.vercel_team or args.provider != 'openai':
+            parser.error('Vercel credential reuse requires project, team and provider=openai')
+        if not args.local_only:
+            load_existing_vercel_openai_key(args.vercel_project, args.vercel_team)
     if args.env_file:
         from dotenv import load_dotenv
         load_dotenv(args.env_file,override=False)
@@ -142,7 +171,8 @@ def main():
     if not args.regressions_only:
         cases += [{**p,'case':f"cohort-{p['id']}",'text':p['content']}
                   for p in json.loads(args.cohort.read_text())['posts']]
-    cache = folder/'decisions';cache.mkdir(exist_ok=True)
+    cache = folder/'decisions'/f'{args.provider}-{args.model.replace("/", "_")}'
+    cache.mkdir(parents=True,exist_ok=True)
     factory = {'anthropic':AnthropicBackend,'openai':OpenAIBackend,'openrouter':OpenRouterBackend}[args.provider]
     if not args.local_only:
         # Check credentials without disclosing community content. A global auth
@@ -151,15 +181,17 @@ def main():
     def evaluate(case):
         path = cache/(case['case']+'.json')
         input_hash = hashlib.sha256(json.dumps(case,sort_keys=True).encode()).hexdigest()
+        previous = None
         if path.exists():
             data=json.loads(path.read_text())
-            if data['model']!=args.model or data['baseline_ref']!=BASELINE or data.get('classifier_hash')!=CLASSIFIER_HASH or data.get('input_hash')!=input_hash or data['provider']!=args.provider:
+            if data['model']!=args.model or data['baseline_ref']!=BASELINE or data.get('input_hash')!=input_hash or data['provider']!=args.provider:
                 raise ValueError('Cache model/baseline mismatch')
-            if not (args.retry_errors and data.get('processing_failure')):
+            if data.get('classifier_hash')==CLASSIFIER_HASH and not (args.retry_errors and data.get('processing_failure')):
                 return data
             if args.local_only:
-                raise ValueError('Cannot retry provider errors in local-only mode')
-            # Preserve error evidence rather than silently replacing a failed run.
+                raise ValueError('Cannot refresh changed classifier or retry provider errors in local-only mode')
+            previous = data
+            # Preserve previous prompt/error evidence rather than replacing it silently.
             archive = path.with_name(path.stem + '.attempt-' + datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%f') + '.json')
             archive.write_text(path.read_text())
         if args.local_only:
@@ -168,6 +200,9 @@ def main():
               'baseline_ref':BASELINE,'classifier_hash':CLASSIFIER_HASH,'input_hash':input_hash,
               'expected':case.get('expected')}
         for name,fn,check in [('old',old,old_meets),('new',classify,meets_requirements)]:
+            if name=='old' and previous is not None and not previous['old']['result']['llm_error']:
+                data['old']=previous['old']
+                continue
             backend=RecordingBackend(factory(model=args.model))
             kwargs={'llm':backend,'model_name':args.model}
             if name=='new':

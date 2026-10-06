@@ -33,6 +33,9 @@ DEFAULT_MODEL = os.environ.get("CIRCLE_LEADS_MODEL", "claude-sonnet-5")
 # Descriptive categories are routing metadata, never an admission whitelist.
 DESCRIPTION_VALUES: dict[str, tuple[str, ...]] = {
     "author_role": ("buyer", "seller", "job_seeker", "other"),
+    "service_direction": ("seeking_help", "offering_help", "neither", "mixed"),
+    "post_purpose": ("demand", "mixed_demand", "information", "supplier_offer",
+                     "social", "career_advice", "generic_inhouse_hiring", "closed_need"),
     "wants": ("service", "employee", "cofounder", "nothing"),
     "work_type": ("software", "design", "marketing", "sales", "admin",
                   "finance_legal", "content", "other"),
@@ -43,10 +46,21 @@ DESCRIPTION_VALUES: dict[str, tuple[str, ...]] = {
 }
 LEAD_RULE = {
     "author_role": frozenset({"buyer"}),
+    "post_purpose": frozenset({"demand", "mixed_demand"}),
+    "service_direction": frozenset({"seeking_help", "mixed"}),
     "demand_signal": frozenset(set(DESCRIPTION_VALUES["demand_signal"]) - {"none"}),
 }
 
-SYSTEM_PROMPT = """You classify CURRENT OR FUTURE BUYER DEMAND across ANY commercial category.
+SYSTEM_PROMPT = """First identify the direction of service/work: does the CURRENT AUTHOR want
+help delivered TO them/their company, or offer to deliver help TO other people?
+An offer of a free or paid audit is supplier promotion, not that supplier's
+buyer demand. Asking prospects about their pain points is supplier discovery,
+not buying help. Hiring an employee/contractor means seeking work delivered TO
+the company and can be demand even when the company is also a service provider.
+Then describe the CURRENT POST's purpose. Is the author asking for help,
+reporting an unresolved business problem, or sharing information/a completed
+solution? A completed tutorial is information, not exploration of an unmet need.
+Then classify CURRENT OR FUTURE BUYER DEMAND across ANY commercial category.
 Evaluate the complete CURRENT POST and the supplied root/replies as context.
 Only classify demand attributable to the CURRENT POST's author or the buyer
 explicitly represented by them. Context is not a new lead: a supplier reply,
@@ -66,13 +80,68 @@ Exclude informational content without buyer demand, tutorials, supplier
 self-promotion, showcases, generic social discussion, career/job-search advice,
 and generic in-house hiring without a concrete commercial-service signal.
 A buyer describing their own agency before requesting help is still a buyer.
+Generic networking, an introduction with "would love to connect / have questions",
+requests to participate in the author's poll/survey, and personal career/leadership
+transition advice are not commercial demand without an actual provider request
+or a concrete unresolved business problem. Do not invent that missing problem.
+A provider learning about customer needs or asking people to choose a portfolio
+photo is not requesting commercial help. Conversely, a specific current business
+project/problem can qualify as solution exploration without a vendor request.
 Read negation in context: "not hiring staff, need an SEO agency" is demand.
 "Role filled" with no remaining need is not. Keywords alone do not decide.
+Start with the CURRENT AUTHOR's intent: their request, unresolved commercial
+problem, or solution research. A tutorial, tips, or a demonstration of a solution
+they already built is INFORMATION, even when it mentions lead generation,
+vendors, calculators, costs or paid tools. Such an author is not a buyer merely
+because replies contain other people's questions or commercial needs.
 A tutorial describing building tools is not a request to buy work.
+Do not speculate that an author "may seek services", "might need assistance",
+"hints at a need" or "could benefit" just because they describe a commercial
+activity. There must be an actual request, unresolved concrete commercial
+problem, or future need expressed by the current author. Reporting a successful
+method is not an unresolved problem. Other commenters' questions are not this
+author's demand.
+
+Examples (apply the intent, not these keywords):
+- "I'm joining a new industry. Who else works here? Let's connect, I have
+  questions." -> neither / social / other / none. Unspecified questions and
+  peer networking do not express a concrete business problem.
+- "Help my research: complete this survey about your marketing challenges."
+  -> neither / information / other / none. Asking readers to contribute to
+  the author's research does not mean the author wants to buy help.
+- "I offer consulting and want to meet companies who need my skills."
+  -> offering_help / supplier_offer / seller / none. The author supplies work.
+- "I'm becoming a manager. Any advice on thinking like a leader?"
+  -> neither / career_advice / other / none. A vague future intention to fill
+  team gaps does not turn personal leadership advice into specialist hiring.
+- "I installed an assistant. Here are tasks I gave it and results it achieved."
+  -> neither / information / other / none. This reports use of a solution,
+  rather than seeking another solution or describing an unresolved limitation.
+- "What networking meetups are people attending?" -> neither / social /
+  other / none. Contrast "Need a venue/caterer for our customer event", which
+  is a concrete commercial provider request.
+- "Here is how I built our reporting dashboard. Follow these steps; hope it
+  helps." -> other / none. This shares a completed solution, no buyer demand.
+- "Our reporting is unreliable and causes missed renewals. What options should
+  we explore?" -> buyer / solution_exploration. An unresolved business problem.
+- "We are hiring an experienced operations leader." -> buyer / hiring_signal.
+  Evidence: "hiring an experienced operations leader" (one short exact span).
+- "We make dashboards; contact me to buy one." -> seller / none.
 A company/product introduction alone is not demand. An actual paid freelance
 marketing role is demand, even when preceded by a long company introduction.
 
 Return ONLY a JSON object with these fields:
+- service_direction: "seeking_help" | "offering_help" | "neither" | "mixed"
+  seeking_help means work, advice about an unresolved business problem, a
+  solution, vendor or specialist is sought FOR the current author/company.
+  offering_help means the current author offers services/audits to readers.
+  neither covers networking, tips, surveys and personal career discussion.
+  mixed requires an actual inbound need in this current post, not in replies.
+- post_purpose: "demand" | "mixed_demand" | "information" | "supplier_offer" |
+  "social" | "career_advice" | "generic_inhouse_hiring" | "closed_need"
+  Use mixed_demand only if the CURRENT AUTHOR also expresses a real request or
+  unresolved commercial problem alongside other content. Tips, tutorials and
+  successful completed solutions with no remaining need are information.
 - author_role: "buyer" | "seller" | "job_seeker" | "other"
 - wants: "service" | "employee" | "cofounder" | "nothing"
   A problem or research ask can have wants="nothing" and still be demand.
@@ -83,14 +152,33 @@ Return ONLY a JSON object with these fields:
   "switching_intent" | "problem_intent" | "solution_exploration" | "hiring_signal" | "none"
 - awareness: integer 1..5 for demand, null otherwise (2=problem, 3=exploring,
   4=comparing/recommendations, 5=explicit ask; 1=latent commercial need)
-- confidence: number 0..1, summary: one sentence, reason: why this is demand or excluded
+- confidence: number 0..1
+- summary: one sentence (REQUIRED)
+- reason: one sentence explaining why the current author has demand or why
+  this is excluded (REQUIRED for BOTH demand and non-demand)
 - supporting_excerpts: nonempty list of {"source_id": "current" or supplied
   context source_id, "quote": "one continuous verbatim span"}. Supply evidence
-  for BOTH positive and negative decisions. At least one span must come from
-  the current post. Never paraphrase or join separated spans.
+  for BOTH positive and negative decisions. Use ONE short current-post span.
+  Add a context span only if essential for disambiguation; do not add a second
+  paraphrased current span. Copy a SHORT EXACT span (5-12 words is enough).
+  Never paraphrase, insert ellipses, join separated spans or abbreviate job titles.
+  If two separate spans support the decision, use two separate excerpt objects.
 - evidence_quote: one verbatim current-post span (compatibility field)
 - job_title, employment_type, hire_target, company, budget, location, urgency:
   string or null; skills: list of strings.
+Before returning, check every quote by literal copying from the source.
+Do not summarize a list of roles inside a quote: copy only a short part of one
+sentence. NEVER put "..." in a quote unless those literal dots are in the source.
+All listed JSON keys are required. Never omit summary, reason or excerpts.
+Use this complete shape, replacing values with the actual assessment:
+{"service_direction":"neither","post_purpose":"information","author_role":"other","wants":"nothing","work_type":"other",
+ "work_mode":"unknown","demand_signal":"none","awareness":null,
+ "confidence":0.9,"summary":"Describe the current post.",
+ "reason":"Explain current author intent and the inclusion/exclusion.",
+ "supporting_excerpts":[{"source_id":"current","quote":"COPY EXACT SOURCE SPAN"}],
+ "evidence_quote":"COPY EXACT CURRENT SPAN","job_title":null,"skills":[],
+ "employment_type":null,"hire_target":null,"company":null,"budget":null,
+ "location":null,"urgency":null}
 Do not invent facts, budgets, timestamps or contact information. Unstated facts
 are null. Describe the current author's intent, not vocabulary in other replies.
 """
@@ -301,7 +389,7 @@ def is_lead(described: dict[str, str]) -> bool:
 def lead_reason(described: dict[str, str], job_title: str | None = None) -> str:
     if is_lead(described):
         return f"Lead: current or future commercial demand ({described['demand_signal']})."
-    return f"Not a lead: no buyer demand (author_role={described.get('author_role')})."
+    return f"Not a lead: author_role={described.get('author_role')}, post_purpose={described.get('post_purpose')}, service_direction={described.get('service_direction')}, demand_signal={described.get('demand_signal')}."
 
 
 def classify_with_llm(
@@ -384,7 +472,7 @@ def classify_with_llm(
     return AiVerdict(
         classification=classification,
         confidence=confidence,
-        reason=reason.strip(),
+        reason=reason.strip() if classification == "LEAD" else lead_reason(described) + " " + reason.strip(),
         demand_signal=described["demand_signal"],
         awareness=aware if classification == "LEAD" else None,
         supporting_excerpts=excerpts,

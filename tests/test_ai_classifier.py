@@ -34,7 +34,7 @@ def described(author_role="buyer", wants="employee", work_type="software", **ext
     """A model reply in the describe-only format; the rule decides from it."""
     quote = extra.get("evidence_quote", POST)
     positive = author_role == "buyer" and wants != "nothing"
-    return {"author_role": author_role, "wants": wants, "work_type": work_type,
+    return {"service_direction": "seeking_help" if positive else "neither", "post_purpose": "demand" if positive else "information", "author_role": author_role, "wants": wants, "work_type": work_type,
             "work_mode": "remote", "confidence": 0.9,
             "demand_signal": "explicit_demand" if positive else "none",
             "awareness": 5 if positive else None,

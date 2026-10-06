@@ -22,7 +22,7 @@ if PRIVATE.exists():
 
 
 def answer(text,positive=True,**extra):
-    return {'author_role':'buyer' if positive else 'other','wants':'service' if positive else 'nothing',
+    return {'service_direction':'seeking_help' if positive else 'neither', 'post_purpose':'demand' if positive else 'information', 'author_role':'buyer' if positive else 'other','wants':'service' if positive else 'nothing',
             'work_type':'other','work_mode':'unknown','demand_signal':'explicit_demand' if positive else 'none',
             'awareness':5 if positive else None,'confidence':.95,
             'reason':'Buyer asks for paid help.' if positive else 'Information without buyer demand.',
@@ -337,3 +337,24 @@ def test_evaluation_preflight_stops_before_disclosing_posts():
     backend = SimpleNamespace(_client=SimpleNamespace(models=Models()))
     with pytest.raises(RuntimeError, match='status=401.*no cohort inference'):
         evaluation.preflight_provider(backend)
+
+
+def test_existing_project_key_reuse_is_in_memory_only(monkeypatch):
+    import importlib.util
+    from types import SimpleNamespace
+    path = Path(__file__).parents[1]/'scripts/evaluate_commercial_demand.py'
+    spec = importlib.util.spec_from_file_location('commercial_evaluation_credentials', path)
+    evaluation = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(evaluation)
+    calls = []
+    responses = iter([{'envs':[{'id':'env-test','key':'OPENAI_API_KEY','target':['production']}]},
+                      {'value':'test-only-credential'}])
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        return SimpleNamespace(returncode=0, stdout=json.dumps(next(responses)))
+    monkeypatch.setattr(evaluation.subprocess, 'run', fake_run)
+    monkeypatch.setenv('OPENAI_API_KEY','previous-test-credential')
+    evaluation.load_existing_vercel_openai_key('circle-test','team-test')
+    assert evaluation.os.environ['OPENAI_API_KEY'] == 'test-only-credential'
+    assert len(calls) == 2 and all(c[-2:] == ['--method','GET'] for c in calls)
+    assert all('test-only-credential' not in str(c) for c in calls)

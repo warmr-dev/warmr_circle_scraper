@@ -40,7 +40,9 @@ context-window guarantee.
 
 Both positive and negative model responses need a reason and grounded excerpts,
 including an excerpt from the current record. Quotes must occur in their named
-source (case/whitespace normalization is allowed). Positive responses include
+source (case/whitespace normalization is allowed). Semantic `service_direction` and `post_purpose` distinguish buyer requests from
+supplier offers, tutorials, surveys, networking and career advice. Mixed content
+requires an actual current-author need. Positive responses include
 `demand_signal` and awareness 1–5. Descriptive fields and extracted facts remain;
 budget and company must be supported by the current text.
 
@@ -95,17 +97,28 @@ Current-time expired ingress is reported separately; no old timestamp is rewritt
 to admit historical demand into live ingestion.
 
 Run only after authorization to disclose these private texts to the chosen model
-provider. For example, with approved Anthropic credentials already in the shell:
+provider. Reuse Circle's existing model and credential; a separate API key is not
+required. Worker runtime uses `openai/gpt-4o-mini` via OpenRouter; the Vercel
+validator uses `gpt-4o-mini` directly via OpenAI. Match or explicitly authorize
+the chosen route before sending private texts. For example, with the existing
+Circle OpenAI credential available in the shell:
 
 ```sh
 .venv/bin/python scripts/evaluate_commercial_demand.py \
-  --provider anthropic --model claude-sonnet-4-6
+  --provider openai --model gpt-4o-mini
 ```
+
+Alternatively, `--vercel-project PROJECT_ID --vercel-team TEAM_ID` reads the
+selected Circle project production credential in memory using Vercel CLI GET
+requests; it never persists or prints the key. This requires existing CLI access
+and does not grant permission to disclose post content to a different route.
 
 Provider access is checked before cohort inference requests. `--retry-errors`
 retries cached processing failures while retaining previous receipts; it cannot
 be combined with local-only replay. Caches require matching model, provider,
-baseline, classifier hash and input hash.
+baseline, classifier hash and input hash. A classifier change archives the old
+receipt and reevaluates only the new policy, reusing the successful fixed
+baseline. Local-only mode refuses stale-policy caches.
 Review every changed cohort decision, including excerpts and reviewer assessment,
 and separate provider errors from semantic changes before marking the PR ready.
 No merge, deployment, production schema application or replay is part of this PR.
