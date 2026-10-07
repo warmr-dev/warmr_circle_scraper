@@ -359,3 +359,34 @@ def test_a_later_read_attaches_the_member_id_and_releases_the_lead(db):
         assert again.profile_url == "https://acme.circle.so/u/b3a08215"
         lead = s.scalar(select(Lead).where(Lead.post_id == post_id))
         assert lead.external_synced_at is None
+
+
+@pytest.mark.parametrize('canonical_first', [True, False])
+def test_canonical_host_wins_over_a_legacy_slug_alias(db, canonical_first):
+    """A join URL alias must not acquire another row's unique host."""
+    from sqlalchemy import select
+    from circle_leads.storage.models import Community, Post
+
+    with db.session() as s:
+        canonical = Community(slug='operator-membership',
+                              url='https://www.example-community.test',
+                              host='www.example-community.test')
+        legacy = Community(slug='www.example-community.test',
+                           url='https://www.example-community.test/join', host=None)
+        s.add_all([canonical, legacy] if canonical_first else [legacy, canonical])
+        s.flush()
+        canonical_id, legacy_id = canonical.id, legacy.id
+        upsert_post(s, community_id=canonical_id,
+                    record={'source_content_id': 'existing', 'content': 'Existing source.'})
+
+    with db.session() as s:
+        chosen = get_or_create_community(s, slug='www.example-community.test',
+                                         url='https://www.example-community.test')
+        assert chosen.id == canonical_id
+        upsert_post(s, community_id=chosen.id,
+                    record={'source_content_id': 'new', 'content': 'New source.'})
+
+    with db.session() as s:
+        assert s.get(Community, legacy_id).host is None
+        assert list(s.scalars(select(Post.community_id))) == [canonical_id, canonical_id]
+        assert len(list(s.scalars(select(Community)))) == 2
