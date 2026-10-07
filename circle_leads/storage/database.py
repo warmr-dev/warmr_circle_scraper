@@ -335,6 +335,13 @@ def get_or_create_community(session: Session, *, slug: str, url: str, **kw) -> C
     # (a directory link with an invitation token vs. the bare address), but one
     # host is one community.
     host = community_host(url)
+    # Resolve the unique host first. An older host-less row can also match the
+    # incoming slug; the OR query otherwise chooses it arbitrarily and assigning
+    # its host collides with the canonical row (and misattributes new posts).
+    if host:
+        canonical = session.scalar(select(Community).where(Community.host == host))
+        if canonical is not None:
+            return canonical
     conditions = (Community.slug == slug) | (Community.url == url)
     if host:
         conditions = conditions | (Community.host == host)
