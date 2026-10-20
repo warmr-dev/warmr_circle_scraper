@@ -242,3 +242,25 @@ def test_processing_error_keeps_description_for_durable_diagnosis(bad):
     assert result.classification == "UNCERTAIN"
     assert result.described["post_purpose"] == "demand"
     assert result.supporting_excerpts == []  # unverified evidence is not approved evidence
+
+
+@pytest.mark.parametrize("classifier_prompt", [False, True])
+def test_openai_strict_schema_is_scoped_to_commercial_demand(monkeypatch, classifier_prompt):
+    from types import SimpleNamespace
+    from circle_leads.classifier.ai_classifier import OpenAIBackend, SYSTEM_PROMPT
+    monkeypatch.setenv("OPENAI_API_KEY", "fixture")
+    sent = []
+    def create(**kwargs):
+        sent.append(kwargs)
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="{}"))])
+    backend = OpenAIBackend(model="gpt-4o-mini")
+    backend._client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    backend.complete(SYSTEM_PROMPT if classifier_prompt else "unrelated prompt", "fixture")
+    assert len(sent) == 1
+    assert ("response_format" in sent[0]) == classifier_prompt
+    if classifier_prompt:
+        schema = sent[0]["response_format"]["json_schema"]
+        assert schema["strict"] and not schema["schema"]["additionalProperties"]
+        assert set(schema["schema"]["required"]) == set(schema["schema"]["properties"])
+        assert "video" not in schema["schema"]["properties"]["work_type"]["enum"]
+        assert schema["schema"]["properties"]["supporting_excerpts"]["type"] == "array"

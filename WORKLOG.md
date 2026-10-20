@@ -19,6 +19,22 @@
 
 ---
 
+## 2026-10-20 — Circle #52 semantic acceptance refresh (preparation only)
+
+- **Что:** подготовка `ai-v3.3` поверх актуального main; независимый semantic
+  `need_state` различает открытую потребность, выбранное решение, audience input,
+  предложение услуг и карьерный контекст. Противоречия остаются retryable.
+- **Зачем:** не переносить потребность читателя на автора, не считать задачи
+  выбранному assistant новым спросом; сохранить hiring и concrete-project demand.
+- **Результат:** подготовка, не выпуск. Модель/provider прежние: OpenAI
+  `gpt-4o-mini`, существующий Circle credential только в памяти. Prompt variants,
+  ошибки и raw receipts сохранены приватно; semantic acceptance остаётся gate,
+  unit tests его не заменяют. Нет production writes, migration, deploy,
+  исторического replay, публикаций или OpenClaw routing changes.
+- **Кто:** Николай + Codex.
+- **Детали:** `docs/commercial-demand.md`, `reports/demand-boundaries/README.md`,
+  `docs/changes/2026-10-20-circle-demand-acceptance.md`.
+
 ## 2026-10-06 — Commercial demand policy and durable classification retry (local PR)
 
 - **Что:** единый evaluator для batch/triage; additive nullable JSON audit и

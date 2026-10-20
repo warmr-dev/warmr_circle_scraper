@@ -44,8 +44,23 @@ source (case/whitespace normalization is allowed). Semantic `need_owner`, `hirin
 supplier offers, tutorials, surveys, networking and career advice. Mixed content
 requires an actual current-author or explicitly represented buyer need. A helper
 can describe that represented need without being the direct buyer. Reader/customer
-pain in a provider survey is not the author's demand. The model first summarizes
-the complete post and explains intent, then assigns descriptive fields. Generic
+pain in a provider survey is not the author's demand. The `ai-v3.3` model first summarizes the complete post and latest situation,
+then explains any distinct remaining buyer need before choosing `need_state`
+and `request_scope`. Choosing scope before reading later resolution/usage can
+misread a historical wish as current demand. The fixed trailing assessment
+contract repeats ownership, audience-input and chosen-solution boundaries after
+the complete quoted context. It is internal evaluation text, not source evidence.
+`need_state` distinguishes open_need, selected_solution_usage, audience_input,
+supplier_offer, career_or_social and none. Only open_need permits a positive
+lead description. A supplied lifecycle assessment that contradicts the other
+demand fields is a retryable processing error, not an automatically negative
+label. Prior recorded responses without the lifecycle field retain the legacy
+schema contract. `request_scope` distinguishes own commercial project,
+represented buyer, networking/career, audience research, another participant's
+need, generic vacancy and no current need. A supplied scope that conflicts
+with the demand description is a retryable processing error in either direction;
+it cannot silently become an exportable lead or a permanent rejection. Older
+recorded responses without this added field retain their existing schema contract. Generic
 in-house hiring scope only excludes a hiring signal; it cannot suppress a
 separate commercial need in a mixed post. Contradictory positive-purpose versus
 non-demand ownership/signal descriptions are processing errors, not negatives. Positive responses include
@@ -100,7 +115,9 @@ ingest and notification functions are blocked, `export=False`, and source times 
 are preserved. Storage identity uses a temporary evaluation namespace. Decision time is frozen at original capture for regressions.
 `--local-only` replays already cached model responses without provider calls.
 Local pipeline replays are serialized because their temporary module patches are
-process-global; model inference remains parallel. Regression acceptance requires
+process-global. Model inference defaults to one worker to protect the shared
+production provider budget; `--workers 2` or `--workers 3` explicitly enables
+bounded parallelism. Avoid simultaneous cohort jobs using the same account. Regression acceptance requires
 a successful semantic label AND the matching local audit/export outcome. Errors
 and low-confidence demand cannot pass as correct negatives. `--output` selects
 a separate private results file for another evaluation cohort.
@@ -109,8 +126,9 @@ to admit historical demand into live ingestion.
 
 Run only after authorization to disclose these private texts to the chosen model
 provider. Reuse Circle's existing model and credential; a separate API key is not
-required. Worker runtime uses `openai/gpt-4o-mini` via OpenRouter; the Vercel
-validator uses `gpt-4o-mini` directly via OpenAI. Match or explicitly authorize
+required. The recorded NYC/Vercel evaluation route is `gpt-4o-mini` directly
+via OpenAI; re-read production route/config before any separately approved release. Older runtime configurations may use OpenRouter. Verify and match
+or explicitly authorize
 the chosen route before sending private texts. For example, with the existing
 Circle OpenAI credential available in the shell:
 
@@ -132,4 +150,45 @@ receipt and reevaluates only the new policy, reusing the successful fixed
 baseline. Local-only mode refuses stale-policy caches.
 Review every changed cohort decision, including excerpts and reviewer assessment,
 and separate provider errors from semantic changes before marking the PR ready.
-No merge, deployment, production schema application or replay is part of this PR.
+Evaluation does not apply migrations or replay posts. Each later prompt release
+needs its own explicit rollout and live readback; see
+[boundary validation](../reports/demand-boundaries/README.md) for the current
+local-versus-deployed receipt.
+
+
+## Acceptance refresh (2026-10-20)
+
+See `docs/changes/2026-10-20-circle-demand-acceptance.md` and the dated section of
+`reports/demand-boundaries/README.md` for current results and release blockers.
+The private frozen evaluation contains the original 40 labelled regressions,
+four explicitly reviewed false-positive sources, eight new paired semantic
+paraphrases, and the same 100 roots. The four source negatives also occur in the
+100-root cohort: 152 evaluation records represent 148 unique inputs, not 152
+independent captures. Errors are not correct negatives. Local export mechanics
+must agree with each labelled semantic result at its frozen capture time;
+current-time expiry is reported separately and never bypassed for production.
+
+All raw source text, identity/URLs, raw responses and unsuccessful prompt
+variants stay in ignored private files. Committed reports contain only hashes,
+anonymous case identifiers, counts and paraphrased policy assessments. Real
+model inference uses the existing Circle OpenAI route and a single worker;
+no credentials are stored in outputs. No production backlog, source timestamps,
+queue, schema or classification rows are changed. Local SQLite simulations use
+export=False with ingest/notifications/HTTP transports blocked.
+
+
+### Provider output shape
+
+For the existing direct OpenAI commercial-demand call, `ai-v3.3` supplies a
+strict native JSON Schema: all descriptive enums, lifecycle/scope, nullable
+facts and the excerpts array have an explicit shape. This prevents a valid
+videographer request from failing merely because the model emits a new routing
+category such as `video` instead of the allowed `content`/`other`. The parser is
+not relaxed. The schema is scoped to this classifier prompt on OpenAIBackend;
+other prompts and OpenRouter/Anthropic request contracts stay unchanged. There
+is still one semantic request with the same model, temperature, timeout and
+output budget. Refusal, truncation, provider/schema rejection, invented quotes
+or contradictory semantic fields remain processing errors and cannot export.
+Native JSON shape is not evidence of correct commercial intent; real-model
+acceptance remains mandatory. Implementation follows the official Structured
+Outputs contract: https://developers.openai.com/api/docs/guides/structured-outputs.
