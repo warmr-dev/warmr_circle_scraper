@@ -412,3 +412,55 @@ def test_offline_payload_keeps_source_author_attribution():
                                     'test-model',load_requirements())
     assert receipt['payload']['source_author_id']=='source-actor-42'
     assert receipt['payload']['name']=='Source author'
+
+
+@pytest.mark.parametrize('positive,scope',[
+    (True, 'reader_feedback_or_supplier_research'),
+    (False, 'author_commercial_project'),
+    (True, 'unsupported_scope'),
+])
+def test_request_scope_conflicts_remain_processing_errors(positive,scope,dev_requirements):
+    text='Our company is considering a new publishing approach.'
+    result=classify(text,dev_requirements,llm=Backend(answer(text,positive,request_scope=scope)))
+    assert result.classification == 'UNCERTAIN'
+    assert result.llm_error
+    assert not result.is_lead
+
+
+@pytest.mark.parametrize('positive,scope',[
+    (True, 'author_commercial_project'),
+    (False, 'reader_feedback_or_supplier_research'),
+])
+def test_consistent_request_scope_is_preserved_in_description(positive,scope,dev_requirements):
+    text='Publishing strategy and reader feedback are different intentions.'
+    result=classify(text,dev_requirements,llm=Backend(answer(text,positive,request_scope=scope)))
+    assert not result.llm_error
+    assert result.is_lead == positive
+    assert result.described['request_scope'] == scope
+
+
+@pytest.mark.parametrize("state", ["selected_solution_usage", "audience_input", "supplier_offer", "career_or_social", "none"])
+def test_non_open_need_cannot_become_exportable_from_contradictory_demand_fields(state):
+    text = "We chose an assistant and assigned it these business tasks."
+    verdict = classify_with_llm(text, Backend(answer(text, True, need_state=state)))
+    assert verdict.error == "Conflicting need state and demand description."
+    assert verdict.classification == "UNCERTAIN"
+
+
+@pytest.mark.parametrize("state", ["selected_solution_usage", "audience_input", "supplier_offer", "career_or_social", "none"])
+def test_consistent_non_open_need_is_grounded_negative(state):
+    text = "We chose an assistant and assigned it these business tasks."
+    verdict = classify_with_llm(text, Backend(answer(text, False, need_state=state, request_scope="no_current_need")))
+    assert verdict.error is None
+    assert verdict.classification == "NOT_LEAD"
+    assert verdict.described["need_state"] == state
+
+
+def test_open_need_and_invalid_need_state_never_silently_become_negatives():
+    text = "Need a consultant to fix our invoicing integration."
+    contradictory = classify_with_llm(text, Backend(answer(text, False, need_state="open_need")))
+    invalid = classify_with_llm(text, Backend(answer(text, True, need_state="invented_state")))
+    positive = classify_with_llm(text, Backend(answer(text, True, need_state="open_need", request_scope="author_commercial_project")))
+    assert contradictory.error == "Conflicting need state and demand description."
+    assert invalid.error
+    assert positive.error is None and positive.classification == "LEAD"
