@@ -152,9 +152,7 @@ Then provide summary and reason about THIS author's intent. Required fields:
 - confidence: number 0..1, reflecting your certainty.
 - supporting_excerpt_ids: nonempty list of evidence_id values from supplied
   evidence_spans. Select the CURRENT-post span best supporting the intent you
-  describe. Choose the span containing the actual request/problem, recommendation
-  or supplier offer, not just a title or opening greeting. A current span is
-  REQUIRED for both positive and negative decisions.
+  describe. A current span is REQUIRED for both positive and negative decisions.
   Context spans are optional additional support, never a substitute. Select IDs,
   do not rewrite quotes, repair spelling, add ellipses or invent an identifier.
   The application copies the selected exact original spans and verifies them.
@@ -260,24 +258,26 @@ def _classification_messages(system: str, user: str) -> list[dict[str, str]]:
          "problem_intent", "The author states a concrete unresolved commercial problem and seeks ways to solve it."),
         ("We are considering gifts for our committee this year. What gift ideas and budgets have worked for you?",
          "buying_research", "The author explores a future organizational purchase, not generic social feedback; an explicit buying commitment is unnecessary."),
-        ("An update from our team: we have been organizing our quarterly plans and getting to know colleagues in several offices. The last few weeks included routine meetings, project reviews, a planning workshop and a small team gathering. Thanks to everyone who shared their notes and resources after those sessions. Separately, we need a freelance webinar producer for our upcoming customer series.",
-         "explicit_demand", "The request at the end is the author's own need for an external specialist; the introductory update is context."),
+        ("We sell analytics services and want new clients. Separately, our own team needs a freelance Webflow developer to rebuild our website.",
+         "mixed_demand", "The supplier also explicitly needs work delivered to its own team; its separate hiring need is buyer demand, not customer discovery."),
     ]
     for text, intent, reason in examples:
         spans = _evidence_spans({"current":text})
-        positive = intent in LEAD_RULE["demand_signal"]
+        mixed = intent == "mixed_demand"
+        positive = intent in LEAD_RULE["demand_signal"] or mixed
         response = {"summary":text, "reason":reason,
-                    "seeking_customers":intent=="supplier_offer",
+                    "seeking_customers":intent=="supplier_offer" or mixed,
                     "separate_buyer_need":positive,
                     "author_role":"buyer" if positive else "seller" if intent=="supplier_offer" else "other",
                     "need_owner":"current_author" if positive else "none",
-                    "service_direction":"seeking_help" if positive else "offering_help" if intent=="supplier_offer" else "neither",
-                    "post_purpose":"demand" if positive else "information" if intent=="recommendation_given" else intent,
-                    "demand_signal":intent if positive else "none",
-                    "hiring_scope":"not_hiring", "wants":"nothing",
+                    "service_direction":"mixed" if mixed else "seeking_help" if positive else "offering_help" if intent=="supplier_offer" else "neither",
+                    "post_purpose":"mixed_demand" if mixed else "demand" if positive else "information" if intent=="recommendation_given" else intent,
+                    "demand_signal":"explicit_demand" if mixed else intent if positive else "none",
+                    "hiring_scope":"contract_or_external_service" if mixed else "not_hiring",
+                    "wants":"service" if mixed else "nothing",
                     "work_type":"other", "work_mode":"unknown",
                     "awareness":3 if positive else None, "confidence":0.95,
-                    "supporting_excerpt_ids":[list(spans)[-1]], "skills":[],
+                    "supporting_excerpt_ids":["E1"], "skills":[],
                     **{key:None for key in ("job_title", "employment_type", "hire_target",
                                            "company", "budget", "location", "urgency")}}
         messages.extend([
@@ -449,8 +449,8 @@ def _evidence_spans(sources: dict[str, str]) -> dict[str, dict]:
     spans = {}
     for source_id, content in sources.items():
         words = list(re.finditer(r"\S+", content))
-        for offset in range(0, len(words), 48):
-            window = words[offset:offset + 48]
+        for offset in range(0, len(words), 12):
+            window = words[offset:offset + 12]
             start, end = window[0].start(), window[-1].end()
             evidence_id = f"E{len(spans) + 1}"
             spans[evidence_id] = {"evidence_id": evidence_id, "source_id": source_id,

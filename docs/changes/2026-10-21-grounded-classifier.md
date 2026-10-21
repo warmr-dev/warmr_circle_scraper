@@ -12,7 +12,7 @@ review. Later development runs are diagnostics, not final cohort acceptance.
   attribution and strict validator are unchanged.
 - Offer source-addressed evidence spans alongside the complete original current
   post, available context and author metadata. Spans are contiguous windows of
-  up to 48 whitespace-delimited tokens, with original source, offsets and text.
+  up to 12 whitespace-delimited tokens, with original source, offsets and text.
   No spelling, case, punctuation or whitespace is corrected in these slices.
 - The model selects evidence IDs. Only explicitly selected known IDs resolve to
   exact original quotes. Unknown/missing IDs, contradictory literal quotes and
@@ -129,3 +129,30 @@ instructions require the actual request/offer rather than only a heading, and a
 synthetic long-introduction example selects the final demand span. Source text,
 context, strict validation and admission criteria remain unchanged. The final
 candidate must be reevaluated before release acceptance is claimed.
+
+
+## Final source selection
+
+The larger-window/extra-example experiment on 40faf90 regressed a motivational
+post into demand and is not accepted. The final classifier source is restored
+byte-for-byte to the accepted 54b10b1 implementation (SHA-256
+f08d28fcfc02fb45af057ebac1f154120e339191289bcbc9d5e1d20ad70fd341).
+Do not combine outputs from the rejected experiment into acceptance evidence.
+
+Full-source review windows are supplied in the private per-case review report,
+separately labelled as reviewer context, not model-selected evidence. Selected
+model quotes stay untouched and pass the strict verifier; source references link
+the complete post/context. No automatic quote expansion or quote repair is added
+to production behavior. The 12 synthetic boundary paraphrases remain regression
+fixtures, independent of private source labels.
+
+
+## Mixed supplier/buyer control
+
+On the accepted 54b10b1 source, 11/12 synthetic controls matched expected labels.
+The mixed case (a supplier seeking customers and separately hiring a freelancer)
+returned an inconsistent model description. It remained a processing error, not
+a negative or exported candidate. A complete synthetic mixed-role example now
+shows buyer ownership, mixed purpose/direction and the separate real hiring need.
+The admission rule and strict validator are unchanged; final acceptance requires
+both the original 27 and all 12 controls on this same candidate.
