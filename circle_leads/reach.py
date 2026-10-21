@@ -21,7 +21,7 @@ from datetime import timedelta
 
 from sqlalchemy import and_, exists, func, or_, select
 
-from circle_leads.storage.models import Community, JoinStatus, ReplaySession
+from circle_leads.storage.models import Community, CircleConnection, JoinStatus, ReplaySession
 
 # Platforms we can actually join and read. "discover" is a community found
 # through Circle's own directory whose platform was never narrowed -- still on
@@ -91,6 +91,12 @@ def has_session():
     return exists(select(ReplaySession.id).where(ReplaySession.host == Community.host))
 
 
+def reading_enabled(host=Community.host):
+    """An operator pause applies to every scheduled reader, not just cookies."""
+    return ~exists(select(CircleConnection.id).where(
+        CircleConnection.host == host, CircleConnection.priority == "paused"))
+
+
 def is_paid():
     return Community.join_type == "paid"
 
@@ -124,6 +130,7 @@ def readable():
     address, not left alone for being paid, and still alive."""
     return and_(
         proven_on_circle(),
+        reading_enabled(),
         real_host(),
         pursued(),
         or_(Community.join_type.is_(None), Community.join_type != "subscription_expired"),

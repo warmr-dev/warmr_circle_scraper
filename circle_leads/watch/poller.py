@@ -37,11 +37,12 @@ from datetime import datetime, timedelta, timezone
 import requests
 from sqlalchemy import and_, or_, select
 
-from circle_leads.reach import has_session as session_stored, readable, real_host
+from circle_leads.reach import has_session as session_stored, readable, real_host, reading_enabled
 from circle_leads.storage.database import Database
 from circle_leads.storage.heartbeat import start_heartbeat
 from circle_leads.storage.models import (
     Community,
+    CircleConnection,
     JoinStatus,
     ReplaySession,
     WatchMode,
@@ -180,6 +181,7 @@ def ensure_watch_rows(db: Database, *, quiet_days: int = 14) -> int:
             # busiest communities we hold a session for. And no paid
             # community without a login.
             .where(
+                reading_enabled(),
                 or_(
                     and_(
                         readable(),
@@ -209,6 +211,8 @@ def ensure_watch_rows(db: Database, *, quiet_days: int = 14) -> int:
             ).all()
         )
         members = _member_ids(s)
+        paused_hosts = set(s.scalars(select(CircleConnection.host).where(
+            CircleConnection.priority == "paused")))
         for community_id, host, _slug in rows:
             if community_id in known:
                 continue
@@ -227,6 +231,9 @@ def ensure_watch_rows(db: Database, *, quiet_days: int = 14) -> int:
         # history. Rows made before this rule sat on the slow tier (or off)
         # for weeks after the bot had joined.
         for row in s.scalars(select(WatchState).where(WatchState.community_id.in_(members))):
+            if row.host in paused_hosts:
+                row.mode = WatchMode.OFF.value
+                continue
             row.tier = "fast"
             if row.mode == WatchMode.OFF.value and row.host in has_session:
                 row.mode = WatchMode.COOKIE.value
@@ -304,6 +311,7 @@ def due_states(db: Database, limit: int = 500) -> list[dict]:
         rows = s.scalars(
             select(WatchState)
             .where(WatchState.next_check_at <= _now())
+            .where(reading_enabled(WatchState.host))
             .order_by(WatchState.next_check_at.asc())
             .limit(limit)
         ).all()
