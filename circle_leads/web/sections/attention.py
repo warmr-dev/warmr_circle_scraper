@@ -25,7 +25,7 @@ from sqlalchemy import and_, delete, func, select
 from sqlalchemy.orm import Session
 
 from circle_leads.join.accounts import is_retired
-from circle_leads.reach import JOIN_QUEUE_STATUSES, has_session, on_circle
+from circle_leads.reach import JOIN_QUEUE_STATUSES, has_session, on_circle, reading_enabled
 from circle_leads.storage.heartbeat import HEARTBEAT_LIMITS_S
 from circle_leads.storage.models import (
     JOIN_HANDOFF_PREFIX, ActivityLog, AttentionAck, CircleConnection, Community,
@@ -340,6 +340,7 @@ def _watch_failing(ctx: Ctx) -> list[dict]:
         WatchState.last_detail, WatchState.consecutive_errors, WatchState.last_checked_at,
     ).where(
         WatchState.mode != "off", WatchState.consecutive_errors >= 5,
+        reading_enabled(WatchState.host),
         WatchState.last_status.notin_(("ratelimited", "challenge", "unauthorized")),
     ).order_by(WatchState.consecutive_errors.desc())).all()
     return [_item(f"watch:{r.community_id}", fingerprint(r.mode, r.last_status),
@@ -355,6 +356,7 @@ def _watch_member_off(ctx: Ctx) -> list[dict]:
         WatchState.last_checked_at,
     ).join(Community, Community.id == WatchState.community_id).where(
         WatchState.mode == "off",
+        reading_enabled(WatchState.host),
         (Community.join_status == JoinStatus.JOINED.value) | has_session(),
     )).all()
     return [_item(f"watch:{r.community_id}", fingerprint("off", r.last_status),
@@ -512,6 +514,20 @@ def _queue_stale(ctx: Ctx) -> list[dict]:
             for q in build_queues(ctx.s, ctx.now, named=named) if q["stale"]]
 
 
+def _classification_review(ctx: Ctx) -> list[dict]:
+    """Persistent holds must remain visible beyond the 24-hour log window."""
+    rows = ctx.s.scalars(select(Post).where(
+        Post.classified.is_(False),
+        Post.classification_audit["retry_state"].as_string() == "needs_review",
+    ).order_by(Post.id).limit(MAX_ITEMS)).all()
+    return [_item(f"classification:{p.id}",
+                  fingerprint((p.classification_audit or {}).get("content_hash"),
+                              (p.classification_audit or {}).get("context_hash")),
+                  f"Post {p.id}: classification needs review",
+                  detail=(p.classification_audit or {}).get("error"),
+                  link={"section": "log", "q": f"post {p.id}"}) for p in rows]
+
+
 def _log_problems(ctx: Ctx) -> list[dict]:
     """Warnings and errors of the last day that no other rule already covers,
     grouped by what they say."""
@@ -523,10 +539,23 @@ def _log_problems(ctx: Ctx) -> list[dict]:
         ActivityLog.created_at >= ctx.now - timedelta(hours=24),
         ActivityLog.kind.notin_(("export", "join")),  # rules of their own
     ).order_by(ActivityLog.id.desc()).limit(2000)).all()
+    post_ids = {audit.get("post_id") for kind, _, _, _, _, audit in rows
+                if kind == "classify" and isinstance(audit, dict)
+                and type(audit.get("post_id")) is int}
+    current_audits = dict(ctx.s.execute(select(Post.id, Post.classification_audit)
+                                      .where(Post.id.in_(post_ids))).all()) if post_ids else {}
     groups: dict[tuple, dict] = {}
     for kind, level, community, summary, at, audit in rows:
         problem = _problem_text(summary)
         if kind == "classify" and isinstance(audit, dict) and audit.get("error"):
+            post_id = audit.get("post_id")
+            current = (current_audits.get(post_id) if type(post_id) is int else None) or {}
+            # History remains in Log. Attention describes the durable current
+            # failure: a recovered quota error must not look like an outage.
+            if (current.get("outcome") in {"lead", "not_lead", "filtered_confidence"}
+                    or (current.get("outcome") == "error"
+                        and current.get("error") != audit["error"])):
+                continue
             problem = f"Classification: {audit['error']}"
         shape = _shape(problem)
         group = groups.setdefault((kind, level, shape), {
@@ -619,6 +648,10 @@ RULES: list[Rule] = [
     Rule("queue_stale", "warn", "Queue is not moving",
          "A day without movement while the queue is not empty: the stage is not running or has nothing to work on.",
          _queue_stale),
+    Rule("classification_review", "warn", "Classification needs review",
+         "Initial and corrective responses failed validation. Inspect the saved diagnostics; "
+         "automatic retries are stopped. Review before releasing this post for another attempt.",
+         _classification_review),
     Rule("log_problems", "info", "Log warnings in the last 24 h",
          "Grouped by text. Click to open these entries in the Log.",
          _log_problems),

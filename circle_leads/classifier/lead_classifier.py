@@ -53,6 +53,8 @@ class ClassificationResult:
     demand_signal: str = "none"
     awareness: int | None = None
     supporting_excerpts: list[dict] = field(default_factory=list)
+    failure_kind: str | None = None
+    diagnostics: list[dict] = field(default_factory=list)
 
     @property
     def is_lead(self) -> bool:
@@ -126,6 +128,8 @@ def classify(
         result.llm_error = (verdict.error or verdict.reason or "no verdict")[:200]
         result.reason = result.llm_error
         result.described = verdict.described
+        result.failure_kind = verdict.failure_kind
+        result.diagnostics = verdict.diagnostics
         result.model = model_name or verdict.model or getattr(llm, "model", None)
         result.decided_by = "llm"
         result.classifier_version = CLASSIFIER_VERSION
@@ -182,6 +186,7 @@ def _from_ai(
     result.demand_signal = verdict.demand_signal
     result.awareness = verdict.awareness
     result.supporting_excerpts = verdict.supporting_excerpts
+    result.diagnostics = verdict.diagnostics
     if verdict.disqualifiers:
         result.disqualifiers = list(
             dict.fromkeys(result.disqualifiers + verdict.disqualifiers)

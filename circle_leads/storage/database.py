@@ -660,6 +660,8 @@ def upsert_post(session: Session, *, community_id: int, record: dict) -> tuple[P
             preview.scraped_at = utcnow()
             preview.classified = False
             preview.classification_retry_at = None
+            if (preview.classification_audit or {}).get("retry_state") == "needs_review":
+                preview.classification_audit = {**preview.classification_audit, "retry_state": "input_changed"}
             session.flush()
             return preview, "updated"
 
@@ -681,6 +683,8 @@ def upsert_post(session: Session, *, community_id: int, record: dict) -> tuple[P
         existing.scraped_at = utcnow()
         existing.classified = False
         existing.classification_retry_at = None
+        if (existing.classification_audit or {}).get("retry_state") == "needs_review":
+            existing.classification_audit = {**existing.classification_audit, "retry_state": "input_changed"}
         session.flush()
         return existing, "updated"
 

@@ -399,3 +399,69 @@ def test_started_maintenance_lane_disappearing_is_visible(app):
         setting(s, "maintenance_recovery_heartbeat", (NOW-timedelta(hours=1)).isoformat())
     _clear_cache(app_)
     assert "maintenance_recovery" in _keys(client,"heartbeat")
+
+
+def test_classification_review_hold_survives_log_window_and_clears(app):
+    from circle_leads.storage.database import upsert_post
+    client, db, app_ = app
+    with db.session() as s:
+        c = community(s, "fixture")
+        p, _ = upsert_post(s, community_id=c.id,
+                           record={"source_content_id": "held", "content": "Need an agency"})
+        p.classification_audit = {"outcome": "error", "retry_state": "needs_review",
+                                  "error": "unverified_evidence", "content_hash": "a", "context_hash": "b"}
+        pid = p.id
+        # No recent ActivityLog is required for a held post to be visible.
+        p.scraped_at = NOW - timedelta(days=4)
+    _clear_cache(app_)
+    rule = _rules(client)["classification_review"]
+    assert rule["severity"] == "warn"
+    assert rule["items"][0]["key"] == f"classification:{pid}"
+    assert rule["items"][0]["detail"] == "unverified_evidence"
+    with db.session() as s:
+        from circle_leads.storage.models import Post
+        s.get(Post, pid).classified = True
+    _clear_cache(app_)
+    assert not _rules(client)["classification_review"]["items"]
+
+
+def test_operator_paused_member_is_not_a_polling_failure(app):
+    client, db, app_ = app
+    with db.session() as s:
+        c = community(s, 'paused-member', join_status='joined')
+        watch(s, c, mode='off', last_status='unauthorized')
+        connection(s, c.host, 'session_expired', priority='paused')
+        active = community(s, 'real-failure', join_status='joined')
+        watch(s, active, mode='off', last_status='unauthorized')
+    _clear_cache(app_)
+    titles = [i['title'] for i in _rules(client)['watch_member_off']['items']]
+    assert len(titles) == 1 and titles[0].startswith('real-failure.circle.so:')
+
+
+@pytest.mark.parametrize('audit', [
+    {'outcome':'not_lead','error':None},
+    {'outcome':'lead','error':None},
+    {'outcome':'error','error':'unverified_evidence','retry_state':'needs_review'},
+])
+def test_past_quota_failure_is_not_a_current_alarm_after_state_changes(app, audit):
+    client, db, app_ = app
+    with db.session() as s:
+        row = lead(s, community(s,'recovered'))
+        row.post.classification_audit = audit
+        s.add(ActivityLog(kind='classify', level='error', summary=f'error: post {row.post.id}',
+                          detail={'post_id':row.post.id,'error':'quota exhausted'}, created_at=NOW))
+    _clear_cache(app_)
+    assert not _rules(client)['log_problems']['items']
+
+
+def test_same_current_error_remains_visible_and_history_is_retained(app):
+    client, db, app_ = app
+    with db.session() as s:
+        row = lead(s, community(s,'still-failing'))
+        row.post.classification_audit = {'outcome':'error','error':'quota exhausted'}
+        s.add(ActivityLog(kind='classify', level='error', summary='error',
+                          detail={'post_id':row.post.id,'error':'quota exhausted'}, created_at=NOW))
+    _clear_cache(app_)
+    assert len(_rules(client)['log_problems']['items']) == 1
+    with db.session() as s:
+        assert s.query(ActivityLog).filter(ActivityLog.kind=='classify').count() == 1
