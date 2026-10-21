@@ -77,3 +77,54 @@ def test_the_join_bot_never_queues_a_paid_community(monkeypatch):
     _seed(db)
     slugs = {c["slug"] for c in joiner.select_join_candidates(db)}
     assert slugs == {"free", "listed", "legacy-custom"}
+
+
+def test_paused_member_is_excluded_from_all_scheduled_readers_and_can_resume():
+    from datetime import datetime, timedelta
+    from circle_leads.scanning import cookie_hosts_vip_first
+    from circle_leads.storage.models import CircleConnection, Community, WatchState
+    from circle_leads.watch.poller import due_states
+
+    db = _db()
+    with db.session() as s:
+        paused = _c(s, 'paused-member', join_type='paid')
+        paused.join_status = 'joined'
+        s.flush()
+        paused_id = paused.id
+        s.add(CircleConnection(host=paused.host, priority='paused'))
+        s.add(ReplaySession(host=paused.host, encrypted_cookies='plain:[]', cookie_count=0))
+        s.add(WatchState(community_id=paused.id, host=paused.host, mode='off',
+                         next_check_at=datetime.utcnow() - timedelta(minutes=1)))
+        _c(s, 'active')
+
+    ensure_watch_rows(db)
+    assert 'paused-member.circle.so' not in {r['host'] for r in due_states(db)}
+    assert 'paused-member' not in {slug for _, slug, _, _ in _community_hosts(db, limit=50)}
+    assert 'paused-member.circle.so' not in cookie_hosts_vip_first(db)
+    with db.session() as s:
+        assert s.scalar(select(WatchState).where(WatchState.community_id == paused_id)).mode == 'off'
+        assert s.get(Community, paused_id) is not None
+        conn = s.scalar(select(CircleConnection).where(CircleConnection.host == 'paused-member.circle.so'))
+        conn.priority = 'normal'
+    ensure_watch_rows(db)
+    assert 'paused-member.circle.so' in {r['host'] for r in due_states(db)}
+    assert 'paused-member' in {slug for _, slug, _, _ in _community_hosts(db, limit=50)}
+    assert 'paused-member.circle.so' in cookie_hosts_vip_first(db)
+
+
+def test_pause_takes_effect_for_an_already_due_anonymous_feed():
+    from datetime import datetime, timedelta
+    from circle_leads.storage.models import CircleConnection, WatchState
+    from circle_leads.watch.poller import due_states
+
+    db = _db()
+    with db.session() as s:
+        c = _c(s, 'anonymous-paused')
+        s.flush()
+        s.add(WatchState(community_id=c.id, host=c.host, mode='anon',
+                         next_check_at=datetime.utcnow() - timedelta(minutes=1)))
+        s.add(CircleConnection(host=c.host, priority='paused'))
+    assert due_states(db) == []
+    assert _community_hosts(db, limit=50) == []
+    ensure_watch_rows(db)
+    assert due_states(db) == []
