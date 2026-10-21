@@ -25,10 +25,10 @@ from typing import Any, Protocol
 
 logger = logging.getLogger(__name__)
 
-CLASSIFIER_VERSION = "ai-v3.2-grounded"
+CLASSIFIER_VERSION = "ai-v3.3-grounded-direction"
 POLICY_VERSION = "commercial-demand-v1"
 SCOUT_POLICY_REF = "c4d9dfffa193aea05e1929668dec34946f79f5d5"
-VALIDATION_POLICY_VERSION = "grounded-corrective-v2"
+VALIDATION_POLICY_VERSION = "grounded-corrective-v3"
 MAX_MODEL_CALLS = 2  # initial response plus one corrective attempt
 MAX_CONTEXT_CHARS = 100000
 DEFAULT_MODEL = os.environ.get("CIRCLE_LEADS_MODEL", "claude-sonnet-5")
@@ -110,8 +110,19 @@ A general hypothetical question about how a metric should be counted is
 informational practice discussion; an author-stated unresolved measurement
 problem affecting their business can be problem_intent. Do not invent that link.
 
-Return one JSON object. Start with summary and reason about THIS author's
-intent. Required fields:
+Return one JSON object. First answer these independent factual direction checks:
+- seeking_customers: boolean. Is the author trying to obtain customers, sales
+  prospects, client projects or introductions to prospective customers? Asking
+  customers about their pain points for the author's product is true.
+- separate_buyer_need: boolean. Apart from that customer-acquisition/networking
+  goal, does THIS author express their own purchase/provider/hiring decision or
+  concrete unresolved business problem? Seeking sales introductions, publicity,
+  feedback for customer discovery or client projects alone is false. A supplier
+  who ALSO states a separate need to hire/pay a specialist can be true.
+These facts must agree with the intent labels. If seeking_customers=true and
+separate_buyer_need=false, buyer/demand labels are contradictory. Do not describe
+sales introductions as buying help merely because an introduction is requested.
+Then provide summary and reason about THIS author's intent. Required fields:
 - summary: one-sentence summary of the complete CURRENT post.
 - reason: whose unmet commercial need is expressed, or why excluded.
 - author_role: buyer | seller | job_seeker | other
@@ -242,6 +253,8 @@ def _classification_messages(system: str, user: str) -> list[dict[str, str]]:
         spans = _evidence_spans({"current":text})
         positive = intent in LEAD_RULE["demand_signal"]
         response = {"summary":text, "reason":reason,
+                    "seeking_customers":intent=="supplier_offer",
+                    "separate_buyer_need":positive,
                     "author_role":"buyer" if positive else "seller" if intent=="supplier_offer" else "other",
                     "need_owner":"current_author" if positive else "none",
                     "service_direction":"seeking_help" if positive else "offering_help" if intent=="supplier_offer" else "neither",
@@ -457,6 +470,29 @@ def _resolve_evidence(data: dict, spans: dict[str, dict]) -> dict:
     return result
 
 
+def _validate_direction(data: dict, verdict: AiVerdict) -> AiVerdict:
+    """Additional semantic consistency check; never turn a failed claim negative.
+
+    Existing strict validation runs first. A positive also needs independent
+    factual assessments distinguishing customer acquisition from buying help.
+    Supplier posts with a separate expressed buyer need can still qualify.
+    """
+    if verdict.error:
+        return verdict
+    customers, buyer_need = data.get("seeking_customers"), data.get("separate_buyer_need")
+    if verdict.classification == "LEAD":
+        if type(customers) is not bool or type(buyer_need) is not bool:
+            return AiVerdict(error="Positive decision lacks factual commercial-direction checks.",
+                             described=verdict.described, model=verdict.model)
+        if not buyer_need:
+            return AiVerdict(error="Positive decision conflicts with no separate buyer need; customer acquisition and networking alone are excluded.",
+                             described=verdict.described, model=verdict.model)
+    if type(customers) is bool and type(buyer_need) is bool:
+        verdict.described.update(seeking_customers=str(customers).lower(),
+                                 separate_buyer_need=str(buyer_need).lower())
+    return verdict
+
+
 def classify_with_llm(
     text: str, backend: LlmBackend, *, model_name: str | None = None,
     context: list[dict] | None = None, current_metadata: dict | None = None
@@ -496,6 +532,7 @@ def classify_with_llm(
                 raise ValueError("Model reply must be a JSON object")
             data = _resolve_evidence(data, spans)
             verdict = _validate_response(data, text, sources, model_name or getattr(backend, "model", None))
+            verdict = _validate_direction(data, verdict)
         except (ValueError, TypeError, AttributeError) as exc:
             if not isinstance(data, dict):
                 data = {}
@@ -547,7 +584,7 @@ def _response_diagnostic(attempt: int, raw: str, data: dict[str, Any],
         result["described"] = verdict.described
         result["response_keys"] = [str(k)[:80] for k in list(data)[:10]]
         result["response_fields"] = {k: str(data[k])[:160]
-                                     for k in (*DESCRIPTION_VALUES, "intent", "buyer_owner", "confidence", "awareness") if k in data}
+                                     for k in (*DESCRIPTION_VALUES, "seeking_customers", "separate_buyer_need", "confidence", "awareness") if k in data}
         excerpts = data.get("supporting_excerpts")
         if isinstance(excerpts, list):
             rejected = []

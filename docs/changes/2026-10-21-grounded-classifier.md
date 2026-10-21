@@ -32,8 +32,8 @@ review. Later development runs are diagnostics, not final cohort acceptance.
   Adding evidence spans counts toward the explicit context limit; excess input
   remains an inspectable processing error, never silent truncation/non-demand.
 
-Classifier version: `ai-v3.2-grounded`; validation format:
-`grounded-corrective-v2`; commercial policy remains `commercial-demand-v1`.
+Classifier version: `ai-v3.3-grounded-direction`; validation format:
+`grounded-corrective-v3`; commercial policy remains `commercial-demand-v1`.
 No automatic reclassification, historical replay, migration or deployment.
 
 ## Verification and evaluation identity
@@ -65,3 +65,25 @@ These tests do not prove semantic correctness of model decisions.
 Final local suite: **1615 passed, 5 skipped**. `git diff --check` is clean.
 This is mechanical verification; final same-candidate real-model acceptance
 remains pending and release is blocked.
+
+
+## Commercial-direction consistency follow-up
+
+The first SHA-verified run on 9e0340f used 27 calls: all 27 responses passed the
+strict evidence/schema validator and 26 matched source review. One product-launch
+post seeking introductions to prospective customers was still called buyer demand.
+This is a semantic failure, not a provider or quote-validation failure.
+
+The follow-up requires two independent factual checks for every positive response:
+`seeking_customers` and `separate_buyer_need`, both actual JSON booleans. A positive
+without these facts, or with `separate_buyer_need=false`, is a validation error
+that remains non-exportable. It is never silently converted to NOT_LEAD.
+A supplier with a distinct expressed buyer need remains eligible. The model still
+reads the complete source and context; there is no phrase/keyword suppression.
+Checks are persisted with the positive description and on error diagnostics.
+The original strict validator and commercial rule remain unchanged; this is an
+additional consistency requirement. The normal two-call correction bound stays.
+
+A final full-cohort single-attempt check is proposed within the remaining 27
+calls of the same 54-call approval. It will reuse the shared ledger; no extra
+budget, production decisions, exports, merge or deployment are authorized.

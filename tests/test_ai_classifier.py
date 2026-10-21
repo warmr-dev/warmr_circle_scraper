@@ -36,6 +36,7 @@ def described(author_role="buyer", wants="employee", work_type="software", **ext
     positive = author_role == "buyer" and wants != "nothing"
     return {"hiring_scope": "not_hiring", "need_owner": "current_author" if positive else "none", "service_direction": "seeking_help" if positive else "neither", "post_purpose": "demand" if positive else "information", "author_role": author_role, "wants": wants, "work_type": work_type,
             "work_mode": "remote", "confidence": 0.9,
+            "seeking_customers":False, "separate_buyer_need":positive,
             "demand_signal": "explicit_demand" if positive else "none",
             "awareness": 5 if positive else None,
             "reason": "Grounded buyer demand." if positive else "No buyer demand.",

@@ -148,3 +148,26 @@ def test_selected_spans_reach_audited_local_export_gate(tmp_path,monkeypatch,rou
         assert bool(lead)==positive
         assert bool(lead_to_ingest_payload(lead,post,post.community,post.author) if lead else None)==positive
         assert s.scalar(select(ActivityLog).where(ActivityLog.kind=='classify')).detail['excerpts']
+
+
+@pytest.mark.parametrize('fields',[
+    {'seeking_customers':True,'separate_buyer_need':False},
+    {'seeking_customers':False,'separate_buyer_need':False},
+    {'seeking_customers':'false','separate_buyer_need':True},
+    {'seeking_customers':False,'separate_buyer_need':None},
+])
+def test_positive_with_inconsistent_or_missing_buying_direction_remains_error(fields):
+    from tests.test_commercial_demand import Backend
+    text='We launched our product and seek introductions to potential customers.'
+    verdict=ai.classify_with_llm(text,Backend(answer(text,**fields)))
+    assert verdict.error and verdict.failure_kind=='validation'
+    assert verdict.classification=='UNCERTAIN' and not verdict.supporting_excerpts
+
+
+def test_supplier_with_distinct_buyer_need_still_qualifies():
+    from tests.test_commercial_demand import Backend
+    text='We sell billing software. Separately we need a freelance designer for our website.'
+    verdict=ai.classify_with_llm(text,Backend(answer(text,seeking_customers=True,
+                                                   separate_buyer_need=True,post_purpose='mixed_demand')))
+    assert not verdict.error and verdict.classification=='LEAD'
+    assert verdict.described['seeking_customers']=='true'

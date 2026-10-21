@@ -23,7 +23,8 @@ if PRIVATE.exists():
 
 def answer(text,positive=True,**extra):
     return {'hiring_scope':'not_hiring','need_owner':'current_author' if positive else 'none','service_direction':'seeking_help' if positive else 'neither', 'post_purpose':'demand' if positive else 'information', 'author_role':'buyer' if positive else 'other','wants':'service' if positive else 'nothing',
-            'work_type':'other','work_mode':'unknown','demand_signal':'explicit_demand' if positive else 'none',
+            'work_type':'other','work_mode':'unknown',
+            'seeking_customers':False,'separate_buyer_need':positive,'demand_signal':'explicit_demand' if positive else 'none',
             'awareness':5 if positive else None,'confidence':.95,
             'reason':'Buyer asks for paid help.' if positive else 'Information without buyer demand.',
             'supporting_excerpts':[{'source_id':'current','quote':text}],**extra}
