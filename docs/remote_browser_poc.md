@@ -5,7 +5,15 @@ architecture is not viable.** Circle serves a Cloudflare "Verifying you are a
 human" interstitial to an automated browser. Getting past that would mean
 defeating an access control, so the PoC stops there by design.
 
-Run date: 2026-09-07. Code: `circle_leads/remote_browser/`.
+Run date: 2026-09-07. Historical experiment record.
+
+**Cleanup, 2026-10-21 (C05):** The dashboard rebuild had already removed the
+PoC HTTP routes. The unused `probe.py` and fresh-browser `replay.py` experiments
+and their PoC-only tests are now removed. The measured outcomes below remain
+as the experiment record; the implementation table describes the original PoC.
+`session.py` and its live `detect_challenge` consumer in `scraper/browser_reader.py`,
+`web/replay_store.py`, encrypted sessions, Playwright, CDP joins, the extension
+and connector contracts remain supported. This cleanup does not retire them.
 
 > **Superseded in part, 2026-09-25.** This PoC tested a *headless* browser. On
 > the DigitalOcean droplet the same Chromium binary was challenged on 3 of 3
@@ -112,19 +120,11 @@ no OAuth, no member personal-access token, and no "list my communities"
 endpoint — verified against the live OpenAPI specs, not just the prose docs.
 See `docs/circle_auth_investigation.md`.
 
-## Reproducing it
+## Reproduction status
 
-The remote browser is **opt-in and off by default**:
-
-```bash
-REMOTE_BROWSER_ENABLED=true            # required; otherwise every route 503s
-REMOTE_BROWSER_PROFILE=/data/profile   # a mounted volume, to survive redeploys
-```
-
-The image also needs Chromium (`playwright install --with-deps chromium`),
-which the default `Dockerfile` deliberately omits to stay small.
-
-Then: dashboard → **Remote Browser** → enter a host → **Run PoC (env)**. If a
-future Circle/Cloudflare policy change lets a server browser through, this
-returns `NEEDS_LOGIN` instead of `BLOCKED_BY_CHALLENGE`, and you can finish
-steps 4–6 with **Run PoC (signed in)**.
+The old dashboard PoC runner and `/api/remote-browser/*` routes no longer exist.
+The removed probe/replay implementations can be inspected in the parent history
+of the C05 cleanup commit. No new browser or replay measurement was performed
+for this cleanup; the historical headless result and later headed-browser
+qualification above are unchanged. Current join instructions are in
+[`joining.md`](joining.md).

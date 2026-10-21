@@ -1,5 +1,11 @@
 # Version B on Supabase (session replay experiment)
 
+**Historical experiment, retired 2026-10-21 (C05).** The dashboard rebuild
+removed `/api/replay/*`; cleanup removes the unused fresh-browser `replay.py`.
+The setup/flow below records the old experiment and is not a current runbook.
+The measured result remains `challenged`. Live encrypted cookie storage in
+`web/replay_store.py` and its extension, scanner and join consumers are retained.
+
 **What Version B is:** you export your Circle cookies from a browser where you're
 logged in, the backend stores them **encrypted**, and it replays them
 server-side to read your communities. It is built at your explicit request and

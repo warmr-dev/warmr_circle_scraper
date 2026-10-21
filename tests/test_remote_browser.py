@@ -1,4 +1,4 @@
-"""Server-hosted remote browser: challenge policy and the PoC report.
+"""Remote browser session: challenge policy and browser thread.
 
 No real browser and no network here. The point of these tests is the policy:
 a verification challenge must STOP the run and be reported, never retried or
@@ -10,10 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from circle_leads.remote_browser.probe import probe_authenticated, probe_environment
-from circle_leads.remote_browser.session import (
-    ChallengeDetected, SessionState, SessionStatus, detect_challenge,
-)
+from circle_leads.remote_browser.session import detect_challenge
 
 
 # --- challenge detection ---------------------------------------------------
@@ -41,117 +38,6 @@ def test_detect_challenge_is_case_insensitive_and_null_safe():
     # the wall is detected, which is the behaviour that matters.
     assert detect_challenge("", "hCaptcha widget") is not None
     assert detect_challenge(None, None) is None
-
-
-# --- the PoC report --------------------------------------------------------
-
-class _FakeBrowser:
-    """Stands in for RemoteBrowser; records what the probe asked it to do."""
-
-    def __init__(self, *, status, spaces=None, screenshot=b"PNGDATA",
-                 start_error=None, challenge_on_fetch=False):
-        self.profile_dir = "/tmp/profile"
-        self._status = status
-        self._spaces = spaces
-        self._screenshot = screenshot
-        self._start_error = start_error
-        self._challenge_on_fetch = challenge_on_fetch
-        self.navigations = 0
-
-    def start(self, host=None):
-        if self._start_error:
-            raise self._start_error
-        return self._status
-
-    def screenshot(self):
-        return self._screenshot
-
-    def navigate(self, host):
-        self.navigations += 1
-        return self._status
-
-    def refresh_status(self):
-        return self._status
-
-    def fetch_json(self, path):
-        if self._challenge_on_fetch:
-            raise ChallengeDetected("Circle responded with HTTP 429. Stopping.")
-        return {"records": self._spaces or []}
-
-
-def test_probe_reports_blocked_and_stops_when_circle_challenges():
-    st = SessionStatus(state=SessionState.CHALLENGED.value,
-                       detail="Circle presented a verification challenge (captcha).",
-                       challenge_url="https://x.circle.so/cdn-cgi/challenge")
-    browser = _FakeBrowser(status=st)
-    report = probe_environment(browser, "x.circle.so")
-
-    assert report.verdict == "BLOCKED_BY_CHALLENGE"
-    assert "no bypass is attempted" in report.summary.lower()
-    # It must not keep hammering the challenge page.
-    assert browser.navigations == 1
-
-
-def test_probe_reports_no_browser_when_playwright_missing():
-    from circle_leads.remote_browser.session import RemoteBrowserUnavailable
-
-    browser = _FakeBrowser(status=SessionStatus(),
-                           start_error=RemoteBrowserUnavailable("not installed"))
-    report = probe_environment(browser, "x.circle.so")
-    assert report.verdict == "NO_BROWSER"
-    assert any(not s.ok for s in report.steps)
-
-
-def test_probe_environment_passes_when_circle_serves_the_server_browser():
-    st = SessionStatus(state=SessionState.AWAITING_LOGIN.value,
-                       current_url="https://x.circle.so/", host="x.circle.so")
-    report = probe_environment(_FakeBrowser(status=st), "x.circle.so")
-    assert report.verdict == "NEEDS_LOGIN"
-    assert report.steps[0].ok is True          # Chromium started
-    assert report.steps[1].ok is True          # interactive view rendered
-
-
-def test_authenticated_probe_is_viable_when_it_reads_private_spaces():
-    st = SessionStatus(state=SessionState.AUTHENTICATED.value,
-                       member_label="Yer", host="x.circle.so")
-    browser = _FakeBrowser(status=st, spaces=[{"id": 1}, {"id": 2}, {"id": 3}])
-    report = probe_authenticated(browser, "x.circle.so")
-
-    assert report.verdict == "VIABLE"
-    assert "3 space(s)" in report.summary
-    assert all(s.ok for s in report.steps)
-
-
-def test_authenticated_probe_stops_if_challenged_during_reads():
-    st = SessionStatus(state=SessionState.AUTHENTICATED.value,
-                       member_label="Yer", host="x.circle.so")
-    browser = _FakeBrowser(status=st, challenge_on_fetch=True)
-    report = probe_authenticated(browser, "x.circle.so")
-    assert report.verdict == "BLOCKED_BY_CHALLENGE"
-
-
-def test_authenticated_probe_requires_a_login_first():
-    st = SessionStatus(state=SessionState.AWAITING_LOGIN.value, host="x.circle.so")
-    report = probe_authenticated(_FakeBrowser(status=st), "x.circle.so")
-    assert report.verdict == "NEEDS_LOGIN"
-
-
-def test_report_carries_no_credentials():
-    st = SessionStatus(state=SessionState.AUTHENTICATED.value,
-                       member_label="Yer", host="x.circle.so")
-    report = probe_authenticated(_FakeBrowser(status=st, spaces=[{"id": 1}]), "x.circle.so")
-    blob = repr(report.as_dict()).lower()
-    for banned in ("cookie", "password", "session_token", "set-cookie", "bearer"):
-        assert banned not in blob
-
-
-# The dashboard routes that used to be tested here (/api/remote-browser/*,
-# built by circle_leads/web/remote_browser_api.py) were removed outright: the
-# Remote Browser tab was explicitly labeled "proven non-working
-# (Cloudflare-blocked)... kept for the PoC record" and shipped hidden. The
-# underlying circle_leads/remote_browser/ package (challenge detection, the
-# PoC report, the browser thread) stays -- it's not dashboard-specific and
-# untouched by that cleanup -- so its unit tests below still apply.
 
 
 # --- the browser thread ----------------------------------------------------
