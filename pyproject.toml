@@ -9,7 +9,6 @@ dependencies = [
     "requests>=2.32",
     "pyyaml>=6.0",
     "click>=8.1",
-    "tenacity>=8.3",
     # Web dashboard (also listed under optional-dependencies.web so
     # `pip install -e '.[web]'` keeps working). Required at the top level so
     # Vercel's FastAPI builder installs FastAPI instead of only detecting it.

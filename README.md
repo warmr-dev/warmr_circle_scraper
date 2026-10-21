@@ -225,7 +225,7 @@ circle_leads/
 │   ├── app.py           the dashboard API (enqueues jobs; never scans inline)
 │   └── static/index.html the dashboard UI
 ├── cli/main.py          circle-leads … (dashboard, worker, harvest, run, export, …)
-└── remote_browser/      the measured-not-viable PoCs (server browser, cookie replay), off by default
+└── remote_browser/      session helpers; live challenge detection for browser_reader
 ```
 
 **Supabase tables:** `communities`, `spaces`, `authors`, `posts`, `leads`,

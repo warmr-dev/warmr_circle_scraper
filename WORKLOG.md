@@ -19,6 +19,13 @@
 
 ---
 
+## 2026-10-21 - C05: retire unused remote-browser experiments
+
+- **Что:** удалены только `remote_browser/probe.py`, `replay.py` и PoC-only tests; исторические результаты сохранены в `docs/remote_browser_poc.md` и `docs/replay_supabase.md`.
+- **Зачем:** HTTP routes экспериментов уже удалены; повторный поиск не выявил runtime/CLI consumers. Live session/challenge, encrypted store, browser reader, CDP, extension и connector сохранены.
+- **Результат:** локальная очистка для отдельного PR; merge/deploy/live replay не выполнялись.
+- **Кто:** warmr-dev + Codex.
+
 ## 2026-10-06 — Commercial demand policy and durable classification retry (local PR)
 
 - **Что:** единый evaluator для batch/triage; additive nullable JSON audit и
