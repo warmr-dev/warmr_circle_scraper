@@ -87,3 +87,30 @@ additional consistency requirement. The normal two-call correction bound stays.
 A final full-cohort single-attempt check is proposed within the remaining 27
 calls of the same 54-call approval. It will reuse the shared ledger; no extra
 budget, production decisions, exports, merge or deployment are authorized.
+
+
+## Completed 54-call approval and remaining acceptance gap
+
+The approval was consumed exactly, without another overrun:
+
+| Evaluated head | Inputs | Calls | Matches source review | Remaining failures |
+| --- | ---: | ---: | ---: | --- |
+| 9e0340f | 27 | 27 | 26 | One customer-discovery false positive |
+| b8c1275 | 27 | 27 | 25 | One gift-purchase false negative; one inconsistent supplier response |
+
+The second run intentionally allowed one attempt per input to stay within the
+remaining 27-call budget. It did not prove the normal corrective second attempt
+for the supplier error. Do not combine successes across these heads and claim a
+passing cohort. Both complete input/context hashes were verified; detailed
+private results retain source-review assessments and response diagnostics.
+
+The current candidate clarifies that organizational gift/budget exploration is
+buying research and includes a synthetic example. Supplier-only descriptions
+must use consistent supplier/none/offer fields. Corrective feedback now provides
+the error and invalid field names rather than repeating the previous incorrect
+intent labels; those labels remain available in local audit diagnostics. Full
+source/context and the original strict validator are preserved for both calls.
+
+A fresh full-cohort evaluation with the normal two-call bound requires a new
+explicit provider-call approval. No production decision has been written, no
+outbound export was made, and release acceptance remains blocked.

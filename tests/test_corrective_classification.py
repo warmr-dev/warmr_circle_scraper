@@ -231,3 +231,13 @@ def test_missing_current_evidence_diagnostic_keeps_context_quote_and_why_it_was_
     assert v.diagnostics[0]["rejected_excerpts"] == [
         {"source_id": "post:9", "quote": TEXT, "reason": "current_post_evidence_missing"}]
     assert not v.supporting_excerpts
+
+
+def test_corrective_context_does_not_anchor_on_previous_wrong_intent_labels():
+    backend=SequenceBackend(answer(TEXT,need_owner='none'),answer(TEXT))
+    verdict=classify_with_llm(TEXT,backend)
+    assert not verdict.error
+    correction=backend.calls[1][1]['correction']
+    assert correction['validation_error'] and correction['invalid_fields']
+    assert 'previous_description' not in correction and 'response_fields' not in correction
+    assert verdict.diagnostics[0]['response_fields']['need_owner']=='none'

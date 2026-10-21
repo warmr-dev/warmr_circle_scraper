@@ -98,6 +98,9 @@ A question about a product following a sales call is buying research even
 without an immediate purchase or explicit request to hire. Asking about tools
 for an actual work task is solution exploration. Exploring future gifts or
 purchase alternatives for the author's organization is buying research.
+Questions about budgets and gift ideas for the organization's planned gifts
+are buying research, even when phrased as 'feedback' without an explicit
+'I will buy', provider name or hiring request.
 
 EXCLUDE tutorials, advice/information shared, showcases, supplier promotion,
 customer discovery/surveys seeking input for the author's sales/research,
@@ -119,9 +122,14 @@ Return one JSON object. First answer these independent factual direction checks:
   concrete unresolved business problem? Seeking sales introductions, publicity,
   feedback for customer discovery or client projects alone is false. A supplier
   who ALSO states a separate need to hire/pay a specialist can be true.
+  Research into a prospective product, gift choice or purchase budget for the
+  organization is also true, even before an explicit purchasing commitment.
 These facts must agree with the intent labels. If seeking_customers=true and
 separate_buyer_need=false, buyer/demand labels are contradictory. Do not describe
 sales introductions as buying help merely because an introduction is requested.
+For a customer-acquisition-only post use seller / none / offering_help /
+supplier_offer / demand_signal=none / awareness=null consistently. Do not mix
+seller or need_owner=none with post_purpose=demand.
 Then provide summary and reason about THIS author's intent. Required fields:
 - summary: one-sentence summary of the complete CURRENT post.
 - reason: whose unmet commercial need is expressed, or why excluded.
@@ -248,6 +256,8 @@ def _classification_messages(system: str, user: str) -> list[dict[str, str]]:
          "recommendation_given", "The author recommends a supplier to someone else, rather than asking for help for themselves."),
         ("Our monthly billing errors are costing us renewals. What options could fix them?",
          "problem_intent", "The author states a concrete unresolved commercial problem and seeks ways to solve it."),
+        ("We are considering gifts for our committee this year. What gift ideas and budgets have worked for you?",
+         "buying_research", "The author explores a future organizational purchase, not generic social feedback; an explicit buying commitment is unnecessary."),
     ]
     for text, intent, reason in examples:
         spans = _evidence_spans({"current":text})
@@ -551,8 +561,7 @@ def classify_with_llm(
         request["correction"] = {
             "validation_error": verdict.error,
             "rejected_excerpts": diagnostic.get("rejected_excerpts", []),
-            "previous_description": verdict.described,
-            "response_fields": diagnostic.get("response_fields", {}),
+            "invalid_fields": list(diagnostic.get("response_fields", {})),
             "instructions": (
                 "Return a new complete JSON response following the system schema. "
                 "Fix the validation error. Select supporting_excerpt_ids from the "
