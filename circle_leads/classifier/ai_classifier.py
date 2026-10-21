@@ -145,6 +145,14 @@ Then provide summary and reason about THIS author's intent. Required fields:
 - need_owner: current_author | represented_buyer | other_people | none
 - hiring_scope: specialist_or_leadership | contract_or_external_service |
   generic_inhouse | not_hiring. Use not_hiring for non-hiring demand.
+  IN-HOUSE/PERMANENT describes employment mode, not hiring scope. A leadership
+  position (head/director/executive) or specialized professional function is
+  specialist_or_leadership even for a permanent internal employee, without an
+  explicit recruiter/staffing-service request. Such roles can create recruiting
+  demand. Generic_inhouse is limited to ordinary nonspecialist office staffing,
+  e.g. a receptionist doing general calls/visitors, with no specialist or
+  leadership function. Do not exclude marketing, research or other specialists
+  merely because they will join the company's own team.
 - service_direction: seeking_help | offering_help | neither | mixed
 - post_purpose: demand | mixed_demand | information | supplier_offer | social |
   career_advice | generic_inhouse_hiring | closed_need
@@ -272,21 +280,27 @@ def _classification_messages(system: str, user: str) -> list[dict[str, str]]:
          "solution_exploration", "The author researches a solution for an actual office-purchasing task; a paid tool or direct buying commitment is not required."),
         ("Here is my advice to readers: use the remaining quarter to finish projects, improve your website and plan next year. These are suggestions for you, not work I need done.",
          "information", "The author gives general motivational advice to readers, not an own unresolved business task or request for help."),
+        ("We are hiring a head of brand marketing and a senior data scientist for permanent in-house roles.",
+         "hiring_signal", "Leadership and specialist hiring qualify even for internal permanent employees; no staffing agency request is required."),
+        ("Our front office needs a receptionist to greet visitors and answer general telephone calls.",
+         "generic_inhouse_hiring", "This is ordinary nonspecialist office staffing, with no leadership, specialist function or external-service signal."),
     ]
     for text, intent, reason in examples:
         spans = _evidence_spans({"current":text})
         mixed = intent == "mixed_demand"
+        generic_hire = intent == "generic_inhouse_hiring"
+        hiring = intent == "hiring_signal" or generic_hire
         positive = intent in LEAD_RULE["demand_signal"] or mixed
         response = {"summary":text, "reason":reason,
                     "seeking_customers":intent=="supplier_offer" or mixed,
-                    "separate_buyer_need":positive,
-                    "author_role":"buyer" if positive else "seller" if intent=="supplier_offer" else "other",
-                    "need_owner":"current_author" if positive else "none",
-                    "service_direction":"mixed" if mixed else "seeking_help" if positive else "offering_help" if intent=="supplier_offer" else "neither",
+                    "separate_buyer_need":positive or generic_hire,
+                    "author_role":"buyer" if positive or generic_hire else "seller" if intent=="supplier_offer" else "other",
+                    "need_owner":"current_author" if positive or generic_hire else "none",
+                    "service_direction":"mixed" if mixed else "seeking_help" if positive or generic_hire else "offering_help" if intent=="supplier_offer" else "neither",
                     "post_purpose":"mixed_demand" if mixed else "demand" if positive else "information" if intent=="recommendation_given" else intent,
-                    "demand_signal":"explicit_demand" if mixed else intent if positive else "none",
-                    "hiring_scope":"contract_or_external_service" if mixed else "not_hiring",
-                    "wants":"service" if mixed else "nothing",
+                    "demand_signal":"explicit_demand" if mixed else "hiring_signal" if hiring else intent if positive else "none",
+                    "hiring_scope":"generic_inhouse" if generic_hire else "specialist_or_leadership" if hiring else "contract_or_external_service" if mixed else "not_hiring",
+                    "wants":"employee" if hiring else "service" if mixed else "nothing",
                     "work_type":"other", "work_mode":"unknown",
                     "awareness":3 if positive else None, "confidence":0.95,
                     "supporting_excerpt_ids":["E1"], "skills":[],

@@ -106,7 +106,8 @@ def test_few_shot_examples_validate_and_final_user_context_is_unchanged():
         result=ai._resolve_evidence(data,ai._evidence_spans({'current':text}))
         verdict=ai._validate_response(result,text,{'current':text},'fixture')
         assert not verdict.error
-        assert (verdict.classification=='LEAD') == (data['demand_signal'] in ai.LEAD_RULE['demand_signal'])
+        assert (verdict.classification=='LEAD') == (data['demand_signal'] in ai.LEAD_RULE['demand_signal']
+                                                    and data['hiring_scope']!='generic_inhouse')
 
 
 @pytest.mark.parametrize('route',['batch','triage'])

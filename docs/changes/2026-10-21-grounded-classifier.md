@@ -168,3 +168,14 @@ using the absence of direct buying/hiring as the exclusion reason for such a tas
 Synthetic office-tool research and audience-directed informational advice show
 both sides of the boundary. Separate buyer need also includes an explicitly
 represented buyer, consistent with the existing admission rule.
+
+
+## Specialist scope control
+
+The 5e9cf62 run matched the original 27 and 11/12 controls. The specialist and
+leadership hiring control was incorrectly tagged generic in-house. Scope wording
+now distinguishes employment mode from specialization: permanent internal
+leadership/professional roles qualify without an explicit staffing-agency request;
+ordinary nonspecialist office staffing stays excluded. Paired synthetic examples
+show both cases. This restores the reference policy rather than broadening its
+exclusions or accepting unsupported evidence.
