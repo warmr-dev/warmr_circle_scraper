@@ -152,7 +152,9 @@ Then provide summary and reason about THIS author's intent. Required fields:
 - confidence: number 0..1, reflecting your certainty.
 - supporting_excerpt_ids: nonempty list of evidence_id values from supplied
   evidence_spans. Select the CURRENT-post span best supporting the intent you
-  describe. A current span is REQUIRED for both positive and negative decisions.
+  describe. Choose the span containing the actual request/problem, recommendation
+  or supplier offer, not just a title or opening greeting. A current span is
+  REQUIRED for both positive and negative decisions.
   Context spans are optional additional support, never a substitute. Select IDs,
   do not rewrite quotes, repair spelling, add ellipses or invent an identifier.
   The application copies the selected exact original spans and verifies them.
@@ -258,6 +260,8 @@ def _classification_messages(system: str, user: str) -> list[dict[str, str]]:
          "problem_intent", "The author states a concrete unresolved commercial problem and seeks ways to solve it."),
         ("We are considering gifts for our committee this year. What gift ideas and budgets have worked for you?",
          "buying_research", "The author explores a future organizational purchase, not generic social feedback; an explicit buying commitment is unnecessary."),
+        ("An update from our team: we have been organizing our quarterly plans and getting to know colleagues in several offices. The last few weeks included routine meetings, project reviews, a planning workshop and a small team gathering. Thanks to everyone who shared their notes and resources after those sessions. Separately, we need a freelance webinar producer for our upcoming customer series.",
+         "explicit_demand", "The request at the end is the author's own need for an external specialist; the introductory update is context."),
     ]
     for text, intent, reason in examples:
         spans = _evidence_spans({"current":text})
@@ -273,7 +277,7 @@ def _classification_messages(system: str, user: str) -> list[dict[str, str]]:
                     "hiring_scope":"not_hiring", "wants":"nothing",
                     "work_type":"other", "work_mode":"unknown",
                     "awareness":3 if positive else None, "confidence":0.95,
-                    "supporting_excerpt_ids":["E1"], "skills":[],
+                    "supporting_excerpt_ids":[list(spans)[-1]], "skills":[],
                     **{key:None for key in ("job_title", "employment_type", "hire_target",
                                            "company", "budget", "location", "urgency")}}
         messages.extend([
@@ -445,8 +449,8 @@ def _evidence_spans(sources: dict[str, str]) -> dict[str, dict]:
     spans = {}
     for source_id, content in sources.items():
         words = list(re.finditer(r"\S+", content))
-        for offset in range(0, len(words), 12):
-            window = words[offset:offset + 12]
+        for offset in range(0, len(words), 48):
+            window = words[offset:offset + 48]
             start, end = window[0].start(), window[-1].end()
             evidence_id = f"E{len(spans) + 1}"
             spans[evidence_id] = {"evidence_id": evidence_id, "source_id": source_id,

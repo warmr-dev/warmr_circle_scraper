@@ -1,0 +1,18 @@
+{
+  "provenance": "Synthetic policy-derived paraphrases; no copied community posts or real authors. Expected labels follow the commercial-demand policy, not database statuses.",
+  "cases": [
+    {"case":"grounded-webflow", "text":"Can someone recommend a Webflow designer and developer for our company's new website?", "expected":true},
+    {"case":"grounded-product-consultant", "text":"We need a product-led growth consultant to improve onboarding and our product experience. Any recommendations?", "expected":true},
+    {"case":"grounded-specialist-leadership", "text":"We're hiring an experienced head of lifecycle marketing and a senior research analyst. Who should we talk to?", "expected":true},
+    {"case":"grounded-part-time-webinar", "text":"Looking for a freelancer, about ten hours a week, to run our webinar program.", "expected":true},
+    {"case":"grounded-videographer", "text":"Our booked camera operator cancelled. We need a videographer in Denver for tomorrow's customer event.", "expected":true},
+    {"case":"grounded-tutorial", "text":"Here's my tutorial for building an AI lead-generation workflow. I already built it: first connect a lead database, then generate outreach copy, then publish the campaign. These steps show how the finished workflow works.", "expected":false},
+    {"case":"grounded-generic-vacancy", "text":"Our local office is hiring an in-house receptionist to answer phones and greet visitors.", "expected":false},
+    {"case":"grounded-mixed-supplier-buyer", "text":"We offer marketing services and are looking for new clients. Separately, we need a freelance Webflow developer to rebuild our own website.", "expected":true},
+    {"case":"grounded-recommendation-given", "text":"You could try Bright Studio. Their editors did a great job for us.", "expected":false,
+      "context":[{"source_id":"root","content":"We need a freelance video editor for our company's product videos. Recommendations?","source_author_id":"other-synthetic-author"}]},
+    {"case":"grounded-customer-discovery", "text":"We have launched a safety platform for schools. Can anyone introduce us to potential customers so we can research their challenges?", "expected":false},
+    {"case":"grounded-future-gift-purchase", "text":"Our organization is exploring a different approach to board gifts next year. What ideas and budget ranges would you recommend?", "expected":true},
+    {"case":"grounded-conceptual-metric", "text":"In a hypothetical sponsored webinar, should a registered person who never attends count as influenced pipeline?", "expected":false}
+  ]
+}

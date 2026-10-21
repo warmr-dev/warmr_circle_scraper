@@ -16,6 +16,7 @@ import circle_leads.pipeline as batch
 import circle_leads.triage.pipeline as triage
 
 CASES=json.loads((Path(__file__).parent/'fixtures/commercial_demand.json').read_text())['cases']
+CASES += json.loads((Path(__file__).parent/'fixtures/grounded_boundary_paraphrases.json').read_text())['cases']
 PRIVATE = Path(__file__).parents[1]/'reports/commercial-demand/private/regressions.json'
 if PRIVATE.exists():
     CASES += [{**c, 'case':'source-'+c['case']} for c in json.loads(PRIVATE.read_text())['cases']]

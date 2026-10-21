@@ -12,7 +12,7 @@ review. Later development runs are diagnostics, not final cohort acceptance.
   attribution and strict validator are unchanged.
 - Offer source-addressed evidence spans alongside the complete original current
   post, available context and author metadata. Spans are contiguous windows of
-  up to 12 whitespace-delimited tokens, with original source, offsets and text.
+  up to 48 whitespace-delimited tokens, with original source, offsets and text.
   No spelling, case, punctuation or whitespace is corrected in these slices.
 - The model selects evidence IDs. Only explicitly selected known IDs resolve to
   exact original quotes. Unknown/missing IDs, contradictory literal quotes and
@@ -114,3 +114,18 @@ source/context and the original strict validator are preserved for both calls.
 A fresh full-cohort evaluation with the normal two-call bound requires a new
 explicit provider-call approval. No production decision has been written, no
 outbound export was made, and release acceptance remains blocked.
+
+
+## Supporting-evidence review
+
+The normal two-attempt run on 54b10b1 matched all 27 source-reviewed outcomes
+(three demand, 24 excluded) using 27 calls. Local recorded-verdict checks passed
+all 54 batch/triage routes, with three candidates per route and no outbound calls.
+This is frozen-cohort/local evidence, not production recovery or publication.
+
+Review found that the model often picked the first short source window, sometimes
+cutting a request before its object. Windows now hold up to 48 original tokens;
+instructions require the actual request/offer rather than only a heading, and a
+synthetic long-introduction example selects the final demand span. Source text,
+context, strict validation and admission criteria remain unchanged. The final
+candidate must be reevaluated before release acceptance is claimed.
