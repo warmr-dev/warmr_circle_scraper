@@ -1,5 +1,7 @@
 # Classification and monitoring follow-up
 
+> Historical incident/c529f32 results below. Final same-code acceptance is recorded in [the 39-case report](2026-10-21-validation-acceptance.md). Production deployment remains separate.
+
 ## Frozen validation cohort
 
 The 27 unresolved decisions at 2026-10-21 10:46:26 UTC are a finite cohort,
