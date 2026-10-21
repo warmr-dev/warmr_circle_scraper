@@ -3,6 +3,8 @@
 Repeated invalid model responses previously retried every hour without feedback
 or a terminal review state. Some posts accumulated hundreds of failed attempts.
 This change uses the existing provider and keeps all admission/evidence checks.
+The subsequent grounded-evidence response/prompt candidate is documented in
+`2026-10-21-grounded-classifier.md`; it has not passed final semantic acceptance.
 
 ## Behavior
 

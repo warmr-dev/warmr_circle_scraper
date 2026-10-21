@@ -186,7 +186,8 @@ def test_provider_errors_keep_durable_backoff_instead_of_review_hold(stored):
 
 def test_corrective_payload_respects_context_limit(monkeypatch):
     import circle_leads.classifier.ai_classifier as ai
-    original = json.dumps({"current_post": {"source_id": "current", "content": TEXT}, "context": []})
+    original = json.dumps({"current_post": {"source_id": "current", "content": TEXT}, "context": [],
+                           "evidence_spans": list(ai._evidence_spans({"current": TEXT}).values())})
     monkeypatch.setattr(ai, "MAX_CONTEXT_CHARS", len(original) + 10)
     backend = SequenceBackend(answer(TEXT, **BAD))
     v = classify_with_llm(TEXT, backend)
