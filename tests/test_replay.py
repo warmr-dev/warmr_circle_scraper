@@ -1,4 +1,4 @@
-"""Cookie parsing and the encrypted session store (circle_leads/web/replay_store.py).
+"""The encrypted session store (circle_leads/web/replay_store.py).
 
 No network and no real browser here. These lock down the security-relevant
 behaviour: sessions are stored only encrypted (or plainly, by explicit choice),
@@ -10,58 +10,21 @@ be tested here too; see the note further down.
 
 from __future__ import annotations
 
-import json
 import tempfile
 
 import pytest
 
-from circle_leads.remote_browser.replay import (
-    has_session_cookie, parse_cookies, _primary_host,
-)
-
-
+# Already-normalized fixture: the store contract does not depend on the retired
+# experiment's cookie parser.
 SAMPLE = [
     {"domain": "www.yourspinstate.com", "name": "_circle_session", "path": "/",
-     "secure": True, "httpOnly": True, "sameSite": "no_restriction",
-     "session": True, "value": "abc"},
+     "secure": True, "httpOnly": True, "sameSite": "None", "value": "abc"},
     {"domain": "www.yourspinstate.com", "name": "remember_user_token", "path": "/",
-     "secure": True, "httpOnly": True, "sameSite": "lax", "session": False,
-     "expirationDate": 1820322582.85, "value": "def"},
+     "secure": True, "httpOnly": True, "sameSite": "Lax",
+     "expires": 1820322582.85, "value": "def"},
     {"domain": ".yourspinstate.com", "name": "_ga", "path": "/",
-     "secure": False, "sameSite": "unspecified", "session": False,
-     "expirationDate": 1820322582.0, "value": "GA1.1"},
+     "secure": False, "httpOnly": False, "expires": 1820322582.0, "value": "GA1.1"},
 ]
-
-
-# --- parsing ---------------------------------------------------------------
-
-def test_parse_maps_samesite_and_expiry():
-    cookies = parse_cookies(json.dumps(SAMPLE))
-    by_name = {c["name"]: c for c in cookies}
-    assert by_name["_circle_session"]["sameSite"] == "None"
-    assert by_name["remember_user_token"]["sameSite"] == "Lax"
-    # session cookie has no expires; persistent one does
-    assert "expires" not in by_name["_circle_session"]
-    assert by_name["remember_user_token"]["expires"] == pytest.approx(1820322582.85)
-    # 'unspecified' sameSite is dropped rather than sent as a bad value
-    assert "sameSite" not in by_name["_ga"]
-
-
-def test_parse_rejects_non_arrays():
-    with pytest.raises(ValueError):
-        parse_cookies('{"not":"an array"}')
-    with pytest.raises(ValueError):
-        parse_cookies("[]")
-
-
-def test_has_session_cookie_detects_circle_session():
-    assert has_session_cookie(parse_cookies(json.dumps(SAMPLE))) is True
-    analytics_only = [c for c in SAMPLE if c["name"] == "_ga"]
-    assert has_session_cookie(parse_cookies(json.dumps(analytics_only))) is False
-
-
-def test_primary_host_from_session_cookie():
-    assert _primary_host(parse_cookies(json.dumps(SAMPLE))) == "www.yourspinstate.com"
 
 
 # --- encrypted store -------------------------------------------------------
@@ -76,7 +39,7 @@ def test_store_without_a_key_stores_plaintext(monkeypatch):
     monkeypatch.delenv("CIRCLE_CRED_KEY", raising=False)
     from circle_leads.web.replay_store import store_session, load_cookies
     db = _db()
-    cookies = parse_cookies(json.dumps(SAMPLE))
+    cookies = SAMPLE
     store_session(db, "x.circle.so", cookies)
     assert load_cookies(db, "x.circle.so") == cookies
 
@@ -91,7 +54,7 @@ def test_store_encrypts_and_round_trips(monkeypatch):
         load_cookies, store_session, list_sessions,
     )
     db = _db()
-    cookies = parse_cookies(json.dumps(SAMPLE))
+    cookies = SAMPLE
     store_session(db, "x.circle.so", cookies, member_label="Me")
 
     # The raw DB value must be ciphertext, not the cookie plaintext.
@@ -122,7 +85,7 @@ def test_plaintext_sessions_are_encrypted_in_place(monkeypatch):
     )
 
     db = _db()
-    cookies = parse_cookies(json.dumps(SAMPLE))
+    cookies = SAMPLE
     monkeypatch.delenv("CIRCLE_CRED_KEY", raising=False)
     store_session(db, "a.circle.so", cookies, member_label="4")
     store_session(db, "b.circle.so", cookies)
@@ -154,7 +117,7 @@ def test_a_refresh_that_names_no_account_keeps_the_one_on_record(monkeypatch):
     monkeypatch.delenv("CIRCLE_CRED_KEY", raising=False)
     from circle_leads.web.replay_store import store_session
     db = _db()
-    cookies = parse_cookies(json.dumps(SAMPLE))
+    cookies = SAMPLE
     store_session(db, "x.circle.so", cookies, member_label="test")
     store_session(db, "x.circle.so", cookies)
     assert _label(db, "x.circle.so") == "test"
@@ -170,9 +133,9 @@ def test_a_new_session_takes_the_account_the_community_was_joined_with(monkeypat
     with db.session() as s:
         c = get_or_create_community(s, slug="x", url="https://x.circle.so")
         c.host, c.join_account = "x.circle.so", "test"
-    store_session(db, "x.circle.so", parse_cookies(json.dumps(SAMPLE)))
+    store_session(db, "x.circle.so", SAMPLE)
     assert _label(db, "x.circle.so") == "test"
-    store_session(db, "y.circle.so", parse_cookies(json.dumps(SAMPLE)))
+    store_session(db, "y.circle.so", SAMPLE)
     assert _label(db, "y.circle.so") is None
 
 
