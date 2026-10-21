@@ -255,6 +255,10 @@ def _classification_messages(system: str, user: str) -> list[dict[str, str]]:
     They are examples in the same semantic call, never additional model calls.
     """
     messages = [{"role":"system", "content":system}]
+    if system != SYSTEM_PROMPT:
+        # This backend is also used by ICP, discovery queries and join forms.
+        # Their schemas must not receive opportunity-classification examples.
+        return messages + [{"role":"user", "content":user}]
     examples = [
         ("We sell safety software. Introduce me to school safety leaders so I can learn their challenges.",
          "supplier_offer", "The author seeks prospective customers for their product, not help they would buy."),

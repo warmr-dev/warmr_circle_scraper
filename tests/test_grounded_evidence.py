@@ -172,3 +172,12 @@ def test_supplier_with_distinct_buyer_need_still_qualifies():
                                                    separate_buyer_need=True,post_purpose='mixed_demand')))
     assert not verdict.error and verdict.classification=='LEAD'
     assert verdict.described['seeking_customers']=='true'
+
+
+@pytest.mark.parametrize('system',['Score community ICP relevance.',
+                                    'Expand search queries.',
+                                    'Extract form field values.'])
+def test_shared_backend_other_tasks_do_not_receive_classifier_examples(system):
+    user='Original unrelated task input'
+    assert ai._classification_messages(system,user)==[
+        {'role':'system','content':system},{'role':'user','content':user}]
