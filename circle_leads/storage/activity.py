@@ -24,12 +24,28 @@ _FORBIDDEN_DETAIL_KEYS = {
 }
 
 
+def _safe_diagnostics(value: Any, depth: int = 0) -> Any:
+    """Preserve bounded structured repair receipts instead of truncating JSON."""
+    if depth > 5:
+        return None
+    if isinstance(value, dict):
+        return {str(k)[:80]: _safe_diagnostics(v, depth + 1)
+                for k, v in list(value.items())[:32]
+                if str(k).lower() not in _FORBIDDEN_DETAIL_KEYS}
+    if isinstance(value, list):
+        return [_safe_diagnostics(v, depth + 1) for v in value[:10]]
+    return value[:500] if isinstance(value, str) else value
+
+
 def _safe_detail(detail: dict | None) -> dict:
     if not detail:
         return {}
     out: dict[str, Any] = {}
     for k, v in detail.items():
         if k.lower() in _FORBIDDEN_DETAIL_KEYS:
+            continue
+        if k == "diagnostics" and isinstance(v, list):
+            out[k] = _safe_diagnostics(v[:2])
             continue
         text = str(v)
         out[k] = text[:MAX_DETAIL_CHARS] if len(text) > MAX_DETAIL_CHARS else v

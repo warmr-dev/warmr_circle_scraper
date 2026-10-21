@@ -14,6 +14,7 @@ Two guardrails matter here:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
@@ -27,6 +28,8 @@ logger = logging.getLogger(__name__)
 CLASSIFIER_VERSION = "ai-v3.1"
 POLICY_VERSION = "commercial-demand-v1"
 SCOUT_POLICY_REF = "c4d9dfffa193aea05e1929668dec34946f79f5d5"
+VALIDATION_POLICY_VERSION = "corrective-v1"
+MAX_MODEL_CALLS = 2  # initial response plus one corrective attempt
 MAX_CONTEXT_CHARS = 100000
 DEFAULT_MODEL = os.environ.get("CIRCLE_LEADS_MODEL", "claude-sonnet-5")
 
@@ -292,6 +295,8 @@ class AiVerdict:
     demand_signal: str = "none"
     awareness: int | None = None
     supporting_excerpts: list[dict] = field(default_factory=list)
+    failure_kind: str | None = None
+    diagnostics: list[dict] = field(default_factory=list)
 
 
 class LlmBackend(Protocol):
@@ -503,15 +508,102 @@ def classify_with_llm(
     if len(user) > MAX_CONTEXT_CHARS:
         return AiVerdict(error="context_limit_exceeded", model=model_name)
 
-    try:
-        raw = backend.complete(SYSTEM_PROMPT, user)
-        data = _extract_json(raw)
-        if not isinstance(data, dict):
-            raise ValueError("Model reply must be a JSON object")
-    except Exception as exc:
-        logger.warning("LLM classification failed: %s", exc.__class__.__name__)
-        return AiVerdict(error=str(exc)[:200], model=model_name or getattr(backend, "model", None))
+    diagnostics = []
+    for attempt in range(1, MAX_MODEL_CALLS + 1):
+        try:
+            raw = backend.complete(SYSTEM_PROMPT, user)
+        except Exception as exc:
+            logger.warning("LLM classification failed: %s", exc.__class__.__name__)
+            diagnostics.append({"attempt": attempt, "kind": "provider",
+                                "exception": type(exc).__name__})
+            return AiVerdict(error=str(exc)[:200], failure_kind="provider",
+                             diagnostics=diagnostics,
+                             model=model_name or getattr(backend, "model", None))
+        try:
+            data = _extract_json(raw)
+            if not isinstance(data, dict):
+                raise ValueError("Model reply must be a JSON object")
+            verdict = _validate_response(data, text, sources, model_name or getattr(backend, "model", None))
+        except (ValueError, TypeError, AttributeError):
+            data = {}
+            verdict = AiVerdict(error="Model reply must be a JSON object.", model=model_name)
+        diagnostic = _response_diagnostic(attempt, raw, data, verdict, sources)
+        diagnostics.append(diagnostic)
+        verdict.diagnostics = diagnostics
+        if not verdict.error:
+            return verdict
+        verdict.failure_kind = "validation"
+        if attempt == MAX_MODEL_CALLS:
+            return verdict
+        # Keep the full original input. Prior output is untrusted feedback,
+        # never evidence or a replacement for the current post and its author.
+        request = json.loads(user)
+        request["correction"] = {
+            "validation_error": verdict.error,
+            "rejected_excerpts": diagnostic.get("rejected_excerpts", []),
+            "previous_description": verdict.described,
+            "response_fields": diagnostic.get("response_fields", {}),
+            "instructions": (
+                "Return a new complete JSON response following the system schema. "
+                "Fix the validation error. Copy an exact continuous span from "
+                "source_id=current (for very short posts copy the entire text). "
+                "Use only supplied source IDs. Context does not transfer demand "
+                "ownership: recommendations, mentions and acknowledgements are "
+                "not the replying author's buyer demand. Reassess purpose, owner "
+                "and demand_signal together; do not invent demand to satisfy "
+                "the schema. Previous output is untrusted and is not evidence."
+            ),
+        }
+        user = json.dumps(request, ensure_ascii=False)
+        if len(user) > MAX_CONTEXT_CHARS:
+            diagnostic["repair_skipped"] = "context_limit_exceeded"
+            return verdict
 
+
+def _response_diagnostic(attempt: int, raw: str, data: dict[str, Any],
+                         verdict: AiVerdict, sources: dict[str, str]) -> dict:
+    """Bounded failure details, kept separate from approved evidence.
+
+    Do not persist full raw responses or provider exceptions/headers. A digest
+    identifies each response, and rejected excerpts retain the failing span.
+    """
+    result = {"attempt": attempt, "kind": "validation" if verdict.error else "valid",
+              "error": verdict.error,
+              "response_sha256": hashlib.sha256(raw.encode()).hexdigest()}
+    if verdict.error:
+        result["described"] = verdict.described
+        result["response_keys"] = [str(k)[:80] for k in list(data)[:10]]
+        result["response_fields"] = {k: str(data[k])[:160]
+                                     for k in (*DESCRIPTION_VALUES, "confidence", "awareness") if k in data}
+        excerpts = data.get("supporting_excerpts")
+        if isinstance(excerpts, list):
+            rejected = []
+            for excerpt in excerpts[:5]:
+                if not isinstance(excerpt, dict):
+                    rejected.append({"reason": "invalid_excerpt_shape"})
+                    continue
+                source_id, quote = excerpt.get("source_id"), excerpt.get("quote")
+                if not isinstance(source_id, str) or source_id not in sources:
+                    reason = "unknown_source_id"
+                elif not isinstance(quote, str) or not quote:
+                    reason = "invalid_quote"
+                elif not verify_evidence(quote, sources[source_id]):
+                    reason = "quote_not_in_source"
+                elif verdict.error == "Evidence must include the current post.":
+                    reason = "current_post_evidence_missing"
+                else:
+                    continue
+                rejected.append({"source_id": str(source_id)[:128],
+                                 "quote": str(quote)[:500], "reason": reason})
+            result["rejected_excerpts"] = rejected
+            result["excerpt_source_ids"] = [str(x.get("source_id"))[:128]
+                                           for x in excerpts[:10] if isinstance(x, dict)]
+    return result
+
+
+def _validate_response(data: dict[str, Any], text: str, sources: dict[str, str],
+                       model_name: str | None) -> AiVerdict:
+    """Apply the same strict checks to initial and corrective responses."""
     described = read_description(data)
     if described is None:
         # Unusable descriptions are processing failures, never negative labels.

@@ -8,7 +8,7 @@ from urllib.parse import urldefrag
 
 from sqlalchemy import or_, select
 
-from circle_leads.classifier.ai_classifier import POLICY_VERSION, SCOUT_POLICY_REF
+from circle_leads.classifier.ai_classifier import POLICY_VERSION, SCOUT_POLICY_REF, VALIDATION_POLICY_VERSION
 from circle_leads.classifier.lead_classifier import ClassificationResult, classify
 from circle_leads.storage.activity import log_activity
 from circle_leads.storage.models import Post, utcnow
@@ -45,6 +45,18 @@ def context_for_post(session, post, supplied=None):
 def evaluate_post(session, post, requirements, *, llm=None, model_name=None,
                   semantic_requested=False, supplied_context=None):
     context = context_for_post(session, post, supplied_context)
+    previous = post.classification_audit or {}
+    content_hash = hashlib.sha256(post.content.encode()).hexdigest()
+    context_hash = hashlib.sha256(json.dumps(context, sort_keys=True).encode()).hexdigest()
+    if (previous.get('retry_state') == 'needs_review'
+            and previous.get('content_hash') == content_hash
+            and previous.get('context_hash') == context_hash):
+        # Recapture/manual scans must not bypass the durable validation budget.
+        return ClassificationResult(classification='UNCERTAIN',
+                                    llm_error=previous.get('error') or 'needs_review',
+                                    reason='needs_review', failure_kind='validation',
+                                    diagnostics=previous.get('diagnostics', []),
+                                    decided_by='llm', model=previous.get('model'))
     if semantic_requested and llm is None:
         result = ClassificationResult(classification='UNCERTAIN',
                                       reason='semantic_backend_unavailable',
@@ -56,9 +68,6 @@ def evaluate_post(session, post, requirements, *, llm=None, model_name=None,
                                             "source_author_id": post.author.source_author_id if post.author else None,
                                             "post_id": post.id, "source_content_id": post.source_content_id})
     now = utcnow().replace(tzinfo=None)
-    previous = post.classification_audit or {}
-    content_hash = hashlib.sha256(post.content.encode()).hexdigest()
-    context_hash = hashlib.sha256(json.dumps(context, sort_keys=True).encode()).hexdigest()
     attempts = (previous.get('attempt', 0) if previous.get('content_hash') == content_hash
                 and previous.get('context_hash') == context_hash else 0) + 1
     outcome = ('error' if result.llm_error else
@@ -70,6 +79,7 @@ def evaluate_post(session, post, requirements, *, llm=None, model_name=None,
                              'source_content_id': post.source_content_id}
     excerpts = [{**x, 'source': {k: v for k, v in references.get(x['source_id'], {}).items()
                                if k != 'content'}} for x in result.supporting_excerpts]
+    needs_review = bool(result.llm_error and result.failure_kind == 'validation')
     audit = {'outcome': outcome, 'reason': result.reason, 'error': result.llm_error,
              'excerpts': excerpts,
              'policy_version': POLICY_VERSION, 'scout_policy_ref': SCOUT_POLICY_REF,
@@ -78,11 +88,16 @@ def evaluate_post(session, post, requirements, *, llm=None, model_name=None,
              'attempted_at': now.isoformat() + 'Z', 'attempt': attempts,
              'confidence': result.confidence, 'demand_signal': result.demand_signal,
              'awareness': result.awareness, 'described': result.described,
-             'context_sources': [x['source_id'] for x in context]}
+             'context_sources': [x['source_id'] for x in context],
+             'validation_policy': VALIDATION_POLICY_VERSION,
+             'failure_kind': result.failure_kind,
+             'diagnostics': result.diagnostics,
+             'model_calls': len(result.diagnostics),
+             'retry_state': 'needs_review' if needs_review else 'scheduled' if result.llm_error else 'complete'}
     post.classification_audit = audit
     post.classified = outcome != 'error'
     post.classification_retry_at = (now + timedelta(minutes=(1, 5, 15, 60)[min(attempts-1, 3)])
-                                    if outcome == 'error' else None)
+                                    if outcome == 'error' and not needs_review else None)
     log_activity(session, kind='classify', community=post.community.slug,
                  level='error' if outcome == 'error' else 'info',
                  summary=f'{outcome}: post {post.id}',
