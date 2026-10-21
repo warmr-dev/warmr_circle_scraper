@@ -156,3 +156,15 @@ a negative or exported candidate. A complete synthetic mixed-role example now
 shows buyer ownership, mixed purpose/direction and the separate real hiring need.
 The admission rule and strict validator are unchanged; final acceptance requires
 both the original 27 and all 12 controls on this same candidate.
+
+
+## Work-task research control
+
+The d953a81 run matched 38/39 source/control labels. The office price-comparison
+question was incorrectly excluded for lacking direct purchase intent. The prompt
+now explicitly defines buyer role to include solution research for a concrete
+commercial task, including potentially free tools and unnamed options. It forbids
+using the absence of direct buying/hiring as the exclusion reason for such a task.
+Synthetic office-tool research and audience-directed informational advice show
+both sides of the boundary. Separate buyer need also includes an explicitly
+represented buyer, consistent with the existing admission rule.
