@@ -512,6 +512,20 @@ def _queue_stale(ctx: Ctx) -> list[dict]:
             for q in build_queues(ctx.s, ctx.now, named=named) if q["stale"]]
 
 
+def _classification_review(ctx: Ctx) -> list[dict]:
+    """Persistent holds must remain visible beyond the 24-hour log window."""
+    rows = ctx.s.scalars(select(Post).where(
+        Post.classified.is_(False),
+        Post.classification_audit["retry_state"].as_string() == "needs_review",
+    ).order_by(Post.id).limit(MAX_ITEMS)).all()
+    return [_item(f"classification:{p.id}",
+                  fingerprint((p.classification_audit or {}).get("content_hash"),
+                              (p.classification_audit or {}).get("context_hash")),
+                  f"Post {p.id}: classification needs review",
+                  detail=(p.classification_audit or {}).get("error"),
+                  link={"section": "log", "q": f"post {p.id}"}) for p in rows]
+
+
 def _log_problems(ctx: Ctx) -> list[dict]:
     """Warnings and errors of the last day that no other rule already covers,
     grouped by what they say."""
@@ -619,6 +633,10 @@ RULES: list[Rule] = [
     Rule("queue_stale", "warn", "Queue is not moving",
          "A day without movement while the queue is not empty: the stage is not running or has nothing to work on.",
          _queue_stale),
+    Rule("classification_review", "warn", "Classification needs review",
+         "Initial and corrective responses failed validation. Inspect the saved diagnostics; "
+         "automatic retries are stopped. Review before releasing this post for another attempt.",
+         _classification_review),
     Rule("log_problems", "info", "Log warnings in the last 24 h",
          "Grouped by text. Click to open these entries in the Log.",
          _log_problems),

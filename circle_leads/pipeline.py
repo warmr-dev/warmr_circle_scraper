@@ -24,7 +24,7 @@ from typing import Callable, Iterable
 from urllib.parse import urlparse
 
 import requests
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 
 from circle_leads.authentication.browser_session import (
     CIRCLE_BASE,
@@ -419,7 +419,10 @@ def classify_pending(
     with db.session() as s:
         # Select ids only: the ORM objects would be detached once this session
         # closes, and each post is re-loaded in its own transaction below.
-        query = select(Post.id).where(Post.classified.is_(False))
+        query = select(Post.id).where(
+            Post.classified.is_(False),
+            func.coalesce(Post.classification_audit["retry_state"].as_string(), "") != "needs_review",
+        )
         if retry_only:
             query = query.where(Post.classification_retry_at <= utcnow().replace(tzinfo=None)).order_by(
                 Post.classification_retry_at, Post.id)

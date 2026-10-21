@@ -110,10 +110,11 @@ def test_confidence_is_clamped():
 def test_mixed_keyword_signals_always_reach_the_model():
     """Seeker vocabulary and positive rule scores both receive semantic checks."""
     reqs = load_requirements()
-    backend = StubBackend({"classification": "LEAD", "confidence": 1.0, "reason": ""})
+    backend = StubBackend(described(author_role="job_seeker", evidence_quote="Open to work."))
     classify("Open to work.", reqs, llm=backend)
     assert backend.calls == 1
 
+    backend.payload = described(evidence_quote="We are hiring a Flutter developer for our team.")
     classify("We are hiring a Flutter developer for our team.", reqs, llm=backend)
     assert backend.calls == 2
 

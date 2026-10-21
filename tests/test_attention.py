@@ -399,3 +399,27 @@ def test_started_maintenance_lane_disappearing_is_visible(app):
         setting(s, "maintenance_recovery_heartbeat", (NOW-timedelta(hours=1)).isoformat())
     _clear_cache(app_)
     assert "maintenance_recovery" in _keys(client,"heartbeat")
+
+
+def test_classification_review_hold_survives_log_window_and_clears(app):
+    from circle_leads.storage.database import upsert_post
+    client, db, app_ = app
+    with db.session() as s:
+        c = community(s, "fixture")
+        p, _ = upsert_post(s, community_id=c.id,
+                           record={"source_content_id": "held", "content": "Need an agency"})
+        p.classification_audit = {"outcome": "error", "retry_state": "needs_review",
+                                  "error": "unverified_evidence", "content_hash": "a", "context_hash": "b"}
+        pid = p.id
+        # No recent ActivityLog is required for a held post to be visible.
+        p.scraped_at = NOW - timedelta(days=4)
+    _clear_cache(app_)
+    rule = _rules(client)["classification_review"]
+    assert rule["severity"] == "warn"
+    assert rule["items"][0]["key"] == f"classification:{pid}"
+    assert rule["items"][0]["detail"] == "unverified_evidence"
+    with db.session() as s:
+        from circle_leads.storage.models import Post
+        s.get(Post, pid).classified = True
+    _clear_cache(app_)
+    assert not _rules(client)["classification_review"]["items"]
