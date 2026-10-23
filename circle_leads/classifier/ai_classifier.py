@@ -349,6 +349,48 @@ class OpenAIBackend:
         return resp.choices[0].message.content or ""
 
 
+class DeepSeekBackend(OpenAIBackend):
+    """Independent DeepSeek credential; no gateway credential is reused."""
+    def __init__(self, model: str | None = None, max_tokens: int = 2000):
+        import openai
+        key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
+        if not key:
+            raise RuntimeError("DEEPSEEK_API_KEY is not set.")
+        self._client = openai.OpenAI(api_key=key, base_url="https://api.deepseek.com", timeout=45, max_retries=0)
+        self.model = model or os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash")
+        self.max_tokens = max_tokens
+
+    def complete(self, system: str, user: str) -> str:
+        response = self._client.chat.completions.create(model=self.model, max_tokens=self.max_tokens,
+            messages=_classification_messages(system, user), response_format={"type": "json_object"},
+            extra_body={"thinking": {"type": "disabled"}})
+        choice = response.choices[0]
+        if getattr(choice, "finish_reason", "stop") != "stop":
+            raise RuntimeError("Incomplete DeepSeek final response")
+        return choice.message.content or ""
+
+
+class ProviderChainBackend:
+    def __init__(self, backends):
+        self.backends = backends
+        self.model = getattr(backends[0], "model", None)
+        self.last_model = None
+
+    def complete(self, system: str, user: str) -> str:
+        for index, backend in enumerate(self.backends):
+            self.last_model = getattr(backend, "model", None)
+            try:
+                answer = backend.complete(system, user)
+                self.model = getattr(backend, "model", None)
+                return answer
+            except Exception as exc:
+                # Do not buy another inference after a timeout, 5xx, parser
+                # error or unknown outcome. Existing source retries own it.
+                if getattr(exc, "status_code", None) not in (401, 402, 403) or index == len(self.backends)-1:
+                    raise
+        raise RuntimeError("No active AI route")
+
+
 class OpenRouterBackend(OpenAIBackend):
     """Any model through OpenRouter's OpenAI-compatible API.
 
@@ -377,31 +419,34 @@ class OpenRouterBackend(OpenAIBackend):
 def make_backend() -> "LlmBackend | None":
     """Pick an available LLM backend, or None if no key is configured.
 
-    Preference: OpenAI, then Anthropic, then OpenRouter.
+    Preserve an explicitly configured primary, then independent DeepSeek and
+    OpenAI. Anthropic requires an explicit opt-in and is disabled by default.
     Override the provider with CIRCLE_LEADS_LLM=openai|anthropic|openrouter.
     """
     forced = os.environ.get("CIRCLE_LEADS_LLM", "").lower().strip()
+    if forced == "anthropic" and os.environ.get("AI_ANTHROPIC_ENABLED", "false") != "true":
+        raise RuntimeError("Anthropic is disabled by AI provider policy")
+    backends = []
+    factories = []
     if forced == "openrouter":
+        factories.append(OpenRouterBackend)  # retain the configured primary model
+    elif forced == "openai":
+        primary = os.environ.get("CIRCLE_LEADS_OPENAI_MODEL", "gpt-4o-mini")
+        factories.append(lambda: OpenRouterBackend(model=primary if primary.startswith("openai/") else f"openai/{primary}"))
+    elif forced == "anthropic":
+        factories.append(AnthropicBackend)
+    if os.environ.get("DEEPSEEK_API_KEY"):
+        factories.append(DeepSeekBackend)
+    if forced != "openai" and os.environ.get("OPENROUTER_API_KEY"):
+        factories.append(lambda: OpenRouterBackend(model=os.environ.get("AI_OPENAI_MODEL", "openai/gpt-5-mini")))
+    for factory in factories:
         try:
-            return OpenRouterBackend()
-        except RuntimeError:
-            return None
-    if forced == "openai" or (not forced and os.environ.get("OPENAI_API_KEY")):
-        try:
-            return OpenAIBackend()
-        except RuntimeError:
-            pass
-    if forced == "anthropic" or os.environ.get("ANTHROPIC_API_KEY"):
-        try:
-            return AnthropicBackend()
-        except RuntimeError:
-            pass
-    if not forced and os.environ.get("OPENROUTER_API_KEY"):
-        try:
-            return OpenRouterBackend()
+            backends.append(factory())
         except RuntimeError:
             pass
-    return None
+    if not backends:
+        return None
+    return backends[0] if len(backends) == 1 else ProviderChainBackend(backends)
 
 
 def _normalize(text: str) -> str:
@@ -568,19 +613,20 @@ def classify_with_llm(
                                 "exception": type(exc).__name__})
             return AiVerdict(error=str(exc)[:200], failure_kind="provider",
                              diagnostics=diagnostics,
-                             model=model_name or getattr(backend, "model", None))
+                             model=getattr(backend, "last_model", None) or model_name or getattr(backend, "model", None))
+        response_model = getattr(backend, "last_model", None) or model_name or getattr(backend, "model", None)
         data = {}
         try:
             data = _extract_json(raw)
             if not isinstance(data, dict):
                 raise ValueError("Model reply must be a JSON object")
             data = _resolve_evidence(data, spans)
-            verdict = _validate_response(data, text, sources, model_name or getattr(backend, "model", None))
+            verdict = _validate_response(data, text, sources, response_model)
             verdict = _validate_direction(data, verdict)
         except (ValueError, TypeError, AttributeError) as exc:
             if not isinstance(data, dict):
                 data = {}
-            verdict = AiVerdict(error=f"Invalid model response: {exc}"[:200], model=model_name)
+            verdict = AiVerdict(error=f"Invalid model response: {exc}"[:200], model=response_model)
         diagnostic = _response_diagnostic(attempt, raw, data, verdict, sources)
         diagnostics.append(diagnostic)
         verdict.diagnostics = diagnostics
