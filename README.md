@@ -262,6 +262,7 @@ pip install -e '.[dev]' && pytest        # 548 tests, offline (no network, no br
 
 ## Further reading
 
+- [`docs/community-intake.md`](docs/community-intake.md) — per-item Warmr intake confirmations, cache behavior, and the historical reconciliation boundary.
 - [`docs/circle_auth_investigation.md`](docs/circle_auth_investigation.md) — why there is no member API, and how `/internal_api` was verified.
 - [`docs/remote_browser_poc.md`](docs/remote_browser_poc.md) — the server-browser and cookie-replay approaches that were measured and rejected.
 - [`docs/replay_supabase.md`](docs/replay_supabase.md) — encrypted session storage on Supabase.

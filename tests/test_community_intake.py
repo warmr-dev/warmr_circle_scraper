@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from circle_leads.export.community_intake import (
     DEFAULT_INTAKE_URL,
+    IntakeBatchResult,
     SOURCE,
     collect_monitored_communities,
     load_community_intake_config,
@@ -72,6 +74,34 @@ def _seed(db: Database) -> None:
         ))
         s.add(_stored_session("private.circle.so"))
         s.add(_stored_session("paused.circle.so"))
+
+
+def _confirmed_post(items, **kwargs):
+    return IntakeBatchResult(confirmed_indices=list(range(len(items))))
+
+
+def _receipt(items, statuses=None):
+    statuses = statuses or ["candidate_created"] * len(items)
+    rows = []
+    for index, (item, status) in enumerate(zip(items, statuses)):
+        row = {"item_index": index, "status": status}
+        if status == "error":
+            row.update(code="invalid_payload", error="Invalid community slug")
+        else:
+            row.update(name=item["name"], candidate_id=f"00000000-0000-4000-8000-{index + 1:012d}")
+        rows.append(row)
+    return {
+        "ok": True, "received": len(items),
+        "accepted": statuses.count("candidate_created"),
+        "existing": statuses.count("existing"),
+        "rejected": statuses.count("error"), "results": rows,
+    }
+
+
+def _http_response(body, status=202):
+    response = MagicMock(status_code=status, text="", reason="Accepted")
+    response.json.return_value = body
+    return response
 
 
 # --- config --------------------------------------------------------------
@@ -169,7 +199,7 @@ def test_post_sends_secret_header():
 
     cfg = CommunityIntakeConfig(url="https://x.test/intake", api_secret="sekrit")
     fake = MagicMock()
-    fake.post.return_value = MagicMock(status_code=200, text="ok", reason="OK")
+    fake.post.return_value = _http_response(_receipt([{"name": "A"}]))
 
     post_communities([{"name": "A", "join_link": "https://a.circle.so"}],
                      config=cfg, session=fake)
@@ -208,7 +238,7 @@ def test_push_sends_then_caches(db, monkeypatch):
     _seed(db)
     monkeypatch.setenv("COMMUNITY_INTAKE_API_SECRET", "sekrit")
 
-    with patch("circle_leads.export.community_intake.post_communities") as mock_post:
+    with patch("circle_leads.export.community_intake.post_communities", side_effect=_confirmed_post) as mock_post:
         first = push_monitored_communities(db)
         assert first.sent == 3
         assert mock_post.call_count == 1
@@ -226,14 +256,14 @@ def test_push_sends_then_caches(db, monkeypatch):
 def test_push_resends_only_changed(db, monkeypatch):
     _seed(db)
     monkeypatch.setenv("COMMUNITY_INTAKE_API_SECRET", "sekrit")
-    with patch("circle_leads.export.community_intake.post_communities"):
+    with patch("circle_leads.export.community_intake.post_communities", side_effect=_confirmed_post):
         push_monitored_communities(db)
 
     with db.session() as s:
         c = s.query(Community).filter_by(slug="watched").one()
         c.price_label = "$150/mo"
 
-    with patch("circle_leads.export.community_intake.post_communities") as mock_post:
+    with patch("circle_leads.export.community_intake.post_communities", side_effect=_confirmed_post) as mock_post:
         res = push_monitored_communities(db)
         assert res.sent == 1
         assert mock_post.call_args.args[0][0]["slug"] == "watched"
@@ -243,9 +273,9 @@ def test_push_resends_only_changed(db, monkeypatch):
 def test_push_force_resends_all(db, monkeypatch):
     _seed(db)
     monkeypatch.setenv("COMMUNITY_INTAKE_API_SECRET", "sekrit")
-    with patch("circle_leads.export.community_intake.post_communities"):
+    with patch("circle_leads.export.community_intake.post_communities", side_effect=_confirmed_post):
         push_monitored_communities(db)
-    with patch("circle_leads.export.community_intake.post_communities") as mock_post:
+    with patch("circle_leads.export.community_intake.post_communities", side_effect=_confirmed_post) as mock_post:
         res = push_monitored_communities(db, force=True)
         assert res.sent == 3
         mock_post.assert_called_once()
@@ -260,7 +290,7 @@ def test_push_error_is_reported_not_raised(db, monkeypatch):
     assert res.sent == 0
     assert res.errors and "boom" in res.errors[0]
     # A failed push is not cached, so the next run retries.
-    with patch("circle_leads.export.community_intake.post_communities") as mock_post:
+    with patch("circle_leads.export.community_intake.post_communities", side_effect=_confirmed_post) as mock_post:
         push_monitored_communities(db)
         assert mock_post.call_count == 1
 
@@ -278,6 +308,188 @@ def test_harvest_registers_communities(db, dev_requirements, monkeypatch):
             return []
 
     monkeypatch.setattr(h, "PublicReader", EmptyReader)
-    with patch("circle_leads.export.community_intake.post_communities") as mock_post:
+    with patch("circle_leads.export.community_intake.post_communities", side_effect=_confirmed_post) as mock_post:
         h.harvest(db, dev_requirements, search=False)
     assert mock_post.called
+
+
+def test_mixed_receipt_caches_only_confirmed_items_and_retries_rejection(db, monkeypatch):
+    from circle_leads.storage.settings_store import get_setting
+
+    _seed(db)
+    monkeypatch.setenv("COMMUNITY_INTAKE_API_SECRET", "fixture")
+    http = MagicMock()
+
+    def mixed(url, *, json, **kwargs):
+        return _http_response(_receipt(json, ["candidate_created", "error", "existing"]))
+
+    http.post.side_effect = mixed
+    result = push_monitored_communities(db, session=http)
+    assert result.attempted == 3
+    assert result.sent == 2
+    assert len(result.errors) == 1
+    first_batch = http.post.call_args.kwargs["json"]
+    rejected_slug = first_batch[1]["slug"]
+    cache = json.loads(get_setting(db, "community_intake_state"))
+    assert len(cache) == 2
+    assert "community:" + rejected_slug not in cache
+
+    http.reset_mock()
+    http.post.side_effect = lambda url, *, json, **kw: _http_response(_receipt(json))
+    retry = push_monitored_communities(db, session=http)
+    assert retry.attempted == retry.sent == 1
+    assert retry.skipped == 2
+    assert not retry.errors
+    assert http.post.call_args.kwargs["json"][0]["slug"] == rejected_slug
+
+
+def test_202_all_rejected_is_not_sent_or_cached(db, monkeypatch):
+    from circle_leads.storage.settings_store import get_setting
+
+    _seed(db)
+    monkeypatch.setenv("COMMUNITY_INTAKE_API_SECRET", "fixture")
+    http = MagicMock()
+    http.post.side_effect = lambda url, *, json, **kw: _http_response(
+        _receipt(json, ["error"] * len(json)),
+    )
+    result = push_monitored_communities(db, session=http)
+    assert result.attempted == 3 and result.sent == 0
+    assert len(result.errors) == 3
+    assert get_setting(db, "community_intake_state") is None
+
+
+def test_forced_rejection_removes_old_fingerprints(db, monkeypatch):
+    from circle_leads.storage.settings_store import get_setting
+
+    _seed(db)
+    monkeypatch.setenv("COMMUNITY_INTAKE_API_SECRET", "fixture")
+    with patch("circle_leads.export.community_intake.post_communities", side_effect=_confirmed_post):
+        push_monitored_communities(db)
+    http = MagicMock()
+    http.post.side_effect = lambda url, *, json, **kw: _http_response(
+        _receipt(json, ["error"] * len(json)),
+    )
+    failed = push_monitored_communities(db, session=http, force=True)
+    assert failed.sent == 0
+    assert get_setting(db, "community_intake_state") == "{}"
+    http.reset_mock()
+    http.post.side_effect = lambda url, *, json, **kw: _http_response(_receipt(json))
+    retried = push_monitored_communities(db, session=http)
+    assert retried.sent == 3 and retried.skipped == 0
+
+
+@pytest.mark.parametrize("failure", [
+    "html", "not_object", "ok_false", "missing_result", "duplicate_index",
+    "out_of_range_index", "boolean_index", "unknown_status", "missing_candidate",
+    "invalid_candidate", "wrong_name", "bad_counts", "boolean_count", "status_counts",
+])
+def test_unverifiable_receipt_never_caches_batch(db, monkeypatch, failure):
+    from circle_leads.storage.settings_store import get_setting
+
+    _seed(db)
+    monkeypatch.setenv("COMMUNITY_INTAKE_API_SECRET", "fixture")
+    http = MagicMock()
+
+    def invalid(url, *, json, **kwargs):
+        body = _receipt(json)
+        response = _http_response(body)
+        row = body["results"][0]
+        if failure == "html":
+            response.json.side_effect = ValueError("not JSON")
+        elif failure == "not_object":
+            response.json.return_value = []
+        elif failure == "ok_false":
+            body["ok"] = False
+        elif failure == "missing_result":
+            body["results"].pop()
+        elif failure == "duplicate_index":
+            row["item_index"] = 1
+        elif failure == "out_of_range_index":
+            row["item_index"] = len(json)
+        elif failure == "boolean_index":
+            row["item_index"] = False
+        elif failure == "unknown_status":
+            row["status"] = "queued"
+        elif failure == "missing_candidate":
+            row.pop("candidate_id")
+        elif failure == "invalid_candidate":
+            row["candidate_id"] = "not-a-uuid"
+        elif failure == "wrong_name":
+            row["name"] = "Another community"
+        elif failure == "bad_counts":
+            body["received"] += 1
+        elif failure == "boolean_count":
+            body["rejected"] = False
+        elif failure == "status_counts":
+            body.update(accepted=2, existing=1)
+        return response
+
+    http.post.side_effect = invalid
+    result = push_monitored_communities(db, session=http)
+    assert result.attempted == 3 and result.sent == 0
+    assert result.errors
+    assert get_setting(db, "community_intake_state") is None
+
+
+def test_receipts_are_matched_by_index_and_normalized_name():
+    items = [{"name": "A & Co"}, {"name": "Second"}]
+    body = _receipt(items, ["existing", "candidate_created"])
+    body["results"][0]["name"] = "a-co"
+    body["results"].reverse()
+    http = MagicMock()
+    http.post.return_value = _http_response(body)
+    from circle_leads.export.community_intake import CommunityIntakeConfig
+
+    result = post_communities(items, config=CommunityIntakeConfig("https://x.test", "fixture"), session=http)
+    assert sorted(result.confirmed_indices) == [0, 1]
+    assert not result.errors
+
+
+def test_later_batch_failure_preserves_earlier_confirmations(db, monkeypatch):
+    from circle_leads.storage.settings_store import get_setting
+
+    with db.session() as s:
+        for i in range(12):
+            s.add(Community(
+                slug=f"batch-{i:02}", name=f"Community {i}",
+                url=f"https://batch-{i:02}.circle.so", platform="circle", watching=True,
+            ))
+    monkeypatch.setenv("COMMUNITY_INTAKE_API_SECRET", "fixture")
+    http = MagicMock()
+
+    def reply(url, *, json, **kwargs):
+        if len(json) == 10:
+            return _http_response(_receipt(json))
+        return _http_response({"ok": True})  # No per-item confirmation.
+
+    http.post.side_effect = reply
+    result = push_monitored_communities(db, session=http)
+    assert result.attempted == 12 and result.sent == 10
+    assert result.errors
+    assert len(json.loads(get_setting(db, "community_intake_state"))) == 10
+    http.reset_mock()
+    http.post.side_effect = lambda url, *, json, **kw: _http_response(_receipt(json))
+    retry = push_monitored_communities(db, session=http)
+    assert retry.attempted == retry.sent == 2
+    assert retry.skipped == 10
+    assert {r["slug"] for r in http.post.call_args.kwargs["json"]} == {"batch-10", "batch-11"}
+
+
+def test_harvest_activity_reports_confirmed_count_and_rejections(db, monkeypatch):
+    from circle_leads.harvest import _register_monitored_communities
+    from circle_leads.storage.models import ActivityLog
+
+    _seed(db)
+    monkeypatch.setenv("COMMUNITY_INTAKE_API_SECRET", "fixture")
+    http = MagicMock()
+    http.post.side_effect = lambda url, *, json, **kw: _http_response(
+        _receipt(json, ["candidate_created", "error", "existing"]),
+    )
+    with patch("circle_leads.export.community_intake.requests.Session", return_value=http):
+        _register_monitored_communities(db)
+    with db.session() as s:
+        activity = s.query(ActivityLog).filter_by(kind="export").one()
+        assert activity.level == "error"
+        assert activity.detail["sent"] == 2
+        assert activity.detail["attempted"] == 3
+        assert "Invalid community slug" in activity.detail["errors"]
