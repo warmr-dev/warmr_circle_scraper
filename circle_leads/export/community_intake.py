@@ -12,7 +12,7 @@ Configured via env (optional -- unset means the sync is a no-op):
 
 The endpoint accepts either a single community object or an array; this module
 sends an array (chunked) so a whole backfill is a few requests, not hundreds.
-Only communities whose payload changed since the last successful push are sent;
+Only communities whose payload changed since the last confirmed intake are sent;
 the per-community fingerprint cache lives in the DB ``settings`` table, so a
 steady-state run POSTs nothing.
 """
@@ -25,7 +25,8 @@ import logging
 import os
 import re
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, NoReturn
+from uuid import UUID
 
 import requests
 from sqlalchemy import or_, select
@@ -72,6 +73,12 @@ class IntakeResult:
     attempted: int = 0
     sent: int = 0
     skipped: int = 0
+    errors: list[str] = field(default_factory=list)
+
+
+@dataclass
+class IntakeBatchResult:
+    confirmed_indices: list[int] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
 
@@ -244,10 +251,14 @@ def post_communities(
     config: CommunityIntakeConfig | None = None,
     session: requests.Session | None = None,
     timeout: float = 60.0,
-) -> None:
-    """POST a non-empty community array. Raises on HTTP / network failure."""
+) -> IntakeBatchResult:
+    """Return per-item confirmations; HTTP success alone is not acceptance.
+
+    Malformed or incomplete receipts fail the entire batch closed. A complete
+    mixed receipt confirms only its accepted/existing candidates.
+    """
     if not items:
-        return
+        return IntakeBatchResult()
     cfg = config or load_community_intake_config()
     if not cfg.enabled:
         raise RuntimeError(
@@ -259,11 +270,74 @@ def post_communities(
     }
     http = session or requests.Session()
     response = http.post(cfg.url, json=items, headers=headers, timeout=timeout)
-    if response.status_code >= 400:
+    if not 200 <= response.status_code < 300:
         body = (response.text or "")[:500]
         raise RuntimeError(
             f"Community intake HTTP {response.status_code}: {body or response.reason}"
         )
+    try:
+        receipt = response.json()
+    except ValueError as exc:
+        raise RuntimeError("Community intake response is not valid JSON") from exc
+    return _validate_receipt(items, receipt)
+
+
+def _validate_receipt(
+    items: list[dict[str, Any]], receipt: Any,
+) -> IntakeBatchResult:
+    def invalid(reason: str) -> NoReturn:
+        raise RuntimeError(f"Invalid community intake receipt: {reason}")
+
+    if not isinstance(receipt, dict) or receipt.get("ok") is not True:
+        invalid("ok must be true")
+    counts = [receipt.get(k) for k in ("received", "accepted", "existing", "rejected")]
+    if any(type(n) is not int or n < 0 for n in counts):
+        invalid("missing or invalid batch counts")
+    received, accepted, existing, rejected = counts
+    if received != len(items) or accepted + existing + rejected != received:
+        invalid("batch counts do not match the request")
+    rows = receipt.get("results")
+    if not isinstance(rows, list) or len(rows) != received:
+        invalid("results must cover every requested item")
+
+    result = IntakeBatchResult()
+    seen: set[int] = set()
+    statuses = {"candidate_created": 0, "existing": 0, "error": 0}
+    for row in rows:
+        if not isinstance(row, dict):
+            invalid("result must be an object")
+        index = row.get("item_index")
+        if type(index) is not int or not 0 <= index < received or index in seen:
+            invalid("item_index must be unique and within the request")
+        seen.add(index)
+        status = row.get("status")
+        if not isinstance(status, str) or status not in statuses:
+            invalid("unknown item status")
+        statuses[status] += 1
+        if status == "error":
+            error = row.get("error")
+            message = error[:500] if isinstance(error, str) else "rejected"
+            result.errors.append(f"Community intake item {index}: {message}")
+            continue
+
+        candidate_id = row.get("candidate_id")
+        try:
+            if not isinstance(candidate_id, str):
+                raise ValueError("missing candidate ID")
+            UUID(candidate_id)
+        except ValueError:
+            invalid("confirmed item must contain a candidate UUID")
+        confirmed_name = row.get("name")
+        requested_name = items[index].get("name", "")
+        if not isinstance(confirmed_name, str) or re.sub(
+            r"[^a-z0-9]", "", confirmed_name.lower(),
+        ) != re.sub(r"[^a-z0-9]", "", requested_name.lower()):
+            invalid("confirmed name does not match the requested item")
+        result.confirmed_indices.append(index)
+
+    if [statuses[k] for k in ("candidate_created", "existing", "error")] != counts[1:]:
+        invalid("item statuses disagree with batch counts")
+    return result
 
 
 def push_monitored_communities(
@@ -309,17 +383,23 @@ def push_monitored_communities(
     for i in range(0, len(pending), CHUNK):
         batch = pending[i:i + CHUNK]
         batch_keys = pending_keys[i:i + CHUNK]
+        # A changed or explicitly forced payload needs a fresh confirmation.
+        # Do not retain an old fingerprint if this attempt is rejected/unknown.
+        for key in batch_keys:
+            new_state.pop(key, None)
         try:
-            post_communities(batch, config=cfg, session=http)
+            receipt = post_communities(batch, config=cfg, session=http)
         except Exception as exc:  # noqa: BLE001 - report per batch, keep going
             result.errors.append(str(exc))
             logger.exception(
                 "Failed to push %d community/ies to the portal", len(batch)
             )
             continue
-        for k in batch_keys:
+        for index in receipt.confirmed_indices:
+            k = batch_keys[index]
             new_state[k] = fingerprints[k]
-        result.sent += len(batch)
+        result.sent += len(receipt.confirmed_indices)
+        result.errors.extend(receipt.errors)
 
     # Forget communities that left the monitored set so the cache can't grow
     # forever and a re-added one re-syncs. (The portal is not told they left --
