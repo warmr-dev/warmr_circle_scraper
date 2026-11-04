@@ -35,6 +35,15 @@ from circle_leads.web.auth import (
 
 STATIC_DIR = Path(__file__).parent / "static"
 
+# Where the worker and the watcher actually run, as printed in the watchdog
+# alert. It lives in one place because the droplet has already been replaced
+# once: a hard-coded address in the alert text outlived the machine by weeks
+# and sent the operator to a host that was no longer theirs. Override it in
+# /etc/warmr/warmr.env or on Vercel, never by editing this default per site.
+DEPLOY_HOST_HINT = (
+    os.environ.get("CIRCLE_DEPLOY_HOST_HINT") or "157.230.181.187"
+).strip()
+
 
 def create_app(
     db_url: str | None = None,
@@ -698,7 +707,7 @@ def create_app(
             notify(
                 "Warmr: служба молчит",
                 "\n".join(stale) + "\n\nПроверить: <code>systemctl status warmr-worker "
-                "warmr-watcher</code> на 168.144.131.38",
+                f"warmr-watcher</code> на {DEPLOY_HOST_HINT}",
                 level="error",
                 # One message per hour per distinct problem, not one per cron tick.
                 dedup_key="watchdog:" + "|".join(sorted(stale)),

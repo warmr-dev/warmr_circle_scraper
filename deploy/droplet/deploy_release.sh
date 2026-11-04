@@ -26,7 +26,11 @@ git -C "$REPO" fetch --quiet origin
 SHA=$(git -C "$REPO" rev-parse --short=7 "$REF")
 echo "deploying $SHA: $(git -C "$REPO" log -1 --format=%s "$SHA")"
 
-git -C "$REPO" archive --format=tar "$SHA" | "${SSH[@]}" \
+# core.autocrlf=false is not cosmetic: on a Windows checkout autocrlf is on,
+# and git archive would then ship CRLF. systemd rejects unit files containing
+# CRLF and a shell script with CRLF dies on its interpreter line, so the
+# release would install "successfully" and then fail to start.
+git -C "$REPO" -c core.autocrlf=false archive --format=tar "$SHA" | "${SSH[@]}" \
   "install -d -o warmr -g warmr /opt/warmr/releases/$SHA && tar -x -C /opt/warmr/releases/$SHA && echo $SHA > /opt/warmr/releases/$SHA/COMMIT"
 
 "${SSH[@]}" bash -s -- "$SHA" <<'REMOTE'
