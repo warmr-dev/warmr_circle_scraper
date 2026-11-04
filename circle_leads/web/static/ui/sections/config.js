@@ -190,6 +190,9 @@ function stageResult(key, result) {
     return html`leads with a session: <b>${num(result.private_leads ?? 0)}</b> · from open spaces: <b>${num(result.public_leads ?? 0)}</b>
       <div class="muted">open communities read: ${num(result.communities_read ?? 0)} · new ones found: ${num(result.new_communities ?? 0)}${result.searched ? ' · discovery ran' : ''}</div>`;
   }
+  if (key === 'dynamite') {
+    return html`discussions <b>${num(result.rooms ?? 0)}</b> · posts <b>${num(result.records ?? 0)}</b> · leads <b>${num(result.leads ?? 0)}</b>`;
+  }
   return html`<code class="compact">${JSON.stringify(result)}</code>`;
 }
 

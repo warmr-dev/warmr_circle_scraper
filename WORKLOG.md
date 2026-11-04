@@ -19,6 +19,14 @@
 
 ---
 
+## 2026-11-04 — Сессия Dynamite Circle записана в settings
+
+- **Что:** в `settings.dynamite_circle_session` сохранена Firebase-сессия уже открытого браузера на dc.dynamitecircle.com. Проверка чтения Firestore вернула 3 обсуждения. Посты в пайплайн лидов этим прогоном не клались.
+- **Зачем:** этот хост не Circle (свой Firestore, проект dc-nav). Токен нельзя класть в `replay_sessions`, иначе вотчер отправит его как куки Circle.
+- **Результат:** сделано. Блоб пока с префиксом `plain:` — ключ шифрования на Vercel помечен sensitive и отсюда не прочитался. Первый запуск нового кода на дроплете, где `CIRCLE_CRED_KEY` уже есть, зашифрует блоб на месте. Постоянное чтение начнётся после деплоя этого кода в сервис communities.
+- **Кто:** warmr + агент
+- **Детали:** ключ настройки `dynamite_circle_session`, длина значения 307. Секрет в журнал не писался.
+
 ## 2026-10-21 - C05: retire unused remote-browser experiments
 
 - **Что:** удалены только `remote_browser/probe.py`, `replay.py` и PoC-only tests; исторические результаты сохранены в `docs/remote_browser_poc.md` и `docs/replay_supabase.md`.
