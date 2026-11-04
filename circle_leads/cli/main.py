@@ -1588,6 +1588,22 @@ def _run_community_maintenance(db, req, *, use_llm):
             f"  join-type schedule error: {exc.__class__.__name__}", err=True
         )
 
+    # dc.dynamitecircle.com is Firestore, not Circle. Its own two-hour read
+    # lives here so a long harvest cannot block it, and so the Circle watcher
+    # never sees the Firebase token (that token is not a cookie).
+    try:
+        from circle_leads.scraper.dynamite import run_scheduled as run_dynamite
+
+        with runtime.stage("dynamite"):
+            dyn = run_dynamite(db, req, use_llm=use_llm)
+        if dyn is not None:
+            click.echo(f"  dynamite circle: {dyn}")
+    except Exception as exc:  # noqa: BLE001
+        record_stage_error(db, "dynamite", exc)
+        click.echo(
+            f"  dynamite schedule error: {exc.__class__.__name__}", err=True
+        )
+
 
 
 @cli.command("worker")
@@ -1893,6 +1909,54 @@ def watch_cmd(ctx, fast_interval, slow_interval, quiet_days, per_page, use_llm, 
     )
     run_watch(db, tuning=tuning, use_llm=use_llm, once=once, stop=lambda: stopping["now"])
     click.echo("Watcher stopped.")
+
+
+@cli.command("dynamite-session")
+@click.pass_context
+def dynamite_session_cmd(ctx):
+    """Store the Dynamite Circle Firebase session from the environment.
+
+    Reads DYNAMITE_API_KEY and DYNAMITE_REFRESH_TOKEN. Nothing secret is taken
+    from the command line. Encrypted with CIRCLE_CRED_KEY when that is set,
+    the same way Circle session cookies are stored. The value goes to
+    settings, not to the Circle cookie store.
+    """
+    from circle_leads.scraper.dynamite import save_session
+
+    api_key = os.environ.get("DYNAMITE_API_KEY")
+    refresh = os.environ.get("DYNAMITE_REFRESH_TOKEN")
+    if not api_key or not refresh:
+        click.echo("Set DYNAMITE_API_KEY and DYNAMITE_REFRESH_TOKEN.", err=True)
+        ctx.exit(1)
+    save_session(ctx.obj["db"], api_key, refresh)
+    how = "encrypted" if os.environ.get("CIRCLE_CRED_KEY") else "plaintext"
+    click.echo(f"Dynamite Circle session stored ({how}).")
+
+
+@cli.command("dynamite-read")
+@click.option("--limit", type=int, default=25, show_default=True,
+              help="Discussions to read, newest activity first.")
+@click.option("--use-llm", is_flag=True, help="LLM-escalate ambiguous posts.")
+@click.option("--force", is_flag=True,
+              help="Read even if the last read was under 2 hours ago.")
+@click.pass_context
+def dynamite_read_cmd(ctx, limit, use_llm, force):
+    """Read Dynamite Circle discussions into the lead pipeline."""
+    from circle_leads.scraper.dynamite import run_scheduled
+
+    use_llm = use_llm or any(
+        os.environ.get(k) for k in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY")
+    )
+    result = run_scheduled(
+        ctx.obj["db"], ctx.obj["requirements"],
+        use_llm=use_llm, force=force, limit=limit,
+    )
+    if result is None:
+        click.echo("Nothing read (no session stored, or the last read was under 2 hours ago).")
+        return
+    click.echo(
+        f"discussions {result['rooms']}, posts {result['records']}, leads {result['leads']}"
+    )
 
 
 def main() -> None:

@@ -166,6 +166,7 @@ export const STAGE = {
   discovery: 'Finding new communities',
   icp_classification: 'ICP and enrichment',
   join_type: 'Join type check',
+  dynamite: 'Dynamite Circle',
 };
 
 // What each stage is for, now that the feed watcher reads new posts every 2
@@ -175,6 +176,7 @@ export const STAGE_NOTE = {
   discovery: 'Finds new communities; runs inside the cookie scan when it is due.',
   icp_classification: 'Fills in community details and decides whether a community is an ICP fit.',
   join_type: 'Finds out how to join: free, paid or invite only. Re-checks closed ICP-fit communities once a week.',
+  dynamite: 'Reads discussions on dc.dynamitecircle.com. That site is not Circle, so the cookie scan and the watcher do not cover it.',
 };
 
 export const JOB_STATE = { queued: 'queued', running: 'running', done: 'done', error: 'error' };

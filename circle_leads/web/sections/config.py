@@ -126,9 +126,9 @@ def build_runtime(s: Session, now: datetime) -> dict[str, Any]:
     keys = [
         *HEARTBEAT_LIMITS_S, "worker_runtime", "watcher_runtime", "enrichment_cursor_id",
         store.KEY_LAST_RUN, store.KEY_DISCOVERY_LAST_RUN, store.KEY_ICP_LAST_RUN,
-        store.KEY_JOIN_TYPE_LAST_RUN,
+        store.KEY_JOIN_TYPE_LAST_RUN, "dynamite_last_run",
         *[k for _, (k, *_rest) in SCHEDULES.items()],
-        *[f"{stage}_{suffix}" for stage in ("harvest", "icp_classification", "join_type")
+        *[f"{stage}_{suffix}" for stage in ("harvest", "icp_classification", "join_type", "dynamite")
           for suffix in ("last_finish", "last_error", "last_result")],
     ]
     vals = _settings(s, keys)
@@ -161,6 +161,9 @@ def build_runtime(s: Session, now: datetime) -> dict[str, Any]:
         }
 
     cursor = vals.get("enrichment_cursor_id") or (None, None)
+    dynamite_error = _json(value("dynamite_last_error"))
+    if isinstance(dynamite_error, dict) and dynamite_error.get("at"):
+        dynamite_error["at"] = _stamp(dynamite_error["at"])
     stages = {
         "harvest": stage("harvest", store.KEY_LAST_RUN),
         "discovery": {"schedule": value(store.KEY_DISCOVERY) or store.DEFAULT_DISCOVERY,
@@ -169,6 +172,15 @@ def build_runtime(s: Session, now: datetime) -> dict[str, Any]:
                                "enrichment_cursor": cursor[0],
                                "enrichment_moved_at": iso(cursor[1])},
         "join_type": stage("join_type", store.KEY_JOIN_TYPE_LAST_RUN),
+        # Not a SCHEDULES entry: the interval is fixed, and the dashboard
+        # must not offer an edit that the communities lane would ignore.
+        "dynamite": {
+            "schedule": "every 2 h",
+            "last_run": _stamp(value("dynamite_last_run")),
+            "last_finish": _stamp(value("dynamite_last_finish")),
+            "last_error": dynamite_error,
+            "last_result": _json(value("dynamite_last_result")),
+        },
     }
     jobs = [{
         "id": j.id, "kind": j.kind, "host": j.host, "state": j.state, "detail": j.detail,
