@@ -151,13 +151,14 @@ def test_llm_failure_remains_a_processing_error():
 # --- Backend selection (OpenAI / Anthropic) ---------------------------------
 
 
-def test_make_backend_prefers_openai(monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+def test_make_backend_uses_openai_through_openrouter(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
     monkeypatch.delenv("CIRCLE_LEADS_LLM", raising=False)
     from circle_leads.classifier.ai_classifier import make_backend
     b = make_backend()
     assert b is not None
-    assert b.name == "openai" if hasattr(b, "name") else b.__class__.__name__ == "OpenAIBackend"
+    assert b.__class__.__name__ == "OpenRouterBackend"
+    assert b.model == "openai/gpt-5-mini"
 
 
 def test_make_backend_none_without_keys(monkeypatch):
@@ -169,17 +170,19 @@ def test_make_backend_none_without_keys(monkeypatch):
 
 
 def test_forced_openai_selects_openai(monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
     monkeypatch.setenv("CIRCLE_LEADS_LLM", "openai")
     from circle_leads.classifier.ai_classifier import make_backend
     b = make_backend()
-    assert b.__class__.__name__ == "OpenAIBackend"
+    assert b.__class__.__name__ == "OpenRouterBackend"
+    assert b.model == "openai/gpt-4o-mini"
 
 
 def test_missing_provider_package_falls_through(monkeypatch):
     """Forcing a provider whose package/key is missing returns None, not a crash."""
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setenv("CIRCLE_LEADS_LLM", "anthropic")
+    monkeypatch.setenv("AI_ANTHROPIC_ENABLED", "true")
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     from circle_leads.classifier.ai_classifier import make_backend
     assert make_backend() is None

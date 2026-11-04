@@ -133,3 +133,24 @@ baseline. Local-only mode refuses stale-policy caches.
 Review every changed cohort decision, including excerpts and reviewer assessment,
 and separate provider errors from semantic changes before marking the PR ready.
 No merge, deployment, production schema application or replay is part of this PR.
+
+## AI reserve policy - 2026-10-23
+
+Keep explicitly configured primary models. After that primary, reserve order is
+independent direct DeepSeek (`DEEPSEEK_API_KEY`, Flash), then OpenAI through
+OpenRouter (`OPENROUTER_API_KEY`, `openai/gpt-5-mini`). If no primary is forced,
+start with those reserves. `CIRCLE_LEADS_LLM=openai` also uses OpenRouter rather
+than a direct OpenAI key. Anthropic remains available only when explicitly
+selected and `AI_ANTHROPIC_ENABLED=true`; its key alone never activates it.
+
+Only explicit HTTP 401/402/403 rejection advances. Timeout, rate limit, server
+failure and incomplete or malformed output retain existing source retry and
+grounded validation behavior. No new replay or source finalization is added.
+The saved verdict attributes the model actually used by the reserve. Existing
+45-second provider timeouts and SDK automatic-retry disabling remain in place;
+the chain does not claim a new single wall-clock budget.
+
+Source/tests only: no deployment or credential transfer is part of this change.
+Provision missing independent keys, review/merge, deploy through the existing
+workflow, then verify a natural source, durable verdict and delivery. Never
+claim a reserve works from key presence alone. Rollback uses the prior release.
