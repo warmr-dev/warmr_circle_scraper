@@ -41,9 +41,12 @@ separately from documentation errors.
 ## Review and verification limits
 
 Hosted Actions startup failures due to billing remain infrastructure gaps; no
-success was fabricated. CodeRabbit review of the common Warmr implementation was
-attempted repeatedly and remained rate-limited, including after the provider's
-cooldown. No paid credits used and no completed CodeRabbit review claimed.
+success was fabricated. CodeRabbit initially returned quota limits. After cooldown, review of Warmr
+head `97de5490e5864e487aba0e36f1af85fcd3710c0c` completed with 0 issues.
+The shared validator/publisher/merge code is byte-identical in all three repos;
+no separate Scout/Circle CodeRabbit submission was made. Their policy/compatibility
+changes passed local checks. No paid credits were used. Later receipt edits
+change documentation only; the reviewed code hashes remain unchanged.
 Warmr/Openclaw additionally has two unrelated broad contract warnings (missing
 local runtime config, existing Edge tests missing Deno env permissions) and its
 worktree audit stops on an unrelated invalid registry entry. These were preserved,
