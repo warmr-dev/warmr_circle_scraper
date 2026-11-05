@@ -35,3 +35,9 @@
 - Доступы в этой сессии: `railway` CLI (`warmr@rapidevelopers.com`), `vercel` CLI
   (`warmr-rd` / команда `warmr`), Supabase MCP, `gh` (`Erksh`). CLI живут в
   `~/.npm-global/bin/` — добавляй в `PATH` перед вызовом.
+
+## Repository PR workflow
+
+Follow root `AGENTS.md` and `docs/documentation-local-gate.md` for all PR work.
+The approved documentation-prepublication rollout authorizes its dedicated PR;
+other publishing continues to require the operator's instruction.

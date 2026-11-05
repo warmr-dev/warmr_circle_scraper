@@ -1,0 +1,13 @@
+{
+  "repository": "warmr-dev/warmr_circle_scraper",
+  "base": "main",
+  "canonical_files": [
+    "README.md"
+  ],
+  "canonical_prefixes": [
+    "docs/"
+  ],
+  "delivery_prefixes": [
+    "docs/changes/"
+  ]
+}
