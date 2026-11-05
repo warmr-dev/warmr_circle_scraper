@@ -14,19 +14,40 @@ separately from documentation errors.
 
 ## Verification
 
-Offline validator and PR workflow regression suite; real temporary Git repository
-proves a malformed body stops publication before push/GitHub. Existing documentation
-fixtures retained. Live publisher/status and branch protection readbacks are
-recorded in the PR's verification section after executing the rollout.
+- Existing documentation fixtures and 23 new offline workflow/validator tests passed.
+- A real temporary Git repository proved malformed publication stops before push/GitHub.
+- Shell syntax and final diff checks passed.
+- Guarded publisher created https://github.com/warmr-dev/warmr_circle_scraper/pull/61 at source
+  `971c0ce6e8573ab123748e27f04fd400cc598ac3`; `documentation-local` was posted and read back successfully.
+- `gh pr checks 61 --repo warmr-dev/warmr_circle_scraper --required` identified `documentation-local`
+  as required and passing. Strict base freshness and admin enforcement were
+  verified via branch protection API; force pushes/deletions remain prohibited.
+- Warmr protection was preserved. Scout/Circle protection was added only after
+  the respective publisher succeeded. No existing checks or reviews were removed.
+- PR body updates and merge dry-run are revalidated on the final PR head; see
+  current PR verification and immutable commit/status receipts.
 
 ## Delivery
 
-- Local: implemented in an isolated task worktree.
-- Committed / PR: pending at record creation; see immutable PR head and discussion.
-- Merged: not done; requires review and explicit decision.
-- Deployed/Applied: application runtime not required; GitHub protection tracked separately.
-- Live verified: pending publisher/status/protection readback.
-- Workspace closed: not done; preserve while PR remains open.
+- Local and committed: implemented as `warmr-dev <warmr@rapidevelopers.com>`.
+- PR: https://github.com/warmr-dev/warmr_circle_scraper/pull/61; remains open for review/decision.
+- Merged: not done; requires explicit exact-head operator decision.
+- Deployed/Applied: GitHub protection applied/read back; application deployment
+  and migrations not required and not performed.
+- Live verified: real GitHub publication, required status and protection readback
+  passed. This is tooling verification, not application production verification.
+- Workspace closed: not done; preserved while the PR remains open.
+
+## Review and verification limits
+
+Hosted Actions startup failures due to billing remain infrastructure gaps; no
+success was fabricated. CodeRabbit review of the common Warmr implementation was
+attempted repeatedly and remained rate-limited, including after the provider's
+cooldown. No paid credits used and no completed CodeRabbit review claimed.
+Warmr/Openclaw additionally has two unrelated broad contract warnings (missing
+local runtime config, existing Edge tests missing Deno env permissions) and its
+worktree audit stops on an unrelated invalid registry entry. These were preserved,
+not repaired or hidden by this tooling change. The required tooling tests passed.
 
 ## Rollback
 
