@@ -1,0 +1,37 @@
+name: Documentation gate
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: documentation-gate-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  documentation-impact:
+    name: documentation-gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Test documentation and PR workflow contracts
+        run: bash scripts/check-documentation-impact.test.sh && python3 -B scripts/pr_workflow_test.py
+      - name: Validate documentation impact
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          body_file="$(mktemp)"
+          printf '%s' "$PR_BODY" > "$body_file"
+          bash scripts/check-documentation-impact.sh \
+            --base "$BASE_SHA" \
+            --head "$HEAD_SHA" \
+            --pr-body-file "$body_file" \
+            --require-pr-body

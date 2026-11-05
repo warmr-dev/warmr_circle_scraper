@@ -1,3 +1,10 @@
+## 2026-11-05 - Documentation prepublication gate
+
+- What: add one local/CI validator, guarded PR publish/merge commands and agent rules.
+- Why: catch missing documentation before publication and require fresh validation before merge.
+- Result: PR #61 published through the guarded command; documentation-local required/pass, strict base freshness and admin enforcement applied and read back. Code remains unmerged. No application deployment or production-data change.
+- Who: warmr-dev, requested by Nikolai.
+
 # Рабочий журнал — Warmr Circle Scraper
 
 Журнал изменений инфраструктуры, деплоя, конфигурации, схемы БД и архитектурных
