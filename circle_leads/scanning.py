@@ -58,6 +58,16 @@ def _rescan_since(db: Database, host: str) -> _dt.datetime | None:
         return conn.last_sync_at - RESCAN_OVERLAP
 
 
+def _age_since(requirements: Requirements) -> _dt.datetime | None:
+    """The oldest post worth reading: ``max_post_age_days`` back from now, or
+    None when the cap is off (0). Older posts are dropped at triage anyway
+    (triage/pipeline.py), so reading them only costs requests."""
+    days = int(getattr(requirements, "max_post_age_days", 0) or 0)
+    if days <= 0:
+        return None
+    return _dt.datetime.utcnow() - _dt.timedelta(days=days)
+
+
 def scan_cookie_host(db: Database, requirements: Requirements, host: str, *,
                      max_pages: int = 5, time_budget: float | None = None,
                      fast_pause: bool = False, use_llm: bool = False,
@@ -88,7 +98,14 @@ def scan_cookie_host(db: Database, requirements: Requirements, host: str, *,
         cookies = {c["name"]: c["value"] for c in (load_cookies_strict(db, host) or [])}
     except SessionUnreadable as exc:
         cookies, unreadable = {}, exc
-    since = _rescan_since(db, host)
+    # Never read past the age cap. The 2026-09-10 decision (P15) was to cut
+    # old posts at reading on every path; the public harvest got it, this one
+    # did not, so every pass read up to 100 posts per space plus comments and
+    # threw the old ones away at triage. On 2026-11-06 that made one pass over
+    # the cookie communities take eight hours, asaporg alone almost four.
+    rescan = _rescan_since(db, host)
+    age_since = _age_since(requirements)
+    since = max((d for d in (rescan, age_since) if d is not None), default=None)
     state = ConnectionState.CONNECTED
     detail = ""
     total = readable = spaces_total = leads = 0
@@ -137,8 +154,11 @@ def scan_cookie_host(db: Database, requirements: Requirements, host: str, *,
             if total:
                 detail = (f"{total} post(s), {leads} lead(s) from "
                           f"{readable}/{spaces_total} space(s){suffix}")
-            elif since is not None:
+            elif rescan is not None:
                 detail = f"No new posts since the last read ({spaces_total} space(s) visible){suffix}."
+            elif since is not None:
+                detail = (f"No posts newer than {requirements.max_post_age_days} day(s) "
+                          f"({spaces_total} space(s) visible){suffix}.")
             else:
                 detail = f"No readable posts ({spaces_total} space(s) visible){suffix}."
     except SessionInvalid:
@@ -168,7 +188,8 @@ def scan_cookie_host(db: Database, requirements: Requirements, host: str, *,
         conn.state = state.value
         conn.state_detail = detail or None
         if since is not None and state == ConnectionState.CONNECTED:
-            # A re-read counts only the spaces with something new in them. Stored
+            # A re-read -- and a read held to the age cap -- counts only the
+            # spaces with something new in them. Stored
             # as is, a quiet day wrote 0, and _rescan_since took that for an
             # empty read, so every other pass re-read the whole archive:
             # entrepreneur-bootcamp 205 posts at 21:45, 0 at 03:41 (2026-09-29/30).

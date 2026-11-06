@@ -219,6 +219,15 @@ Set the harvest cadence in the dashboard's **Config** tab (stored in the DB). Th
 the dashboard without a worker, an external pinger can hit
 `GET /api/tick?token=<TICK_TOKEN>`, which enqueues a harvest job for the worker.
 
+**Max post age** (Config, `max_post_age_days`; `0` = no limit) bounds how deep
+every read goes, not only what gets filed: the public harvest and the cookie
+scans both stop paging at the first page with nothing newer, and comments are
+fetched only for posts inside the window. Older posts that slip through are
+dropped at triage. Vini refuses posts older than 48 hours, so `2` matches what
+can be delivered. A new comment under a post older than the cap is not read.
+The harvest runs inside the worker's loop: a queued *Scan now* waits until the
+running harvest ends.
+
 ---
 
 ## Repository layout
