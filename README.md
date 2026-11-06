@@ -155,8 +155,28 @@ Then in the dashboard → **Circle Connector** tab:
 2. **Add its session cookie** — log into that community in your browser, export
    its cookies, and paste the JSON (or the two values). Needs `_circle_session`
    and `user_session_identifier`. Stored encrypted if `CIRCLE_CRED_KEY` is set,
-   else plaintext.
+   else plaintext. Saving checks the cookies with Circle at once (one request
+   to `/internal_api/spaces`) and says what it found:
+   - **works** — the community shows as working, its old "needs
+     verification" leaves *Needs attention*, and a read is queued;
+   - **rejected** (401) — nothing is saved, the old session stays. Log in
+     to the community in the browser as a member and copy fresh cookies;
+   - **403** — saved, shown as access denied, and a read is queued: the check
+     runs from Vercel and the read from the droplet, so only the read tells a
+     refused address from a non-member;
+   - **no spaces** — accepted, but this account is probably not a member;
+   - **not checked** (network, Cloudflare) — saved, and the worker checks it on
+     the queued read.
+
+   The queued read waits behind a running harvest. After copying cookies, close
+   the tab instead of logging out: logging out kills the copied session too.
 3. **Scan now** — the worker reads it; leads appear on the **Leads** tab.
+
+Every service that reads sessions (dashboard, worker, watcher) needs the
+**same** `CIRCLE_CRED_KEY`. A service without it, or with another one, cannot
+open a session the dashboard encrypted; the read then reports a
+`CIRCLE_CRED_KEY` error on the community. (Before 2026-11-06 it reported the
+session as expired, so a re-paste could never fix it.)
 
 ---
 

@@ -498,9 +498,20 @@ def create_app(
             extracted automatically), or
           - ``session_cookie`` + ``user_session_identifier``: the two values
             pasted individually.
+
+        The cookies are checked with Circle before they are kept (one request,
+        scanning.verify_session). Cookies Circle answers 401 to are refused
+        with 422 and the stored session stays as it was; any other answer is
+        stored and put on the connection in place of the old cookie's verdict.
+        A read is queued when the session works, when the check got no clear
+        answer, and on a 403 -- the check runs from Vercel, the read from the
+        droplet, and only the read can tell an address refusal from a
+        non-member.
         """
         import json as _json
-        from circle_leads.web.replay_store import connect_host
+        from circle_leads import scanning
+        from circle_leads.storage.job_queue import enqueue
+        from circle_leads.web.replay_store import connect_host, record_result
         from circle_leads.scraper.member_api_reader import SESSION_COOKIE_NAMES
 
         host = _clean_host(host)
@@ -540,17 +551,30 @@ def create_app(
         # so the user can fix it, and the scan will report if the session is invalid.
         missing = [n for n in ("_circle_session", "user_session_identifier") if n not in got]
 
+        check = scanning.verify_session(host, got)
+        if check["verdict"] == "rejected":
+            hint = f" Missing: {', '.join(missing)}." if missing else ""
+            raise HTTPException(
+                422, f"Circle rejected these cookies for {host}, so they were not saved. "
+                "They come from a logged-out session or from another account. Log in "
+                f"to {host} in the browser as a member, then copy them again.{hint}")
+
         cookies = [{"domain": host, "name": n, "value": v, "path": "/",
                     "secure": True, "session": True} for n, v in got.items()]
         # connect_host() stores the cookie AND auto-creates the CircleConnection
         # row if this is a brand-new host, so pasting a cookie is the ONLY step
         # needed -- no separate "Add community" first.
         connect_host(db, host, cookies)
+        record_result(db, host, check["verdict"], check["detail"])
+        scanning.apply_session_check(db, host, check)
+        queued = None
+        if check["verdict"] in ("valid", "unverified", "forbidden"):
+            queued = enqueue(db, "scan", host=host, priority=0)
 
         log_activity_holder(kind="review", community=host.split(".")[0],
-                            summary=f"Session cookies stored for {host}")
+                            summary=f"Session cookies stored for {host}: {check['detail']}")
         return {"ok": True, "host": host, "cookies": len(cookies),
-                "missing": missing}
+                "missing": missing, "check": check, "scan_job": queued}
 
     @app.post("/api/connections/{host}/scan")
     def scan_connection_http(

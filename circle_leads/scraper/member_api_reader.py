@@ -48,7 +48,15 @@ SESSION_COOKIE_NAMES = ("_circle_session", "remember_user_token", "user_session_
 
 
 class SessionInvalid(RuntimeError):
-    """The session cookie is missing/expired -- Circle returned 401/403."""
+    """The session cookie is missing/expired -- Circle returned 401/403.
+
+    ``status`` keeps which: 401 is Circle saying "not logged in"; a 403 can
+    also be a refusal of the caller's address, so it is not proof the cookie
+    is dead."""
+
+    def __init__(self, message: str = "", status: int | None = None):
+        super().__init__(message)
+        self.status = status
 
 
 class ChallengeHit(RuntimeError):
@@ -71,6 +79,7 @@ class MemberApiReader:
     host: str
     cookies: dict          # {"_circle_session": "...", ...}
     request_pause: float = 0.7
+    timeout: float = 30.0
     _http: requests.Session = field(default=None, repr=False)
 
     def __post_init__(self):
@@ -89,7 +98,7 @@ class MemberApiReader:
     # --- low level --------------------------------------------------------
 
     def _get(self, path: str) -> dict | list | None:
-        r = self._http.get(self.base + path, timeout=30, allow_redirects=False)
+        r = self._http.get(self.base + path, timeout=self.timeout, allow_redirects=False)
         # A challenge would be HTML with cf markers; the API returns JSON.
         ctype = r.headers.get("content-type", "")
         if "application/json" not in ctype:
@@ -102,7 +111,8 @@ class MemberApiReader:
         if r.status_code in (401, 403):
             raise SessionInvalid(
                 f"Circle rejected the session on {path} ({r.status_code}). "
-                "The cookie is missing or expired -- re-authenticate."
+                "The cookie is missing or expired -- re-authenticate.",
+                status=r.status_code,
             )
         if r.status_code == 400:
             try:
@@ -135,7 +145,14 @@ class MemberApiReader:
 
     def list_spaces(self) -> list[dict]:
         """Spaces this member can access."""
+        return self.probe_spaces() or []
+
+    def probe_spaces(self) -> list[dict] | None:
+        """Spaces this member can access, or None when Circle gave no JSON
+        answer at all (an SPA shell, a 5xx) -- which is not "no spaces"."""
         payload = self._get("/internal_api/spaces")
+        if payload is None:
+            return None
         records = (payload.get("records") if isinstance(payload, dict) else payload) or []
         out = []
         for sp in records:

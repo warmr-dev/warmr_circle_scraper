@@ -44,6 +44,20 @@ function sessionForm(host) {
     </form>`;
 }
 
+// What Circle said about the cookies just saved (a rejected paste never gets
+// here: the server refuses it with the reason, shown as an error toast).
+function sessionVerdict(res) {
+  const check = res.check || {};
+  const missing = res.missing?.length ? ` Missing: ${res.missing.join(', ')}.` : '';
+  switch (check.verdict) {
+    case 'valid': return [`Session works: ${check.detail} A read is queued.${missing}`, missing ? 'warn' : 'ok'];
+    case 'no_spaces': return [`Saved, but ${check.detail}`, 'warn'];
+    case 'forbidden': return [`Saved, but ${check.detail}`, 'warn'];
+    case 'profile_incomplete': return ['Saved, but the new-member profile step is still open on the community: finish it there.', 'warn'];
+    default: return [`Saved, not checked yet: ${check.detail || 'no answer'}${missing}`, 'warn'];
+  }
+}
+
 // Which of our accounts is the member: the one whose cookies can be
 // refreshed here. Free text, with the join bot's own keys suggested.
 function accountForm(account, sessionLabel) {
@@ -189,7 +203,8 @@ function wireCommunity(body, d, id) {
     const payload = Object.fromEntries([...form.entries()].filter(([, v]) => String(v).trim()));
     try {
       const res = await api(`/api/connections/${encodeURIComponent(host)}/session`, { method: 'POST', body: payload });
-      toast(res.missing?.length ? `Saved, but missing: ${res.missing.join(', ')}` : 'Session saved', res.missing?.length ? 'warn' : 'ok');
+      const [text, tone] = sessionVerdict(res);
+      toast(text, tone);
       reload();
     } catch (err) { toast(err.message, 'error'); }
   });
