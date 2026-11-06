@@ -39,3 +39,13 @@ def dev_requirements() -> Requirements:
     # Requirements (e.g. set target_roles), so a shared session/module instance
     # would leak that mutation into later tests. Loading is cheap.
     return load_dev_requirements()
+
+
+@pytest.fixture(autouse=True)
+def _no_live_session_check(monkeypatch):
+    """Saving a session asks Circle whether it works (scanning.verify_session).
+    No test may reach the network for that; tests of the check itself import
+    the real function before this replaces the module attribute."""
+    from circle_leads import scanning
+    monkeypatch.setattr(scanning, "verify_session", lambda host, cookies, **kw: {
+        "verdict": "unverified", "spaces": 0, "detail": "not checked in tests"})

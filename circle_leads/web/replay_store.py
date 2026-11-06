@@ -33,6 +33,13 @@ class ReplayKeyMissing(RuntimeError):
     Storing never raises it: without a key a session is stored as plaintext."""
 
 
+class SessionUnreadable(RuntimeError):
+    """A session is stored for the host, but this process cannot decrypt it:
+    no CIRCLE_CRED_KEY here, or a different one from the service that saved
+    it. Read as "no cookies", that sent an empty request to Circle and
+    reported the session expired -- while the cookie itself was fine."""
+
+
 def _key() -> str | None:
     return os.environ.get("CIRCLE_CRED_KEY") or None
 
@@ -151,6 +158,29 @@ def load_cookies(db: Database, host: str) -> list[dict] | None:
             return None
         blob = row.encrypted_cookies
     return _deserialize(blob)
+
+
+def load_cookies_strict(db: Database, host: str) -> list[dict] | None:
+    """Like :func:`load_cookies`, but a stored session this process cannot
+    decrypt raises :class:`SessionUnreadable` instead of reading as empty."""
+    with db.session() as s:
+        row = s.scalar(select(ReplaySession).where(ReplaySession.host == host))
+        if row is None:
+            return None
+        blob = row.encrypted_cookies
+    if blob.startswith(_PLAINTEXT_PREFIX):
+        return json.loads(blob[len(_PLAINTEXT_PREFIX):])
+    key = _key()
+    if not key:
+        raise SessionUnreadable(
+            f"The session stored for {host} is encrypted, but CIRCLE_CRED_KEY is not "
+            "set on this server -- set the same key the dashboard uses.")
+    try:
+        return json.loads(decrypt(blob, key))
+    except Exception as exc:  # noqa: BLE001 - a wrong key fails as InvalidTag
+        raise SessionUnreadable(
+            f"The session stored for {host} cannot be decrypted here: CIRCLE_CRED_KEY "
+            "on this server differs from the dashboard's.") from exc
 
 
 def record_result(db: Database, host: str, result: str, detail: str) -> None:

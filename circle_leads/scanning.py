@@ -67,7 +67,7 @@ def scan_cookie_host(db: Database, requirements: Requirements, host: str, *,
     Returns a summary and updates the connection state. ``time_budget`` (s)
     stops early and flags the run ``partial``.
     """
-    from circle_leads.web.replay_store import load_cookies
+    from circle_leads.web.replay_store import SessionUnreadable, load_cookies_strict
     from circle_leads.scraper.member_api_reader import (
         MemberApiReader, SessionInvalid, ChallengeHit, ProfileIncomplete, fetch_space_posts,
     )
@@ -83,13 +83,19 @@ def scan_cookie_host(db: Database, requirements: Requirements, host: str, *,
     # get_or_create_community matches on `slug OR url`, a shared slug merges two
     # unrelated communities onto one row and discards the second URL -- silently.
     slug = unique_slug_for_host(host)
-    cookies = {c["name"]: c["value"] for c in (load_cookies(db, host) or [])}
+    unreadable: SessionUnreadable | None = None
+    try:
+        cookies = {c["name"]: c["value"] for c in (load_cookies_strict(db, host) or [])}
+    except SessionUnreadable as exc:
+        cookies, unreadable = {}, exc
     since = _rescan_since(db, host)
     state = ConnectionState.CONNECTED
     detail = ""
     total = readable = spaces_total = leads = 0
     partial = False
     try:
+        if unreadable is not None:
+            raise unreadable
         # 1.2s between requests keeps a scan at <= ~50/min: Circle limits
         # per IP (~100/min got every host 429'd), and on the Mac the worker
         # shares that IP with enrichment and join runs.
@@ -138,6 +144,10 @@ def scan_cookie_host(db: Database, requirements: Requirements, host: str, *,
     except SessionInvalid:
         state = ConnectionState.SESSION_EXPIRED
         detail = "Session rejected -- refresh the cookie."
+    except SessionUnreadable as exc:
+        # Not an expired cookie: a fresh paste would fail the same way.
+        state = ConnectionState.ERROR
+        detail = str(exc)
     except ChallengeHit as exc:
         state = ConnectionState.ERROR
         detail = str(exc)
@@ -187,3 +197,96 @@ def scan_cookie_host(db: Database, requirements: Requirements, host: str, *,
     return {"host": host, "state": state.value, "posts": total,
             "spaces_readable": readable, "leads": leads, "detail": detail,
             "partial": partial}
+
+
+# --- checking a session the moment it is saved ---------------------------------
+
+def verify_session(host: str, cookies: dict[str, str], *,
+                   timeout: float = 15.0) -> dict[str, Any]:
+    """Ask Circle once whether these cookies read ``host``.
+
+    One GET of /internal_api/spaces, the call every scan opens with. A pasted
+    session used to be stored on faith: the community kept its old "session
+    expired" until the worker's next read -- hours away behind a long harvest --
+    so the person pasting saw nothing change and could not tell a good cookie
+    from a bad one (2026-11-06).
+
+    ``verdict``: "valid" (Circle lists spaces), "no_spaces" (accepted, but
+    nothing visible: probably not a member), "rejected" (401: not logged in),
+    "forbidden" (403: not a member, or this address refused -- the check runs
+    from Vercel, the reads from the droplet), "profile_incomplete", or
+    "unverified" (no clear answer from here). Cookie values never appear in
+    the result.
+    """
+    from circle_leads.scraper.member_api_reader import (
+        ChallengeHit, MemberApiReader, ProfileIncomplete, SessionInvalid,
+    )
+    reader = MemberApiReader(host, cookies=cookies, request_pause=0, timeout=timeout)
+    try:
+        spaces = reader.probe_spaces()
+    except SessionInvalid as exc:
+        if exc.status == 403:
+            return {"verdict": "forbidden", "spaces": 0,
+                    "detail": ("Circle answered 403 to the check from the dashboard: this "
+                               "account may not be a member, or the dashboard's address is "
+                               "refused. The worker will try it from the server.")}
+        return {"verdict": "rejected", "spaces": 0, "detail": str(exc)}
+    except ProfileIncomplete as exc:
+        return {"verdict": "profile_incomplete", "spaces": 0, "detail": str(exc)}
+    except ChallengeHit:
+        return {"verdict": "unverified", "spaces": 0,
+                "detail": "Cloudflare challenged the check from the dashboard."}
+    except Exception as exc:  # noqa: BLE001 - network trouble is not a verdict
+        return {"verdict": "unverified", "spaces": 0,
+                "detail": f"Could not reach {host}: {exc.__class__.__name__}."}
+    if spaces is None:
+        return {"verdict": "unverified", "spaces": 0,
+                "detail": "Circle answered without JSON; the worker will check it."}
+    if not spaces:
+        return {"verdict": "no_spaces", "spaces": 0,
+                "detail": (f"Circle accepted the session but shows it no spaces: this "
+                           f"account is probably not a member of {host}.")}
+    return {"verdict": "valid", "spaces": len(spaces),
+            "detail": f"Circle lists {len(spaces)} space(s) for this session."}
+
+
+_CHECK_STATE = {
+    "valid": ConnectionState.CONNECTED,
+    "no_spaces": ConnectionState.ACCESS_DENIED,
+    "forbidden": ConnectionState.ACCESS_DENIED,
+    "profile_incomplete": ConnectionState.ERROR,
+    # The old verdict was about the old cookie; this one is not known yet.
+    "unverified": ConnectionState.NOT_CONNECTED,
+}
+
+
+def apply_session_check(db: Database, host: str, check: dict[str, Any]) -> None:
+    """Put a fresh session's check on the connection, replacing the old cookie's
+    verdict. The read stamps (last_sync_at, spaces_readable) are left alone: no
+    posts were read, and a failed scan already zeroed spaces_readable, so the
+    next read starts from the full archive (see _rescan_since).
+
+    A working session also clears the feed watcher's last answer when that was
+    a 401: it was the old cookie's, and "Needs attention" kept listing the
+    host as "needs verification" until the watcher came round again -- ten
+    minutes and more behind a spent request budget (2026-11-06)."""
+    from circle_leads.storage.models import WatchState
+
+    state = _CHECK_STATE.get(check.get("verdict"))
+    if state is None:
+        return
+    when = _dt.datetime.utcnow().strftime("%H:%M UTC")
+    with db.session() as s:
+        if check.get("verdict") == "valid":
+            s.execute(update(WatchState).where(
+                WatchState.host == host, WatchState.last_status == "unauthorized",
+            ).values(last_status=None,
+                     last_detail=f"New session checked {when}; next feed check pending."))
+        conn = s.scalar(select(CircleConnection).where(CircleConnection.host == host))
+        if conn is None:
+            return
+        # _rescan_since reads "partial" in the detail as "finish the archive".
+        unfinished = "partial" in (conn.state_detail or "")
+        conn.state = state.value
+        conn.state_detail = (f"New session saved {when}: {check.get('detail') or ''}".strip()
+                             + (" Last read was partial." if unfinished else ""))

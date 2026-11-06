@@ -85,7 +85,12 @@ sendBtn.addEventListener('click', async () => {
       return;
     }
     const data = await resp.json();
-    if (data.missing && data.missing.length) {
+    const check = data.check || {};
+    if (check.verdict === 'valid') {
+      setStatus(`Session works on ${currentHost}: ${check.detail} A read is queued.`, 'ok');
+    } else if (check.verdict) {
+      setStatus(`Saved, but: ${check.detail}`, 'warn');
+    } else if (data.missing && data.missing.length) {
       setStatus(`Saved, but missing: ${data.missing.join(', ')} — a scan may fail.`, 'warn');
     } else {
       setStatus(`Saved ${data.cookies} cookie(s) for ${currentHost}. The worker will pick it up.`, 'ok');
