@@ -954,3 +954,63 @@ def test_a_domain_circle_no_longer_serves_is_parked_after_five_tries(db, communi
     row = read_row(db, community)
     assert row.mode == WatchMode.OFF.value
     assert row.next_check_at - row.last_checked_at > timedelta(hours=12)
+
+
+class _CircleHost(requests.adapters.BaseAdapter):
+    """A Circle host behind a real requests.Session: it answers a member only
+    when exactly one ``_circle_session`` -- the live one -- comes in."""
+
+    def __init__(self, live):
+        super().__init__()
+        self.live = live
+        self.sent = []
+
+    def send(self, request, **kwargs):
+        import json
+        pairs = [p.strip().split("=", 1) for p in (request.headers.get("Cookie") or "").split(";")
+                 if "=" in p]
+        self.sent.append(pairs)
+        member = [v for k, v in pairs if k == "_circle_session"] == [self.live]
+        resp = requests.Response()
+        resp.status_code = 200 if member else 401
+        resp._content = json.dumps(
+            {"records": [], "has_next_page": False} if member
+            else {"message": "You cannot perform this action."}).encode()
+        resp.headers = requests.structures.CaseInsensitiveDict(
+            {"Content-Type": "application/json"})
+        resp.url, resp.request = request.url, request
+        return resp
+
+    def close(self):
+        pass
+
+
+def test_a_pasted_session_is_not_shadowed_by_a_dead_copy_in_the_watchers_jar(db, community):
+    """exitfive and everythingmarketplaces, 2026-11-06: their sessions were
+    pasted again at 13:10 and read fine everywhere else, but the watcher --
+    up since 12:41 -- kept the old ``_circle_session`` Circle had handed back
+    to it, sent both, and got 401 until it was restarted."""
+    from sqlalchemy import select
+    from circle_leads.web.replay_store import connect_host
+
+    ensure_watch_rows(db)
+    connect_host(db, HOST, [{"name": "_circle_session", "value": "live"},
+                            {"name": "user_session_identifier", "value": "u"}],
+                 member_label="person")
+    with db.session() as s:
+        s.scalar(select(WatchState).where(WatchState.community_id == community)).mode = (
+            WatchMode.COOKIE.value)
+    circle = _CircleHost(live="live")
+    session = requests.Session()
+    session.mount("https://", circle)
+    session.cookies.set("_circle_session", "dead", domain=HOST, path="/")
+    session.cookies.set("__cf_bm", "cf", domain="." + HOST, path="/")
+
+    out = check_community(db, state_for(db, community), Requirements(),
+                          session=session, tuning=WatchTuning())
+
+    assert out.status != "unauthorized", out.detail
+    first = dict(circle.sent[0])
+    assert [k for k, _ in circle.sent[0]].count("_circle_session") == 1
+    assert first["_circle_session"] == "live"
+    assert first["__cf_bm"] == "cf"           # the jar's other cookies still go out
