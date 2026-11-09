@@ -178,6 +178,12 @@ open a session the dashboard encrypted; the read then reports a
 `CIRCLE_CRED_KEY` error on the community. (Before 2026-11-06 it reported the
 session as expired, so a re-paste could never fix it.)
 
+A re-pasted session reaches the watcher without a restart: before each member
+request it drops its own older copies of the pasted cookies. (Until 2026-11-09
+the watcher's long-lived HTTP session kept the dead `_circle_session` Circle
+had handed back to the old login, sent it alongside the new one, and got 401
+until `warmr-watcher` was restarted.)
+
 ---
 
 ## Deploy (dashboard + worker + Supabase)
