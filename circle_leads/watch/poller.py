@@ -354,6 +354,7 @@ def _fetch(session: requests.Session, host: str, page: int, tuning: WatchTuning,
     headers = {"Accept": "application/json"}
     if etag and page == 1:
         headers["If-None-Match"] = etag
+    _drop_jar_copies(session, host, cookies)
     return session.get(url, headers=headers, cookies=cookies or None, timeout=25,
                        allow_redirects=False)
 
@@ -551,8 +552,29 @@ def _spaces_known(host: str) -> bool:
     return known is not None and time.monotonic() - known.learned_at < MEMBER_SPACES_TTL_S
 
 
+def _drop_jar_copies(session: requests.Session, host: str, cookies: dict | None) -> None:
+    """Send the stored session, not an older copy of it the jar kept.
+
+    Circle answers a member request with a fresh ``_circle_session``, and the
+    watcher's one long-lived session keeps it. When that login died and the
+    session was pasted again, the jar's dead copy went out next to the stored
+    one and won: every request answered 401 until the watcher was restarted
+    (exitfive and everythingmarketplaces, 2026-11-06). Only the stored names
+    are dropped -- Cloudflare's ``__cf_bm`` and the like still go out.
+    """
+    jar = getattr(session, "cookies", None)
+    if not cookies or jar is None:
+        return
+    host = host.lower()
+    for c in list(jar):
+        domain = (c.domain or "").lstrip(".").lower()
+        if c.name in cookies and (host == domain or host.endswith("." + domain)):
+            jar.clear(c.domain, c.path, c.name)
+
+
 def _member_get(session: requests.Session, host: str, path: str,
                 cookies: dict) -> requests.Response:
+    _drop_jar_copies(session, host, cookies)
     return session.get(f"https://{host}{path}", headers={"Accept": "application/json"},
                        cookies=cookies, timeout=25, allow_redirects=False)
 
