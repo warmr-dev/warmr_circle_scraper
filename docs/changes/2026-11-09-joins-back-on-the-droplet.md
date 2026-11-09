@@ -35,7 +35,7 @@ unit files installed by hand on 2026-11-09 (`WORKLOG.md`). The browser unit is
 not installed by the release; the droplet's copy already named `chromium-1248`.
 No migration, no new configuration.
 
-Documentation added: `docs/joining.md`, `deploy/droplet/README.md`
+Documentation added: `docs/joining.md` (the droplet README points to it)
 Delivery record: `docs/changes/2026-11-09-joins-back-on-the-droplet.md`
 
 ## Verification and delivery
