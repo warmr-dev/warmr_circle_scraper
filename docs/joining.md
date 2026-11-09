@@ -46,6 +46,15 @@ That difference is the entire reason the split exists.
      └───────────────────────┘
 ```
 
+**How a community gets into the queue.** It needs its own address
+(`communities.host`) — a `discover.circle.so/products/…` card names none. Only
+rows with an address get the join-type check (`join_type_schedule`, worker) and
+only those can be queued (`reach.real_host`). A web-search find stores the
+host of its link (`discovery/persist.py`); a link added on the dashboard goes
+through `get_or_create_community`, which does the same. Until 2026-11-09 search
+finds were stored without one, so none of them ever reached the queue; 73 rows
+were filled in by hand that day (`docs/changes/2026-11-09-discovery-saves-host.md`).
+
 ## Automatic runs on the droplet (2026-09-29)
 
 The known path now runs by itself, from the join queue, and writes what
