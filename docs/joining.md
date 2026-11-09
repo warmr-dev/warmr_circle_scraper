@@ -55,29 +55,86 @@ through `get_or_create_community`, which does the same. Until 2026-11-09 search
 finds were stored without one, so none of them ever reached the queue; 73 rows
 were filled in by hand that day (`docs/changes/2026-11-09-discovery-saves-host.md`).
 
-## Automatic runs on the Mac (since 2026-11-06)
+## Automatic runs on the droplet (since 2026-11-09)
 
-The droplet cannot join any more: since the move to `circle-bot-prod`,
-Circle's central login (`login.circle.so`) shows that address a Cloudflare
-Turnstile checkbox after the email; from the Mac the check passes by itself.
-So the same CDP walk (below) runs on the Mac, against a dedicated Google
-Chrome on its own profile:
+Joins run on `circle-bot-prod` again, as they did on `warmr-1` from 2026-09-29
+until that droplet was replaced in October (only the worker and the watcher
+were moved then; the join browser was not). `warmr-join.timer` starts
+`circle-leads auto-join --driver cdp --account 4 --limit 1` every 15 minutes
+in `warmr-browser` (`deploy/droplet/`).
 
 | thing | where |
 |---|---|
-| schedule | `~/Library/LaunchAgents/com.warmr.autojoin.plist`, every 15 minutes |
-| launcher | `~/Library/Application Support/warmr/worker/run_autojoin.sh` |
-| code | `venv-cdp` there, a non-editable install of the repo (launchd cannot read `~/Documents`) |
-| Chrome profile | `~/Library/Application Support/warmr/hermes-chrome/acct4`, CDP on `127.0.0.1:9222` |
-| attempt log | `data/join_attempts.log` there (daily cap, rest after a handoff) |
-| logs | `~/Library/Logs/warmr/autojoin.log`, `autojoin.err`, `join-shots/` |
+| schedule | `warmr-join.timer`, every 15 minutes |
+| code | `/opt/warmr/current` (each release; `deploy_release.sh` installs the units) |
+| browser | `warmr-browser.service`: Chromium in a virtual display, CDP on `127.0.0.1:9222` |
+| browser profile | `/opt/warmr/browser-trial/profile` (holds the bot's sign-in) |
+| attempt log | `/var/lib/warmr/data/join_attempts.log` (daily cap, rest after a handoff) |
+| logs | `journalctl -u warmr-join`, screenshots of every stop in `/var/lib/warmr/join-shots/` |
 
-- **One community a run.** The launcher asks the queue first (`--dry-run`);
-  with nothing to join it exits without starting Chrome. Otherwise it joins
-  one (`WARMR_AUTOJOIN_LIMIT`, default 1): a new community is joined within
-  about 15 minutes, a backlog at most 4 an hour, and the 25-a-day cap per
-  account still holds. About 94 visits from one account in a day brought 2FA
-  challenges on 2026-09-16.
+- **One community a run.** A new community is joined within about 15 minutes,
+  a backlog at most 4 an hour, and the 25-a-day cap per account still holds.
+  About 94 visits from one account in a day brought 2FA challenges on
+  2026-09-16. An empty queue ends the run at once ("Attempted 0").
+- **The bot's sign-in comes from the Mac.** Since `circle-bot-prod`, Circle's
+  central login (`login.circle.so`) shows this address a Cloudflare Turnstile
+  checkbox after the email, so this browser cannot sign the bot in by itself;
+  from the Mac the check passes by itself. Opening a community through the
+  central session the browser already holds needs no email and met no check
+  (2026-11-09: steepinsights, joindpp, autohive, startup-ready). So the bot is
+  signed in on the Mac and its Circle cookies are carried over:
+
+  ```sh
+  # on the Mac, the bot's Chrome open (hermes-chrome/acct4, CDP 127.0.0.1:9222)
+  python deploy/droplet/carry_bot_session.py export \
+    | ssh root@157.230.181.187 /opt/warmr/current/venv/bin/python \
+        /opt/warmr/current/deploy/droplet/carry_bot_session.py import
+  ```
+
+  Only Circle's cookies go (`login.circle.so`, the communities, `*.circle.so`);
+  the profile's Google and other cookies stay on the Mac, and Cloudflare's own
+  cookies never move. The values pass only through the pipe. Nothing about the
+  checkbox is touched: when the central session ends, a full sign-in here stops
+  as `challenge_stop` (a screenshot in `join-shots/`), and the fix is to sign
+  the bot in on the Mac and run the two lines again.
+- **Two machines never run at once.** Each counts the daily cap from its own
+  attempt log, so two would double it. The Mac's schedule is off while the
+  droplet's runs; moving back is the reverse (below).
+
+### Bringing joins back on a new droplet
+
+What `warmr-1` had and its replacement lacked, in order:
+
+1. `deploy_release.sh` -- the release, with Playwright; it installs
+   `warmr-join.service` and `.timer` and leaves the timer off.
+2. The browser: a venv in `/opt/warmr/browser-trial` with the release's
+   Playwright version, `playwright install chromium` and `install-deps`,
+   `chrome_sandbox` set to `root:root 4755`, then `warmr-browser.service`
+   from `deploy/droplet/` with its `chromium-NNNN` path matching the installed
+   one (see "Where it runs").
+3. `/etc/warmr/warmr-join.env` (`root:warmr 640`): `CIRCLE_EMAIL4`,
+   `CIRCLE_PASSWORD4`, `CIRCLE_MAIL_USER`, `CIRCLE_MAIL_APP_PASSWORD`.
+4. The bot's sign-in, carried from the Mac (above).
+5. The attempt log from the machine that ran joins until now, into
+   `/var/lib/warmr/data/join_attempts.log`, owned by `warmr`.
+6. A dry run (`auto-join ... --dry-run`, the command `deploy_release.sh`
+   prints), the Mac's schedule off, then `systemctl enable --now warmr-join.timer`.
+
+### What the walk does, wherever it runs
+
+- **The walk** is `circle_leads/join/cdp_join.py`: the Ego driver's state
+  machine (`ego_join_driver.mjs`), ported rule for rule to Python and driven
+  over CDP.
+- **The emailed code** is read from the bot mailbox while the page waits, and
+  typed in the same visit: at sign-in (`/two_fa`) and on the join step alike.
+  A code that never arrives stops the visit as `login_code_needed` (before a
+  membership, a handoff) or `email_code_needed` (after it, `profile_pending`).
+- **The profile questions** are answered from `join_form_answers`
+  (`forms.resolve_form`) in the same visit; a question the bot may not answer
+  stops it as `profile_incomplete`, naming the question.
+- **Outcomes** go to the database: `join_status`, the account in
+  `communities.join_account`, the session through `connect_host`, every visit
+  in `activity_log` (`join`), a handoff in `join_status_detail`.
 - **A handoff rests for a week** (`reach.HANDOFF_REST`). A community the bot
   stopped on -- a question it may not answer, a page it could not name --
   sits out the automatic runs for 7 days and is not counted as waiting on the
@@ -99,31 +156,26 @@ Chrome on its own profile:
   `/internal_api/pundit_users` for the account's own space; it is not read as
   membership, and its cookies are not stored as a community session.
 
-## Automatic runs on the droplet (2026-09-29, off since 2026-11-06)
+## On the Mac (2026-11-06 to 2026-11-09, now the fallback)
 
-The known path now runs by itself, from the join queue, and writes what
-happened to the database -- `circle-leads auto-join --driver cdp --account 4`,
-started by `warmr-join.timer` every four hours (`deploy/droplet/`).
+While the droplet had no sign-in, the same walk ran on the Mac against a
+dedicated Google Chrome on its own profile. It is installed and switched off:
 
-- **The walk** is `circle_leads/join/cdp_join.py`: the Ego driver's state
-  machine (`ego_join_driver.mjs`), ported rule for rule to Python and driven
-  over CDP in `warmr-browser`.
-- **The emailed code** is read from the bot mailbox while the page waits, and
-  typed in the same visit: at sign-in (`/two_fa`) and on the join step alike.
-  A code that never arrives stops the visit as `login_code_needed` (before a
-  membership, a handoff) or `email_code_needed` (after it, `profile_pending`).
-- **The profile questions** are answered from `join_form_answers`
-  (`forms.resolve_form`) in the same visit; a question the bot may not answer
-  stops it as `profile_incomplete`, naming the question.
-- **Outcomes** go where the Mac's runs put them: `join_status`, the account in
-  `communities.join_account`, the session through `connect_host`, every visit
-  in `activity_log` (`join`), a handoff in `join_status_detail`.
-- **The Mac's Ego runs are off** since 2026-09-29 (WORKLOG). The Ego path stays
-  in the code for a Mac that needs it: `--driver ego` is the default.
+| thing | where |
+|---|---|
+| schedule | `~/Library/LaunchAgents/com.warmr.autojoin.plist`, every 15 minutes (disabled) |
+| launcher | `~/Library/Application Support/warmr/worker/run_autojoin.sh` |
+| code | `venv-cdp` there, a non-editable install of the repo (launchd cannot read `~/Documents`) |
+| Chrome profile | `~/Library/Application Support/warmr/hermes-chrome/acct4`, CDP on `127.0.0.1:9222` |
+| attempt log | `data/join_attempts.log` there |
+| logs | `~/Library/Logs/warmr/autojoin.log`, `autojoin.err`, `join-shots/` |
 
-Not verified yet: a join by this walk against a live community. The first run
-is one community by hand (the command is printed by `deploy_release.sh`), and
-the timer is enabled only after it.
+The launcher asks the queue first (`--dry-run`) and starts Chrome only when
+there is something to join. To move joins back here: `systemctl disable --now
+warmr-join.timer` on the droplet, copy its attempt log over the Mac's, then
+`launchctl enable gui/$(id -u)/com.warmr.autojoin` and `launchctl bootstrap
+gui/$(id -u) ~/Library/LaunchAgents/com.warmr.autojoin.plist`. The Mac's Ego
+runs (`--driver ego`, still the default) have been off since 2026-09-29.
 
 ## Why the work is split
 
@@ -248,12 +300,13 @@ because a community we had already joined still rendered a "Join" button.
 
 ## Where it runs
 
-DigitalOcean droplet `warmr-1`, Ubuntu 24.04.4, 3.9 GB RAM, no swap.
+DigitalOcean droplet `circle-bot-prod` (`157.230.181.187`, since October
+2026; `warmr-1` before it), Ubuntu 24.04.5, 3.9 GB RAM, 2 CPUs, no swap.
 
 | thing | path |
 |---|---|
 | service | `/etc/systemd/system/warmr-browser.service` (enabled, `Restart=always`) |
-| code + venv + Chrome | `/opt/warmr/browser-trial/` |
+| code + venv + Chrome | `/opt/warmr/browser-trial/` (Chromium `ms-playwright/chromium-1248`) |
 | Chrome profile (the session) | `/opt/warmr/browser-trial/profile` |
 | credentials | `/etc/warmr/warmr-join.env`, `root:warmr`, mode `640` |
 | CDP | `127.0.0.1:9222` — localhost only, never exposed |
@@ -275,17 +328,27 @@ Three things about that box that took a while to get right:
 
 ## Running one join by hand
 
-```bash
-ssh warmr-1
-sudo systemctl status warmr-browser          # the browser must already be up
-curl -sf http://127.0.0.1:9222/json/version  # CDP answers
+On the droplet, with the timer's own environment (`--host` matches the slug
+or part of the URL, and skips the week's rest after a handoff):
 
-sudo -u warmr env $(sudo cat /etc/warmr/warmr-join.env | xargs) \
-  /opt/warmr/browser-trial/venv/bin/python \
-  /opt/warmr/browser-trial/join_one.py https://example.circle.so
+```bash
+ssh root@157.230.181.187
+systemctl is-active warmr-browser            # the browser must already be up
+curl -sf http://127.0.0.1:9222/json/version  # CDP answers
+systemd-run --wait --pipe --collect -p User=warmr -p WorkingDirectory=/var/lib/warmr \
+  -p EnvironmentFile=/etc/warmr/warmr.env -p EnvironmentFile=/etc/warmr/warmr-join.env \
+  -p Environment=CIRCLE_GOVERNOR_FILE=/var/lib/warmr/circle-governor.json \
+  /opt/warmr/current/venv/bin/circle-leads auto-join --driver cdp --account 4 \
+  --host <slug> --screenshot-dir /var/lib/warmr/join-shots
 ```
 
-It prints one of:
+`--dry-run` in place of `--host <slug>` prints what the next run would take.
+The outcome goes to the database as from the timer.
+
+The older single-page probe, `join_one.py`, prints and saves nothing; it was
+on `warmr-1` only. Locally it runs against any Chrome started with
+`--remote-debugging-port=9222`, from the repo root:
+`python scripts/join_one.py <url>`. `join_one.py` prints one of:
 
 | line | meaning |
 |---|---|
@@ -294,10 +357,6 @@ It prints one of:
 | `RESULT agent_needed: state=unknown …` | a page the code will not guess at |
 | `RESULT external_login` | the community runs its own login |
 | `RESULT needs_email_code` | no code arrived within five minutes |
-
-Locally, the same thing runs against any Chrome started with
-`--remote-debugging-port=9222`, from the repo root:
-`python scripts/join_one.py <url>`.
 
 ## What is verified, and what is not
 
@@ -310,10 +369,12 @@ Verified on the droplet, 2026-09-25:
 
 **Not verified. Do not assume these work:**
 
-- **No new community has been joined from the droplet.** The two joins on
-  record were driven from the Mac; from the droplet we confirmed the login and
-  the membership of communities already joined. There are 6 candidates in the
-  queue, so this test is available and should be the next one run.
+- **No new community has been joined from `circle-bot-prod` yet.** From
+  `warmr-1` two were: entrepreneur-bootcamp by hand (2026-09-29) and hailerz
+  by the timer (2026-10-01). On 2026-11-09 the carried sign-in opened four
+  joined communities from `circle-bot-prod` as a member without a check, and
+  the real walk (`_run_batch`) re-entered steepinsights and stored its
+  session; the queue was empty, so the first new join is still to come.
 - **The agent fallback is not wired on the droplet.** Hermes is not installed
   there. Today an `UNKNOWN` page stops the run and waits for a person.
 - **Outcomes are not persisted** by `join_one.py` (it prints; the automatic runs above do). The three rows written

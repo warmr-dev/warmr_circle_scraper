@@ -7,7 +7,7 @@ Three services, one droplet, one address.
 | `warmr-worker` | drains the scan-job queue, runs the scheduled harvest, enrichment, ICP | `circle-governor.json`, 20/min |
 | `warmr-watcher` | polls community feeds, triages new posts | `watch-governor.json`, 40/min |
 | `warmr-browser` | holds the join session: headed Chrome in a virtual display, CDP on `127.0.0.1:9222` | driven per join, see [`joining.md`](../../docs/joining.md) |
-| `warmr-join` (+ `.timer`, every 4 h) | works the join queue as account 4 in `warmr-browser`; reads the emailed code from the bot mailbox | the worker's `circle-governor.json` |
+| `warmr-join` (+ `.timer`, every 15 min, one community a run) | works the join queue as account 4 in `warmr-browser`; reads the emailed code from the bot mailbox | the worker's `circle-governor.json` |
 
 ## Layout
 
@@ -58,6 +58,12 @@ headless is what Cloudflare stops -- and it keeps Chrome's sandbox through the
 setuid `chrome_sandbox` helper, because Ubuntu 24.04 blocks the namespace
 sandbox for unprivileged users. The full story, including what has and has not
 been verified, is in [`docs/joining.md`](../../docs/joining.md).
+
+The bot's Circle sign-in in that profile is carried from the Mac with
+`carry_bot_session.py` (Circle's central login shows this address a Turnstile
+checkbox, so the bot is not signed in here). The command, and the order for
+bringing joins back on a new droplet, are in `docs/joining.md`, "Automatic
+runs on the droplet".
 
 
 ## Independent maintenance after long-harvest starvation

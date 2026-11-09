@@ -1,10 +1,10 @@
 [Unit]
-Description=Work the join queue every 4 hours
+Description=Work the join queue every 15 minutes, one community a run
 
 [Timer]
 # UTC. Persistent: a run missed while the box was down happens at boot.
-OnCalendar=*-*-* 01,05,09,13,17,21:15:00
-RandomizedDelaySec=10min
+OnCalendar=*-*-* *:00/15:00
+RandomizedDelaySec=2min
 Persistent=true
 Unit=warmr-join.service
 
