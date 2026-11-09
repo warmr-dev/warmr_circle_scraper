@@ -29,8 +29,32 @@ class FakeSite:
 
     def __init__(self, host="demo.circle.so", *, signed_in=False, member=False,
                  code_at_login=False, code_after_join=False, questions=(), join_to_checkout=False,
-                 invite_only=False, login_host=None, login_host_is_circle=False, dead=False):
+                 invite_only=False, login_host=None, login_host_is_circle=False, dead=False,
+                 continue_disabled_polls=0, turnstile=False, code_after_email=False,
+                 code_delay_polls=0, terms_box=False, central_says_member=False,
+                 central_session=False):
         self.host = host
+        # The browser still holds the account's Circle-wide session: the
+        # central sign-in page sends it straight back to the community, in.
+        self.central_session = central_session
+        # login.circle.so answering /internal_api/pundit_users for the
+        # account's personal space: signed in, and a member of *that*.
+        self.central_says_member = central_says_member
+        # Circle's own terms-and-privacy box on the profile step: Continue
+        # is disabled until it is ticked.
+        self.terms_box = terms_box
+        self.terms_agreed = False
+        # The central login's newer shape: a mailed code right after the
+        # email, the email box still on the page, the password behind a link.
+        self.code_after_email = code_after_email
+        # ...and the email form, Continue a spinner, for this many looks
+        # before the code boxes show.
+        self.code_delay_polls = code_delay_polls
+        self.code_pending = None
+        # Cloudflare on the email step: Continue is disabled for this many
+        # looks, or for good while a Turnstile checkbox waits for a person.
+        self.continue_disabled_polls = continue_disabled_polls
+        self.turnstile = turnstile
         self.url = "about:blank"
         self.signed_in = signed_in
         self.member = member
@@ -52,6 +76,8 @@ class FakeSite:
         self.filled: list[tuple[str, str, str]] = []   # (host, selector, value)
         self.typed_codes: list[str] = []
         self.keyboard = self
+        self.place_typed = None
+        self.location_index = None
 
     # --- Playwright surface ------------------------------------------------------
     def goto(self, url, timeout=None):
@@ -59,6 +85,9 @@ class FakeSite:
             raise RuntimeError(f"page.goto: net::ERR_NAME_NOT_RESOLVED at {url}")
         self.url = url
         self.on_code = False
+        if self.central_session and url == f"https://login.circle.so/sign_in?request_host={self.host}":
+            self.signed_in = True
+            self.url = f"https://{self.host}/"
 
     def wait_for_timeout(self, _ms):
         return None
@@ -76,6 +105,24 @@ class FakeSite:
     def context(self):
         return self
 
+    @property
+    def frames(self):
+        if self.turnstile and self.login_step == "email":
+            return [Frame("https://challenges.cloudflare.com/cdn-cgi/challenge-platform/turnstile")]
+        return [Frame(self.url)]
+
+    def _disabled(self, label) -> bool:
+        if label != "Continue" or self.login_step != "email":
+            return False
+        if self.code_pending is not None:
+            return True
+        if self.turnstile:
+            return True
+        if self.continue_disabled_polls > 0:
+            self.continue_disabled_polls -= 1
+            return True
+        return False
+
     def cookies(self, _url):
         if not (self.member and self.profile_saved):
             return [{"name": "_ga", "value": "x"}]
@@ -85,6 +132,9 @@ class FakeSite:
     def fill(self, selector, value):
         host = re.sub(r"^https?://([^/]+).*$", r"\1", self.url)
         self.filled.append((host, selector, value))
+        if selector == '[data-warmr-location="1"]':
+            self.place_typed = value       # Circle lists its place suggestions
+            return
         m = re.search(r"attributes\.(\d+)\.", selector)
         if m:
             qid = self.questions[int(m.group(1))][0]
@@ -100,6 +150,8 @@ class FakeSite:
             self.after_code()
 
     def click(self, selector):
+        if selector == '[data-warmr-location="1"]':
+            return                         # focus the place search
         assert selector == '[data-warmr-click="1"]', selector
         label, self.marked = self.marked, None
         self._press(label)
@@ -113,7 +165,7 @@ class FakeSite:
         if self.login_step == "password":
             return ["Log in"]
         if "/settings/profile" in self.url:
-            return ["Continue"]
+            return [] if (self.terms_box and not self.terms_agreed) else ["Continue"]
         if not self.signed_in:
             return ["Log in", "Join"]
         if not self.member:
@@ -121,9 +173,19 @@ class FakeSite:
         return []
 
     def _press(self, label):
+        if label == "__place__":
+            qid = self.questions[self.location_index][0]
+            self.answers[qid] = "urn:mbxplc:place-id"   # what Circle saves
+            return
+        if label == "__terms__":
+            self.terms_agreed = True
+            return
         if label in ("Log in", "Sign in") and self.login_step is None and not self.signed_in:
             self.login_step = "email"
             self.url = f"https://{self.login_host}/users/sign_in"
+        elif label == "Continue" and self.login_step == "email" and self.code_after_email:
+            self.code_pending = self.code_delay_polls
+            self.after_code = self._signed_in_by_code
         elif label == "Continue" and self.login_step == "email":
             self.login_step = "password"
         elif label == "Log in" and self.login_step == "password":
@@ -151,12 +213,21 @@ class FakeSite:
         self.signed_in = True
         self.url = f"https://{self.host}/"
 
+    def _signed_in_by_code(self):
+        self.login_step = None
+        self._signed_in()
+
     def _joined(self):
         self.member = True
         if not self.profile_saved:
             self.url = f"https://{self.host}/settings/profile?new_state=true"
 
     def _api(self, path):
+        here = self.url.split("/")[2] if "://" in self.url else ""
+        if self.central_says_member and here == "login.circle.so" and path == "/internal_api/pundit_users":
+            return 200, json.dumps({"current_community": {"id": 620199, "name": "Bot's Circle"},
+                                    "current_user": {"email": EMAIL},
+                                    "current_community_member": {"id": 1}})
         on_circle = (self.url.split("/")[2] if "://" in self.url else "") in (self.host,) or \
             self.login_host_is_circle
         if path == "/internal_api/pundit_users":
@@ -204,7 +275,7 @@ class FakeSite:
                     "newMemberOnboarding": "new_state=true" in self.url, "url": self.url}
         if script is w.MARK_CLICK_JS:
             for text in arg:
-                if text in self._buttons():
+                if text in self._buttons() and not self._disabled(text):
                     self.marked = text
                     return text
             return None
@@ -212,16 +283,44 @@ class FakeSite:
             return {"hasEmail": self.login_step == "email",
                     "hasPassword": self.login_step == "password"}
         if script is w.CODE_PAGE_JS:
+            if self.code_pending is not None:
+                if self.code_pending > 0:
+                    self.code_pending -= 1
+                else:
+                    self.code_pending, self.on_code = None, True
             return self.on_code
+        if script is w.LOCATION_INPUT_JS:
+            index = int(re.search(r"\.(\d+)\.$", arg).group(1))
+            if self.questions[index][2] != "location":
+                return False
+            self.location_index = index
+            return True
+        if script is w.PICK_LOCATION_JS:
+            if self.place_typed and arg.lower() == self.place_typed.lower():
+                self.marked = "__place__"
+                return "Vietnam"
+            return None
+        if script is w.LOCATION_VALUE_JS:
+            return self.answers.get(self.questions[self.location_index][0], "")
         if script is w.PROFILE_FIELD_ELEMENTS_JS:
             index = int(re.search(r"\.(\d+)\.$", arg).group(1))
             return [{"tag": "input", "type": "text", "name": f"{arg}text", "value": None,
                      "label": self.questions[index][1], "visible": True}]
+        if script is w.TERMS_CONSENT_JS:
+            if self.terms_box and not self.terms_agreed and "/settings/profile" in self.url:
+                self.marked = "__terms__"
+                return "I agree to the terms and privacy policy"
+            return None
         if script is w.SPACE_LINKS_JS:
             return []
         if script is w.SIGNUP_SHAPE_JS:
             return {"fillable": False, "reason": "not in this fake"}
         raise AssertionError(f"unexpected script: {script[:60]}")
+
+
+class Frame:
+    def __init__(self, url):
+        self.url = url
 
 
 class Box:
@@ -297,7 +396,52 @@ def test_the_join_code_and_a_profile_question_go_in_during_the_same_visit():
     assert len(fetched) == 1
 
 
+def test_continue_is_waited_for_while_cloudflare_checks_the_email_step():
+    # Measured from the Mac 2026-11-06: Continue is a spinner for a few
+    # seconds after the email, then Cloudflare lets it through by itself.
+    site = FakeSite(continue_disabled_polls=3)
+    result, _ = walk(site)
+    assert result.status == "joined", result.detail
+    assert [v for _, _, v in site.filled] == [EMAIL, PASSWORD]
+
+
+def test_a_code_mailed_straight_after_the_email_signs_in_without_the_password():
+    site = FakeSite(code_after_email=True, continue_disabled_polls=2, code_delay_polls=4)
+    result, fetched = walk(site)
+    assert result.status == "joined", result.detail
+    assert site.typed_codes == ["123456"]
+    assert len(fetched) == 1
+    assert [v for _, _, v in site.filled] == [EMAIL]
+
+
+def test_circles_terms_box_on_the_profile_step_is_ticked_before_continue():
+    site = FakeSite(signed_in=True, terms_box=True, questions=[("q1", "Your role", "text")])
+    result, _ = walk(site, answers={"Your role": "Software engineer"})
+    assert result.status == "joined", result.detail
+    assert site.terms_agreed and site.profile_saved
+
+
+def test_the_central_login_never_counts_as_membership_of_the_community():
+    # 2026-11-06: login.circle.so answered for the bot's own space, and
+    # autohive was recorded as joined from its sign-in page.
+    site = FakeSite(login_host="login.circle.so", central_says_member=True)
+    result, _ = walk(site)
+    assert result.status == "joined", result.detail
+    assert site.member  # joined for real, through the login and the Join click
+    assert ("login.circle.so", w.PASSWORD_SELECTOR, PASSWORD) in site.filled
+
+
 # --- where it stops ---------------------------------------------------------------
+
+
+def test_a_turnstile_checkbox_at_login_is_a_challenge_left_to_a_person():
+    site = FakeSite(turnstile=True)
+    result, _ = walk(site)
+    assert result.status == "challenge_stop"
+    assert "Turnstile" in result.detail
+    # The email went in; the password never did, and nothing was joined.
+    assert [v for _, _, v in site.filled] == [EMAIL]
+    assert not site.member
 
 
 def test_no_code_at_login_is_a_login_left_waiting_not_a_membership():
@@ -395,3 +539,29 @@ def test_the_word_lists_match_the_ego_driver(name):
     block = re.search(rf"const {name} = \[(.*?)\];", source, re.S).group(1)
     block = re.sub(r"//[^\n]*", "", block)
     assert re.findall(r'"([^"]*)"', block) == getattr(w, name)
+
+
+def test_a_location_question_is_answered_through_circles_place_search():
+    """hrone, 2026-11-09: the place goes in through a suggestion -- typed
+    straight into the hidden payload input it would be saved as bare text."""
+    site = FakeSite(signed_in=True, questions=[("q1", "Location", "location")])
+    result, _ = walk(site, answers={"Location": "Vietnam"})
+    assert result.status == "joined", result.detail
+    assert site.answers == {"q1": "urn:mbxplc:place-id"}
+    assert [s for _, s, _ in site.filled] == ['[data-warmr-location="1"]']
+
+
+def test_the_central_session_signs_in_without_a_new_login():
+    """2026-11-09: six full sign-ins in a row left only the last session
+    alive; entering through the central session ended none."""
+    site = FakeSite(central_session=True)
+    result, fetched = walk(site)
+    assert result.status == "joined", result.detail
+    assert site.filled == [] and fetched == []    # no email, no code
+
+
+def test_without_a_central_session_the_bot_signs_in_as_before():
+    site = FakeSite()
+    result, _ = walk(site)
+    assert result.status == "joined", result.detail
+    assert [v for _, _, v in site.filled] == [EMAIL, PASSWORD]

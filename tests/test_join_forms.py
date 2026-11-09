@@ -193,7 +193,7 @@ def test_a_checkbox_is_only_ever_ticked():
     assert not refused.complete
 
 
-def test_a_field_type_the_bot_does_not_fill_goes_to_a_human():
+def test_a_place_the_persona_does_not_state_is_never_taken_from_the_model():
     db = _db()
     res = resolve_form(db, "main", [_field("Where are you based", "location")],
                        llm=ScriptedLlm("Jakarta"), persona=PERSONA)
@@ -207,3 +207,15 @@ def test_a_failing_model_call_is_a_handoff_not_a_crash():
 
     res = resolve_form(_db(), "main", [_field("Company")], llm=Broken(), persona=PERSONA)
     assert not res.complete
+
+
+def test_a_location_field_takes_the_personas_place_without_asking_the_model():
+    """hrone and firefly, 2026-11-09: Circle's "Location" is a place search;
+    the bot left it to a person although its persona says where it is."""
+    llm = ScriptedLlm()
+    res = resolve_form(_db(), "main", [_field("Location", "location")], llm=llm,
+                       persona={**PERSONA, "location": "Vietnam"})
+    assert res.answers == {"1": "Vietnam"} and res.complete
+    assert not llm.calls
+
+

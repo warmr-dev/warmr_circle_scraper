@@ -142,9 +142,23 @@ def readable():
 JOIN_QUEUE_STATUSES = (JoinStatus.NOT_ATTEMPTED.value, JoinStatus.PROFILE_PENDING.value)
 
 
+# A community the bot visited and handed to a person sits out the automatic
+# join runs for this long (join/joiner.py). Meanwhile it is not "waiting": on
+# 2026-11-09 nine such rows made the dashboard call the join queue stuck for
+# two days while the bot had nothing to take.
+HANDOFF_REST = timedelta(days=7)
+
+
+def resting_after_handoff(now):
+    """Still in the join queue, but the bot visited it within HANDOFF_REST:
+    it is a person's turn, not the bot's."""
+    return and_(Community.join_attempted_at.is_not(None),
+                Community.join_attempted_at >= now - HANDOFF_REST)
+
+
 def join_queue():
-    """A community the join bot should try -- and exactly what the dashboard
-    counts as waiting to be joined.
+    """A community the join bot should try. The dashboard counts it as waiting
+    unless it is resting after a handoff (resting_after_handoff).
 
     Free communities only: a paid one is never joined, since the bot does not
     pay (a visit only ever ended on a checkout page). Only with a real address:

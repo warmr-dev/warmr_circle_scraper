@@ -62,11 +62,15 @@ def _seed(db, slug, *, icp_flag=True, platform="circle", join_type="free_join",
         c.icp_score = icp_score
 
 
-def _write_attempt_log(path, entries):
-    """Seed the attempt log the way a previous run would have left it."""
+# Older than the handoff cool-down: such a host is back in the queue, last.
+RESTED = joiner.HANDOFF_COOLDOWN + timedelta(days=1)
+
+
+def _write_attempt_log(path, entries, *, age=timedelta(0)):
+    """Seed the attempt log the way a previous run would have left it, ``age`` ago."""
     path.write_text("".join(
         json.dumps({
-            "at": joiner.utcnow().isoformat(),
+            "at": (joiner.utcnow() - age).isoformat(),
             "account": account,
             "slug": slug,
             "url": f"https://{slug}.circle.so",
@@ -356,11 +360,12 @@ def test_handoff_status_is_skipped_and_the_batch_continues(monkeypatch):
         assert row.join_status == JoinStatus.NOT_ATTEMPTED.value  # left untouched, not "failed"
 
 
-def test_a_handed_off_host_goes_last_next_run_but_stays_in_the_queue(monkeypatch):
+def test_a_handed_off_host_sits_out_the_cool_down_then_goes_last(monkeypatch):
     # Selection is deterministic, so without this the same unresolvable host is
-    # picked first on every subsequent run and stalls the queue forever. It is
-    # de-prioritised, never dropped -- it comes back once the fresh backlog is
-    # exhausted.
+    # picked first on every subsequent run and stalls the queue forever. It
+    # rests for HANDOFF_COOLDOWN (every run used to walk the same stuck hosts
+    # again, mailing a login code each time), then comes back behind the fresh
+    # backlog -- never dropped.
     db = _db()
     _seed(db, "stuck", icp_score=99)
     _seed(db, "fresh", icp_score=10)
@@ -375,6 +380,10 @@ def test_a_handed_off_host_goes_last_next_run_but_stays_in_the_queue(monkeypatch
     monkeypatch.setattr(joiner, "sleep_between_attempts", lambda pacing: None)
     joiner.run_auto_join(db, host="stuck")
 
+    assert [c["slug"] for c in joiner.select_join_candidates(db)] == ["fresh"]
+
+    later = joiner.utcnow() + RESTED
+    monkeypatch.setattr(joiner, "utcnow", lambda: later)
     assert [c["slug"] for c in joiner.select_join_candidates(db)] == ["fresh", "stuck"]
 
 
@@ -390,7 +399,7 @@ def test_de_prioritised_hosts_are_ordered_least_stuck_first(monkeypatch, tmp_pat
         ("stuck-once", "unclear", "main"),
         ("stuck-twice", "unclear", "main"),
         ("stuck-twice", "needs_login", "main"),
-    ])
+    ], age=RESTED)
     monkeypatch.setattr(joiner, "ATTEMPT_LOG_PATH", log_path)
 
     # icp_score alone would put stuck-twice first.
@@ -685,8 +694,8 @@ def test_host_filter_survives_the_limit_and_the_handoff_sort(monkeypatch, tmp_pa
     _write_attempt_log(log_path, [("stuck", "unclear", "main")])
     monkeypatch.setattr(joiner, "ATTEMPT_LOG_PATH", log_path)
 
-    # The de-prioritisation itself is intact: unnamed, "stuck" is last.
-    assert [c["slug"] for c in joiner.select_join_candidates(db)][-1] == "stuck"
+    # Unnamed, "stuck" is resting after its fresh handoff; named, it is not.
+    assert "stuck" not in [c["slug"] for c in joiner.select_join_candidates(db)]
 
     monkeypatch.setattr(joiner, "open_join_space", lambda name, **kw: 1)
     monkeypatch.setattr(
@@ -1161,7 +1170,9 @@ def test_a_handoff_says_why_on_the_row_and_stays_in_the_queue(monkeypatch):
         # outcome; a handoff is not one.
         assert row.join_attempted_at is None
     assert _join_rows(db) == [("a", "warning", "challenge_stop")]
-    assert [c["slug"] for c in joiner.select_join_candidates(db)] == ["a"]
+    # Still in the queue: resting now, named by hand it is there at once.
+    assert joiner.select_join_candidates(db) == []
+    assert [c["slug"] for c in joiner.select_join_candidates(db, host="a")] == ["a"]
 
 
 def test_a_handoff_without_detail_still_says_something(monkeypatch):

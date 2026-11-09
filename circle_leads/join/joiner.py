@@ -23,6 +23,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -36,7 +37,7 @@ from circle_leads.join.ego_bridge import (
 )
 from circle_leads.join.forms import FormField, make_form_llm, resolve_form
 from circle_leads.join.pacing import joins_attempted_today, sleep_between_attempts
-from circle_leads.reach import join_queue
+from circle_leads.reach import HANDOFF_REST, join_queue
 from circle_leads.storage.activity import log_activity
 from circle_leads.storage.database import Database
 from circle_leads.storage.models import (
@@ -226,6 +227,33 @@ def _handoff_counts(entries: "list[dict] | None" = None) -> dict[str, int]:
     return counts
 
 
+# A host that just needed a human sits out the automatic batches for this
+# long. Sorting it last was not enough: once the fresh queue ran dry the same
+# few stuck hosts were all that was left, and every 4-hour run walked them
+# again -- 10-11 visits each to startup-ready, firefly and entrepreneur-
+# bootcamp from 2026-09-27, every one mailing a new login code. An operator
+# retry by --host skips the wait.
+HANDOFF_COOLDOWN = HANDOFF_REST  # reach.py: the dashboard uses the same week
+
+
+def _cooling_down(entries: "list[dict]", now: datetime) -> set[str]:
+    """Slugs whose latest handoff is younger than HANDOFF_COOLDOWN."""
+    cutoff = now - HANDOFF_COOLDOWN
+    recent: set[str] = set()
+    for entry in entries:
+        if entry.get("status") in _TERMINAL_STATUS_MAP or not entry.get("slug"):
+            continue
+        try:
+            at = datetime.fromisoformat(str(entry.get("at")))
+        except ValueError:
+            continue
+        if at.tzinfo is None:
+            at = at.replace(tzinfo=timezone.utc)
+        if at >= cutoff:
+            recent.add(entry["slug"])
+    return recent
+
+
 # ego-browser outcome -> Community.join_status: only these are ever persisted.
 # Everything else (needs_login, challenge_stop, application_form_detected,
 # unclear) means the driver stopped without a definitive result -- the
@@ -311,7 +339,11 @@ def select_join_candidates(
     ``attempt_log`` is an already-parsed snapshot of the attempt log, so a
     caller that needs it more than once can pay for the parse only once.
     """
+    if attempt_log is None:
+        attempt_log = _iter_attempt_log()
     handoffs = _handoff_counts(attempt_log)
+    # A host named by the operator is a deliberate retry: no cool-down.
+    resting = set() if host else _cooling_down(attempt_log, utcnow())
     member_hosts, member_ids = _hosts_with_cookies(db)
     with db.session() as s:
         query = (
@@ -346,10 +378,11 @@ def select_join_candidates(
             "join_status": r.join_status,
         }
         for r in rows
+        if r.slug not in resting
         # A community the bot left on the profile step keeps its cookies but
         # still needs the bot; any other host with a member session doesn't.
-        if r.join_status == JoinStatus.PROFILE_PENDING.value
-        or (r.id not in member_ids and _host_of(r.url) not in member_hosts)
+        and (r.join_status == JoinStatus.PROFILE_PENDING.value
+             or (r.id not in member_ids and _host_of(r.url) not in member_hosts))
     ]
     if host:
         candidates = _match_host(candidates, host)

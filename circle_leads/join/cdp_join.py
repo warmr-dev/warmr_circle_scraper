@@ -50,6 +50,8 @@ JOIN_TEXTS = [
     "Join space",
     "Buy",
     "Rejoindre", "Rejoindre la communauté", "S'inscrire", "Demander à rejoindre",
+    # French "Join space" (campus.lafusee.net, 2026-11-09)
+    "Rejoindre l'espace",
     "Beitreten", "Jetzt beitreten", "Registrieren", "Mitglied werden",
     "Unirse", "Únete", "Unirme", "Registrarse", "Solicitar unirse",
     "Participar", "Inscrever-se", "Cadastre-se", "Entrar na comunidade",
@@ -96,6 +98,15 @@ CODE_SUBMIT_TEXTS = ["Verify", "Continue", "Submit", "Confirm", "Log in", "Sign 
 # A second code in one visit is normal (sign-in, then the join step); a third
 # means the page is refusing what we type.
 MAX_CODES_PER_VISIT = 2
+# Circle's central login (login.circle.so) runs Cloudflare Turnstile after the
+# email is typed: Continue is a disabled spinner until Cloudflare is done.
+# From the Mac (2026-11-06) that took a few seconds and passed on its own; the
+# walk used to look for Continue once, find nothing, and call it needs_login.
+EMAIL_STEP_WAIT_MS = 30000
+TURNSTILE_FRAME = "challenges.cloudflare.com"
+# Circle's own hosts that are not a community: their API speaks for the
+# account's personal space, never for the community being joined.
+CENTRAL_LOGIN_HOSTS = ("login.circle.so", "app.circle.so")
 
 # --- page scripts ------------------------------------------------------------------
 # Module constants, not inline strings: the tests' fake page answers by
@@ -223,6 +234,60 @@ PROFILE_FIELD_ELEMENTS_JS = """(prefix) => [...document.querySelectorAll('[name^
     label: (e.closest('label')?.textContent || '').trim(),
     visible: !!(e.offsetParent || e.getClientRects().length),
   }))"""
+
+# A "location" profile field (hrone, firefly; seen 2026-11-09) is a search box
+# (input[role=combobox], "Search location") over Circle's place suggestions;
+# the value Circle saves is the picked place's id in a hidden
+# `...<index>.payload` input next to it. Typing into that hidden input instead
+# would save the bare text, so the field is filled only through a suggestion.
+LOCATION_INPUT_JS = """(prefix) => {
+  document.querySelectorAll('[data-warmr-location]').forEach((e) => e.removeAttribute('data-warmr-location'));
+  const hidden = document.querySelector('[name="' + prefix + 'payload"]');
+  const box = hidden && hidden.parentElement && hidden.parentElement.querySelector('input[role=combobox]');
+  if (!box) return false;
+  box.setAttribute('data-warmr-location', '1');
+  return true;
+}"""
+
+# The first suggestion that starts with the place the bot typed ("Vietnam" ->
+# "Vietnam", not "Vietnam, Yondó, Antioquia, Colombia" further down).
+PICK_LOCATION_JS = """(wanted) => {
+  const norm = (t) => (t || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+  document.querySelectorAll('[data-warmr-click]').forEach((el) => el.removeAttribute('data-warmr-click'));
+  const option = [...document.querySelectorAll('[role=option]')]
+    .find((o) => norm(o.textContent).startsWith(norm(wanted)));
+  if (!option) return null;
+  option.setAttribute('data-warmr-click', '1');
+  return (option.textContent || '').trim();
+}"""
+
+LOCATION_VALUE_JS = """(prefix) => {
+  const hidden = document.querySelector('[name="' + prefix + 'payload"]');
+  return hidden ? hidden.value || '' : '';
+}"""
+
+# Circle's own "I agree to the terms and privacy policy" under Permissions on
+# "Create a profile" (seen 2026-11-06): not a profile field, so the answer
+# database never sees it, and Continue stays disabled until it is ticked.
+# Agreeing to a community's terms is what forms.py already allows for a
+# checkbox; only an unticked box whose label says so is touched. Base UI draws
+# the box as a role=checkbox element next to a nameless native input.
+TERMS_CONSENT_JS = """() => {
+  const re = /\\bagree\\b[^.]{0,60}\\b(terms|privacy)\\b/i;
+  document.querySelectorAll('[data-warmr-click]').forEach((el) => el.removeAttribute('data-warmr-click'));
+  for (const input of document.querySelectorAll('input[type=checkbox]')) {
+    if (input.checked) continue;
+    const label = ((input.labels && input.labels[0] && input.labels[0].textContent) ||
+                   (input.closest('label') && input.closest('label').textContent) || '')
+      .replace(/\\s+/g, ' ').trim();
+    if (!re.test(label)) continue;
+    const scope = input.closest('label') || input.parentElement;
+    const ctrl = (scope && scope.querySelector('[role=checkbox]')) || input;
+    ctrl.setAttribute('data-warmr-click', '1');
+    return label.slice(0, 120);
+  }
+  return null;
+}"""
 
 CHECKED_JS = """(name) => !!document.querySelector('[name="' + name + '"]').checked"""
 SELECTED_JS = """(name) => [...document.querySelector('[name="' + name + '"]').selectedOptions]
@@ -403,8 +468,53 @@ class _Walk:
         except Exception:  # noqa: BLE001
             return None
 
+    def _turnstile_shown(self) -> bool:
+        """A Cloudflare Turnstile widget is on the page (its iframe)."""
+        try:
+            return any(TURNSTILE_FRAME in (f.url or "") for f in self.page.frames)
+        except Exception:  # noqa: BLE001 - no frames to ask, or mid-navigation
+            return False
+
+    def _click_email_step(self) -> str | None:
+        """Click Continue/Sign in after the email, once Circle enables it.
+
+        The wait is for Cloudflare's own check to finish by itself; nothing on
+        the widget is touched. A widget that wants a person is the caller's to
+        report as a challenge.
+        """
+        deadline = time.monotonic() + EMAIL_STEP_WAIT_MS / 1000
+        while True:
+            if self._on_code_page():
+                return "(code page)"
+            hit = self._click_first(EMAIL_STEP_TEXTS)
+            if hit or time.monotonic() >= deadline:
+                return hit
+            self.page.wait_for_timeout(1000)
+
+    def _await_after_email_step(self, fields: Callable[[], dict], max_ms: int = 20000) -> None:
+        """After Continue, wait for what it opens: the code boxes, a password
+        field, or at least a page without the email form. Circle shows the
+        email form with a spinner for a few seconds while it sends the code;
+        reading the page then filled the email again and waited for a Continue
+        that never came back (2026-11-06)."""
+        deadline = time.monotonic() + max_ms / 1000
+        while time.monotonic() < deadline:
+            if self._on_code_page():
+                return
+            f = fields()
+            if f.get("hasPassword") or not f.get("hasEmail"):
+                return
+            self.page.wait_for_timeout(1000)
+
     def _member_state(self) -> dict:
-        """Who Circle says we are here. api=False: not a Circle page at all."""
+        """Who Circle says we are here. api=False: not a Circle page at all.
+
+        Circle's central login answers too, but about the account's own
+        personal space ("Erksh's Circle", always a member): on 2026-11-06 that
+        recorded autohive as joined from its sign-in page. So it never counts.
+        """
+        if (urlparse(self._url()).hostname or "").lower() in CENTRAL_LOGIN_HOSTS:
+            return {"api": False, "status": 0}
         status, data = self._fetch_json("/internal_api/pundit_users")
         if status != 200 or not isinstance(data, dict) or "current_community" not in data:
             return {"api": False, "status": status}
@@ -436,6 +546,10 @@ class _Walk:
         replay_store.connect_host. The domain is the host the page ended on."""
         here = self._url()
         host = (urlparse(here).hostname or self.community_host).lower()
+        if host in CENTRAL_LOGIN_HOSTS:
+            # The account's own Circle login, not a community session: stored,
+            # it became a "community" the watcher polled (2026-11-06).
+            return []
         try:
             jar = self.page.context.cookies(here)
         except Exception:  # noqa: BLE001
@@ -495,6 +609,12 @@ class _Walk:
                     "reason": "clicking Log in neither signed in nor showed a form within 6.4s"}
 
         for _ in range(4):
+            # Circle's central login now mails a code straight after the email
+            # (2026-11-06, "Enter your verification code", password only behind
+            # a link). The email box stays on that page, so look for the code
+            # boxes first; the caller types the code (_code_step).
+            if self._on_code_page():
+                return {"ok": True}
             f = fields()
             try:
                 if f.get("hasPassword"):
@@ -511,10 +631,14 @@ class _Walk:
                     # "Sign in" before "Continue": an email-first form that
                     # defaults to *creating* an account shows "Sign up" with a
                     # "Sign in" link beside it. Never click "Sign up" here.
-                    if not self._click_first(EMAIL_STEP_TEXTS):
+                    if not self._click_email_step():
+                        if self._turnstile_shown():
+                            return {"ok": False, "challenge": True}
                         return {"ok": False, "reason": "filled email but found no Sign in/Continue "
-                                                       "control before a password step"}
+                                                       "control before a password step "
+                                                       f"within {EMAIL_STEP_WAIT_MS // 1000}s"}
                     self.page.wait_for_timeout(1500)
+                    self._await_after_email_step(fields)
                     continue
             except _ForeignLogin as exc:
                 return {"ok": False, "foreign": str(exc)}
@@ -581,10 +705,42 @@ class _Walk:
 
     # --- sign in -------------------------------------------------------------------------
 
+    def _central_entry(self) -> bool:
+        """Enter through the account's Circle-wide session, if the browser has one.
+
+        A full sign-in (email, code) on a community behind Circle's central
+        login ends this account's sessions in the other such communities: on
+        2026-11-09 six re-entries in a row left only the last of the six
+        sessions alive. Opening login.circle.so/sign_in?request_host=<host>
+        while the browser still holds the central session lands back on the
+        community signed in and ends none -- six of those in a row left all
+        11 bot sessions answering. So that is tried first. When it does not
+        sign us in, the page goes back to the community, unchanged.
+        """
+        here = urlparse(self._url())
+        host = (here.hostname or "").lower()
+        if not host or host in CENTRAL_LOGIN_HOSTS:
+            return False
+        origin = f"{here.scheme}://{here.netloc}"
+        if self._navigate(f"https://{CENTRAL_LOGIN_HOSTS[0]}/sign_in?request_host={host}"):
+            return False
+        self._settle()
+        if (urlparse(self._url()).hostname or "").lower() == host:
+            ms = self._member_state()
+            if ms["api"] and ms.get("logged_in") and not ms.get("other_account"):
+                logger.info("signed in to %s through the central session", host)
+                return True
+        if self._navigate(origin):
+            return False
+        self._settle()
+        return False
+
     def _sign_in(self, *, has_login_control: bool = True) -> EgoJoinResult | None:
         """Sign in as this account. None when signed in; a result when stopped."""
         if not (self.email and self.password):
             return self._done("needs_login", "Not signed in and no credentials configured.")
+        if self._central_entry():
+            return None
         on_login_page = False
         if not has_login_control:
             nav = self._navigate(f"{self._origin()}/users/sign_in")
@@ -600,6 +756,14 @@ class _Walk:
                 "external_login",
                 f"The community signs in through its own site ({login['foreign']}), not Circle "
                 "-- it needs an account there. The bot never types the Circle login outside Circle.",
+            )
+        if login.get("challenge"):
+            return self._done(
+                "challenge_stop",
+                "Cloudflare asks to verify a human on the login form (Turnstile checkbox) and "
+                f"Continue stayed disabled for {EMAIL_STEP_WAIT_MS // 1000}s -- a person has to "
+                "check it; no bypass attempted.",
+                tag="login-challenge",
             )
         if not login.get("ok"):
             return self._done("needs_login", f"Automatic login failed ({login.get('reason')}).",
@@ -655,6 +819,8 @@ class _Walk:
         """Put one answer into field ``index``. Plain inputs, textareas, native
         selects, checkboxes and radios only -- a custom widget goes to a person."""
         prefix = f"community_member_profile_fields_attributes.{index}."
+        if isinstance(value, str) and self._eval(LOCATION_INPUT_JS, prefix):
+            return self._fill_location(prefix, value)
         elements = [e for e in (self._eval(PROFILE_FIELD_ELEMENTS_JS, prefix) or []) if e.get("visible")]
 
         def css(name: str) -> str:
@@ -688,6 +854,31 @@ class _Walk:
             self.page.fill(css(box["name"]), str(value))
             return True
         return False
+
+    def _fill_location(self, prefix: str, place: str) -> bool:
+        """Type the place into Circle's location search and pick the matching
+        suggestion; True once the field holds a picked place."""
+        box = '[data-warmr-location="1"]'
+        self.page.click(box)
+        self.page.fill(box, place)
+        for _ in range(10):  # suggestions come from Circle's place search
+            self.page.wait_for_timeout(500)
+            if self._eval(PICK_LOCATION_JS, place):
+                self.page.click('[data-warmr-click="1"]')
+                self.page.wait_for_timeout(500)
+                return bool(self._eval(LOCATION_VALUE_JS, prefix))
+        return False
+
+    def _agree_to_terms(self) -> None:
+        """Tick Circle's terms-and-privacy box on the profile step, if unticked."""
+        try:
+            label = self._eval(TERMS_CONSENT_JS)
+            if label:
+                self.page.click('[data-warmr-click="1"]')
+                self.page.wait_for_timeout(500)
+                logger.info("profile step: ticked %r", label)
+        except Exception:  # noqa: BLE001 - a missing box leaves Continue to decide
+            logger.info("profile step: terms box could not be ticked", exc_info=True)
 
     def _complete_profile_step(self) -> EgoJoinResult | None:
         """One pass over "Create a profile". None to look again; a result when stopped."""
@@ -727,6 +918,7 @@ class _Walk:
                     return self._done("profile_incomplete",
                                       f'Profile step: could not fill required "{f.label}" '
                                       f"({f.field_type}) -- custom widget?")
+        self._agree_to_terms()
         if not self._click_first(PROFILE_CONTINUE_TEXTS):
             if self._on_code_page():
                 return self._code_step("on the profile step", member=True)
