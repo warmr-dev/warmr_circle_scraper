@@ -72,6 +72,8 @@ const JOIN_TEXTS = [
   // goes to /checkout -- caught by the onCheckout guard as paid_skip.
   "Buy",
   "Rejoindre", "Rejoindre la communauté", "S'inscrire", "Demander à rejoindre",
+  // French "Join space" (campus.lafusee.net, 2026-11-09)
+  "Rejoindre l'espace",
   "Beitreten", "Jetzt beitreten", "Registrieren", "Mitglied werden",
   "Unirse", "Únete", "Unirme", "Registrarse", "Solicitar unirse",
   "Participar", "Inscrever-se", "Cadastre-se", "Entrar na comunidade",

@@ -168,3 +168,22 @@ def test_a_closed_fit_community_waits_for_its_weekly_look(tmp_path):
         not_fit = _row(s, "not-fit", source=DNS_SOURCE, name="N", join_type="locked_unknown")
         not_fit.join_type_checked_at = now - timedelta(days=30)
     assert _queues(db, now)["join_type_recheck"]["waiting"] == 1
+
+
+def test_a_community_resting_after_a_handoff_is_not_waiting_for_the_bot(tmp_path):
+    """2026-11-09: nine handed-off communities resting for a week made the
+    join queue look stuck for two days while the bot had nothing to take."""
+    from circle_leads.reach import HANDOFF_REST
+
+    db = Database(f"sqlite:///{tmp_path / 'rest.db'}")
+    now = utcnow().replace(tzinfo=None)
+    with db.session() as s:
+        resting = _row(s, "resting", source=DNS_SOURCE, name="R", join_type="free_join",
+                       icp=True, join_status=JoinStatus.PROFILE_PENDING.value)
+        resting.join_attempted_at = now - timedelta(days=2)
+    q = _queues(db, now)["join"]
+    assert q["waiting"] == 0 and not q["stale"]
+
+    later = now + HANDOFF_REST
+    q = _queues(db, later)["join"]
+    assert q["waiting"] == 1          # the week is over: the bot takes it again

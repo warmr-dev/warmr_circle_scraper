@@ -46,7 +46,51 @@ That difference is the entire reason the split exists.
      └───────────────────────┘
 ```
 
-## Automatic runs on the droplet (2026-09-29)
+## Automatic runs on the Mac (since 2026-11-06)
+
+The droplet cannot join any more: since the move to `circle-bot-prod`,
+Circle's central login (`login.circle.so`) shows that address a Cloudflare
+Turnstile checkbox after the email; from the Mac the check passes by itself.
+So the same CDP walk (below) runs on the Mac, against a dedicated Google
+Chrome on its own profile:
+
+| thing | where |
+|---|---|
+| schedule | `~/Library/LaunchAgents/com.warmr.autojoin.plist`, every 15 minutes |
+| launcher | `~/Library/Application Support/warmr/worker/run_autojoin.sh` |
+| code | `venv-cdp` there, a non-editable install of the repo (launchd cannot read `~/Documents`) |
+| Chrome profile | `~/Library/Application Support/warmr/hermes-chrome/acct4`, CDP on `127.0.0.1:9222` |
+| attempt log | `data/join_attempts.log` there (daily cap, rest after a handoff) |
+| logs | `~/Library/Logs/warmr/autojoin.log`, `autojoin.err`, `join-shots/` |
+
+- **One community a run.** The launcher asks the queue first (`--dry-run`);
+  with nothing to join it exits without starting Chrome. Otherwise it joins
+  one (`WARMR_AUTOJOIN_LIMIT`, default 1): a new community is joined within
+  about 15 minutes, a backlog at most 4 an hour, and the 25-a-day cap per
+  account still holds. About 94 visits from one account in a day brought 2FA
+  challenges on 2026-09-16.
+- **A handoff rests for a week** (`reach.HANDOFF_REST`). A community the bot
+  stopped on -- a question it may not answer, a page it could not name --
+  sits out the automatic runs for 7 days and is not counted as waiting on the
+  dashboard; `--host` retries it at once. Before this, every run walked the
+  same few stuck hosts again, each visit mailing a new login code.
+- **Enter through the central session first.** A full sign-in (email, code)
+  on a community behind Circle's central login ended the account's sessions in
+  the other such communities: on 2026-11-09 six re-entries in a row left only
+  the last session alive. Opening `login.circle.so/sign_in?request_host=<host>`
+  while the browser still holds the central session lands on the community
+  signed in and ended none. The walk tries that first and signs in fully only
+  when it does not work. Communities with their own login (la-fusee, hero,
+  hailerz) were not affected.
+- **Circle's own profile-step pieces**: the "I agree to the terms and privacy
+  policy" box is ticked; a "Location" field (a place search, `field_type`
+  `location`) gets the persona's `location`, typed in and picked from Circle's
+  suggestions -- never a place the model made up.
+- **The central login is never the community.** `login.circle.so` answers
+  `/internal_api/pundit_users` for the account's own space; it is not read as
+  membership, and its cookies are not stored as a community session.
+
+## Automatic runs on the droplet (2026-09-29, off since 2026-11-06)
 
 The known path now runs by itself, from the join queue, and writes what
 happened to the database -- `circle-leads auto-join --driver cdp --account 4`,

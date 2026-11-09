@@ -52,6 +52,9 @@ TEXT_TYPES = {"text", "textarea", "link", "url", "number", "email"}
 CHOICE_TYPES = {"select", "radio", "dropdown"}
 MULTI_CHOICE_TYPES = {"multi_select", "checkboxes", "checkbox_group"}
 BOOL_TYPES = {"checkbox", "boolean", "toggle"}
+# Circle's place search ("Search location"): the persona's `location` is typed
+# in and the browser picks the matching suggestion (cdp_join._fill_location).
+LOCATION_TYPES = {"location"}
 
 
 @dataclass
@@ -207,9 +210,9 @@ def _fit_to_field(llm, f: FormField, answer: str) -> Any | None:
         return [picked] if f.field_type in MULTI_CHOICE_TYPES else picked
     if f.field_type in {"link", "url"} and not re.match(r"https?://", answer.strip()):
         return None
-    if f.field_type in TEXT_TYPES:
+    if f.field_type in TEXT_TYPES | LOCATION_TYPES:
         return answer.strip()[:MAX_ANSWER_CHARS]
-    return None  # location, date, file upload, ... -- not something to guess
+    return None  # date, file upload, ... -- not something to guess
 
 
 # --- the database ---------------------------------------------------------------
@@ -296,10 +299,16 @@ def resolve_form(
                     ans = _stored_answer(s, canonical_id, account)
 
             if ans is None:
-                generated = _generate_answer(llm, persona, f)
+                # A place is a fact, not something to word: the persona's own,
+                # or a person's -- never the model's.
+                if f.field_type in LOCATION_TYPES:
+                    place = persona.get("location")
+                    generated, source = (str(place) if place else None), "persona"
+                else:
+                    generated, source = _generate_answer(llm, persona, f), "ai"
                 if generated is not None:
                     ans = JoinFormAnswer(question_id=canonical_id, account=account,
-                                         answer=generated, source="ai", reviewed=False)
+                                         answer=generated, source=source, reviewed=False)
                     s.add(ans)
                     s.flush()
 

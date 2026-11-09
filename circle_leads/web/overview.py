@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 
 from circle_leads.reach import (
     closed_recheck_due, join_queue, on_circle, readable, recheckable_unknown,
+    resting_after_handoff,
 )
 from circle_leads.storage.models import Community, ConnectionState
 
@@ -110,7 +111,9 @@ def build_queues(s: Session, now: datetime, *, named) -> list[dict[str, Any]]:
         # reads it, by decision (reach.py).
         ("read", and_(fit, readable(), c.last_synced_at.is_(None)),
          c.last_synced_at, and_(fit, readable())),
-        ("join", join_queue(),
+        # A community the bot handed to a person rests for a week; it is not
+        # waiting for the bot, so it neither counts nor makes the queue stale.
+        ("join", and_(join_queue(), ~resting_after_handoff(now)),
          c.join_attempted_at, and_(fit, on_circle(), jt == "free_join")),
     ]
     # One round trip, as elsewhere on this page.
