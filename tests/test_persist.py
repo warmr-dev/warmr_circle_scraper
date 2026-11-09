@@ -191,3 +191,56 @@ def test_paid_communities_are_deprioritized(db):
     )
     scores = {r["slug"]: r["score"] for r in new_since(db)}
     assert scores["freecomm"] > scores["paidcomm"]
+
+
+def _rows(db):
+    from sqlalchemy import select
+
+    from circle_leads.storage.models import Community
+    with db.session() as s:
+        return {c.slug: c.host for c in s.scalars(select(Community)).all()}
+
+
+def test_a_find_is_stored_with_its_own_address(db):
+    """small-town-startup.circle.so and 74 more, 2026-11-09: stored without a
+    host, so the join-type check and the join queue never saw them."""
+    from sqlalchemy import select
+
+    from circle_leads.reach import real_host
+    from circle_leads.storage.models import Community
+
+    save(db, [rc("small-town-startup", 60),
+              rc("the-build", 60, url="https://discover.circle.so/products/attnthebuild")],
+         min_score=25)
+    assert _rows(db) == {"small-town-startup": "small-town-startup.circle.so",
+                         "the-build": None}   # a directory card names no community
+    with db.session() as s:
+        assert s.scalars(select(Community.slug).where(real_host())).all() == [
+            "small-town-startup"]
+
+
+def test_the_same_community_under_another_slug_is_not_a_second_row(db):
+    save(db, [rc("a", 60, url="https://acme.circle.so")], min_score=25)
+    again = save(db, [rc("acme-community", 60, url="https://acme.circle.so/join?x=1")],
+                 min_score=25)
+    assert again.new_count == 0
+    assert _rows(db) == {"a": "acme.circle.so"}
+
+
+def test_two_finds_of_one_host_in_a_batch_make_one_row(db):
+    result = save(db, [rc("a", 60, url="https://acme.circle.so"),
+                       rc("b", 60, url="https://acme.circle.so/feed")], min_score=25)
+    assert result.new_count == 1
+    assert _rows(db) == {"a": "acme.circle.so"}
+
+
+def test_a_hostless_row_gets_its_address_when_found_again(db):
+    from sqlalchemy import select
+
+    from circle_leads.storage.models import Community
+
+    save(db, [rc("a", 60)], min_score=25)
+    with db.session() as s:
+        s.scalar(select(Community).where(Community.slug == "a")).host = None
+    save(db, [rc("a", 60)], min_score=25)
+    assert _rows(db) == {"a": "a.circle.so"}

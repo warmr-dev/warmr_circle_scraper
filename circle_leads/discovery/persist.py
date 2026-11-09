@@ -27,7 +27,7 @@ from circle_leads.discovery.validate_finds import (
     validate_url,
 )
 from circle_leads.storage.activity import log_activity
-from circle_leads.storage.database import Database
+from circle_leads.storage.database import Database, community_host
 from circle_leads.storage.models import AccessState, Community, PermissionStatus
 
 logger = logging.getLogger(__name__)
@@ -101,12 +101,22 @@ def persist_finds(
     with db.session() as s:
         for rc in validated:
             platform = detect_platform(rc.join_url, session=http)
+            # The community's own address. Without it a find never reaches the
+            # join-type check or the join queue (reach.real_host): from
+            # 2026-09-23, when the column came in, to 2026-11-09 every find was
+            # stored without one -- 75 rows with a real address, none joined.
+            host = community_host(rc.join_url)
             existing = s.scalar(select(Community).where(Community.slug == rc.slug))
+            if existing is None and host:
+                # One host is one community (communities.host is unique): the
+                # same community found under another slug is not a new row.
+                existing = s.scalar(select(Community).where(Community.host == host))
             if existing is None:
                 community = Community(
                     slug=rc.slug,
                     name=rc.name,
                     url=rc.join_url,
+                    host=host,
                     platform=platform,
                     discovery_source=f"{source}:{niche}" if niche else source,
                     access_status=AccessState.NOT_VISITED.value,
@@ -118,9 +128,14 @@ def persist_finds(
                     description=rc.description,
                 )
                 s.add(community)
+                s.flush()  # a later find in this batch with the same host sees it
                 result.new.append(rc)
             else:
                 changed = False
+                if host and not existing.host and s.scalar(
+                        select(Community.id).where(Community.host == host)) is None:
+                    existing.host = host
+                    changed = True
                 if platform and existing.platform != platform:
                     existing.platform = platform
                     changed = True
