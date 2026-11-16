@@ -1,15 +1,15 @@
-# What the join bot may say about each Circle account when a community's
-# sign-up or profile form has a required question (circle_leads/join/forms.py).
+# What the join bot says about each Circle account when a community's sign-up
+# or profile form has a required question (circle_leads/join/forms.py).
 #
-# The bot answers ONLY from these facts. Anything they don't cover -- or any
-# fact left null -- sends that community to a human instead of letting the
-# model invent an answer. Keep every value true: community admins read these,
-# and the people who post in those communities are the ones we want to work
-# with.
+# The bot answers from these facts first. Since 2026-11-16 (the user's
+# decision), a required question the facts do not settle gets the most
+# plausible answer for this persona from the model, stored with source
+# `ai_invented` -- never a contact detail, link, ID or date, and an opt-in to
+# share data is declined. Only required fields are ever filled.
 #
 # `default` applies to every account; an entry under `accounts` (main, test,
-# 3, ...) adds or overrides facts for that one account. Override the whole file
-# with JOIN_PERSONAS_PATH.
+# 3, 4, ...) adds or overrides facts for that one account. Override the whole
+# file with JOIN_PERSONAS_PATH. A fact left null is dropped.
 
 # Profile texts approved by the user on 2026-09-23 (WORKLOG.md, the
 # foundercareers join). A choice field such as "Role" takes the option closest
@@ -29,5 +29,39 @@ default:
   reason_for_joining: "To follow the discussions, meet founders and see where we can help."
 
 accounts:
+  # Retired on 2026-09-25 (join/accounts.RETIRED_ACCOUNTS); kept for old rows.
   main: {}
   test: {}
+  # The join bot's account since 2026-09-29. Name from the user (2026-11-16,
+  # it matches the LinkedIn answer stored for this account on 2026-11-09);
+  # the rest filled in the same day at the user's request ("все что не
+  # хватает запиши") to be plausible for this persona.
+  "4":
+    full_name: "Aslan Perdeshov"
+    first_name: "Aslan"
+    last_name: "Perdeshov"
+    headline: "Business Development Manager at Rapid Developers"
+    job_title: "Business Development Manager"
+    job_level: "Manager"
+    department: "Sales / Business development"
+    years_of_experience: "6"
+    bio: >-
+      Business development at Rapid Developers, a small software studio that
+      builds web and mobile apps, MVPs and AI features for startups and small
+      businesses. Here to learn from founders and operators, share what we see
+      in software projects, and meet people we can help.
+    what_the_company_does: >-
+      Custom software development: web and mobile apps, MVPs, AI integrations
+      and automation for startups and small businesses
+    industry: "Software development / IT services"
+    company_size: "11-50 employees"
+    company_stage: "Bootstrapped, profitable"
+    city: "Ho Chi Minh City"
+    work_style: "Remote"
+    languages: ["English", "Russian"]
+    skills: ["Business development", "Partnerships", "B2B sales",
+             "Software project scoping", "Client relations"]
+    interests: ["SaaS", "AI tools", "Startups", "Product development", "Growth"]
+    how_i_found_communities: "Circle Discover and web search"
+    looking_for: "Founders and teams that need software built, and peers to learn from"
+    open_to_work: "No -- here to network, not looking for a job"
