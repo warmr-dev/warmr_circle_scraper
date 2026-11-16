@@ -200,9 +200,43 @@ def test_recheck_resolves_a_stuck_discover_row(monkeypatch):
     assert stats == {"total": 1, "resolved": 1, "still_unresolved": 0, "errors": 0}
     with db.session() as s:
         row = s.scalar(select(Community).where(Community.slug == "the-freedom-club"))
-        assert row.url == "https://freedom.circle.so/join"
+        # The community's own address, host included: url alone kept the row
+        # out of the join queue (reach.real_host keys on host).
+        assert (row.url, row.host) == ("https://freedom.circle.so", "freedom.circle.so")
         assert row.platform == "circle"
         assert row.join_type == JoinType.FREE_JOIN
+        assert row.join_type_checked_at is not None
+
+
+def test_recheck_leaves_a_card_for_a_community_we_hold(monkeypatch):
+    db = _db()
+    with db.session() as s:
+        get_or_create_community(s, slug="freedom", url="https://freedom.circle.so").host = \
+            "freedom.circle.so"
+        c = get_or_create_community(
+            s, slug="the-freedom-club",
+            url="https://discover.circle.so/products/the-freedom-club",
+        )
+        c.platform = PLATFORM_DISCOVER
+
+    monkeypatch.setattr(circle_directory, "_require_playwright", lambda: _FakePlaywrightCM)
+    monkeypatch.setattr(circle_directory, "resolve_join_url", lambda page, slug, **kw: "https://freedom.circle.so/join")
+    monkeypatch.setattr(
+        "circle_leads.discovery.discover_communities.detect_platform",
+        lambda url, **kw: "circle",
+    )
+    monkeypatch.setattr(
+        "circle_leads.discovery.join_type.fetch_join_classification",
+        lambda host, **kw: JoinClassification(JoinType.FREE_JOIN, "public signup"),
+    )
+
+    stats = recheck_unresolved_join_urls(db, request_pause=0)
+
+    assert stats["resolved"] == 0 and stats["still_unresolved"] == 1
+    with db.session() as s:
+        row = s.scalar(select(Community).where(Community.slug == "the-freedom-club"))
+        assert row.host is None
+        assert row.notes.startswith("directory card: same community as #")
 
 
 def test_recheck_keeps_the_listing_price_when_the_host_is_private(monkeypatch):

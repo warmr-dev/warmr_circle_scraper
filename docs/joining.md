@@ -55,6 +55,26 @@ through `get_or_create_community`, which does the same. Until 2026-11-09 search
 finds were stored without one, so none of them ever reached the queue; 73 rows
 were filled in by hand that day (`docs/changes/2026-11-09-discovery-saves-host.md`).
 
+**A Discover card.** The card's page says where its Join button goes: the
+community's own address (a signup page, or its `/checkout/…` for a paid tier)
+or an outside sales page. `discovery/directory_cards.py` reads it — one plain
+GET, no browser — and when the button leads to a Circle community the row takes
+that host, `url` becomes `https://<host>`, and the join-type check asks Circle
+on its next pass. The card's price comes from the page's schema.org offers.
+
+- A search find gets this at once (`persist.py`, through `validate_url`).
+- Cards already stored are read by the worker before each join-type pass,
+  50 at a time, ICP-fit first (stage `directory_cards`, result in
+  `settings.directory_cards_last_result`). By hand:
+  `circle-leads resolve-cards --limit 200`.
+- A card that is settled without an address is noted in `communities.notes`
+  (`directory card: …`) and not read again: its button leads off Circle (row
+  platform `other`), the page shows no link, Circle took the listing down
+  (404), or another row already holds that host (`same community as #<id>`).
+  Clear the note to have it read again.
+- A paid card still reaches the queue only if Circle's own answer says anyone
+  can sign up (a free tier); otherwise it is the main account's, by hand.
+
 ## Automatic runs on the Mac (since 2026-11-06)
 
 The droplet cannot join any more: since the move to `circle-bot-prod`,
@@ -99,6 +119,12 @@ Chrome on its own profile:
   signed in and ended none. The walk tries that first and signs in fully only
   when it does not work. Communities with their own login (la-fusee, hero,
   hailerz) were not affected.
+- **A login page that asks how first.** Some communities' "Log in" opens a
+  page with no field and a "Sign in with an email" button (beside SSO
+  buttons, or alone). The walk clicks that button (`EMAIL_CHOICE_TEXTS`, the
+  email entries of `LOGIN_PIVOT_TEXTS`) while it waits for the form; it never
+  clicks "Sign up" there. Before 2026-11-16 it waited 6.4 s for a field and
+  handed the community over (`needs_login`, community.marketingtalentexchange.com).
 - **Circle's own profile-step pieces**: the "I agree to the terms and privacy
   policy" box is ticked; a "Location" field (a place search, `field_type`
   `location`) gets the persona's `location`, typed in and picked from Circle's
@@ -122,7 +148,20 @@ started by `warmr-join.timer` every four hours (`deploy/droplet/`).
   membership, a handoff) or `email_code_needed` (after it, `profile_pending`).
 - **The profile questions** are answered from `join_form_answers`
   (`forms.resolve_form`) in the same visit; a question the bot may not answer
-  stops it as `profile_incomplete`, naming the question.
+  stops it as `profile_incomplete`, naming the question. Only required
+  fields are filled. Order: a stored answer for this account; the persona's
+  facts (`config/join_personas.yaml`); since 2026-11-16 (the user's
+  decision), the most plausible answer for the persona, stored with source
+  `ai_invented` so it can be reviewed in `join_form_answers`. Never made up:
+  a contact detail, link, ID, date or a single yes/no box. An opt-in to share
+  the member's data or receive marketing takes the declining option (source
+  `rule`), without the model.
+- **Circle's own choice widgets.** A one-option field is a button
+  `[role=combobox]` over `[role=option]` items; a checkbox field with choices
+  is a group of `[role=checkbox]`, one per option, each named by its label
+  (community.marketingtalentexchange.com, 2026-11-16). The walk opens the list
+  and clicks the option, and ticks each box it means; an option the form does
+  not offer is never typed into the widget's hidden input.
 - **Outcomes** go where the Mac's runs put them: `join_status`, the account in
   `communities.join_account`, the session through `connect_host`, every visit
   in `activity_log` (`join`), a handoff in `join_status_detail` and
@@ -252,8 +291,8 @@ because a community we had already joined still rendered a "Join" button.
   or a caller decides what to store.
 - **A form only a person can answer is `needs_human`.** `icecampus` asks for a
   passport or ID number, date of birth, phone and home address. The bot does
-  not answer that, and the status says so rather than pretending the community
-  is unreachable.
+  not answer that -- not even with a made-up answer -- and the status says so
+  rather than pretending the community is unreachable.
 
 ## Where it runs
 

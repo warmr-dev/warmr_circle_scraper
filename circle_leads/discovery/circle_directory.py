@@ -218,6 +218,7 @@ def recheck_unresolved_join_urls(db, *, limit: int | None = None,
 
     from sqlalchemy import select
 
+    from circle_leads.discovery.directory_cards import apply_card_link
     from circle_leads.discovery.discover_communities import (
         PLATFORM_CIRCLE, PLATFORM_DISCOVER, detect_platform,
     )
@@ -261,8 +262,15 @@ def recheck_unresolved_join_urls(db, *, limit: int | None = None,
                         c = s.get(Community, community_id)
                         if c is None:
                             continue
-                        c.url = href
-                        c.platform = new_platform
+                        if new_platform == PLATFORM_CIRCLE and c.host is None:
+                            # url alone left the row out of the join queue,
+                            # which keys on host (reach.real_host).
+                            if apply_card_link(s, c, href, new_platform) != "resolved":
+                                still_unresolved += 1
+                                continue
+                        else:
+                            c.url = href
+                            c.platform = new_platform
                         if classification is not None:
                             classification = refine_join_classification(classification, c)
                             c.join_type = classification.join_type
