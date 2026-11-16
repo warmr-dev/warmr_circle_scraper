@@ -239,6 +239,62 @@ PROFILE_FIELD_ELEMENTS_JS = """(prefix) => [...document.querySelectorAll('[name^
     visible: !!(e.offsetParent || e.getClientRects().length),
   }))"""
 
+# Circle draws a choice profile field with its own widgets, not native inputs
+# (measured on community.marketingtalentexchange.com, 2026-11-16). Each custom
+# field sits in [data-testid=profile-custom-field] with a hidden
+# `...<index>.profile_field_id`. A one-option field is a button[role=combobox]
+# that opens [role=option] items; a checkbox field with choices is a group of
+# span[role=checkbox] (aria-checked), each named by its <label>. Typing the
+# answer into the combobox's hidden input, as the walk did, chose nothing.
+CHOICE_WIDGET_JS = """(prefix) => {
+  document.querySelectorAll('[data-warmr-click]').forEach((el) => el.removeAttribute('data-warmr-click'));
+  const id = document.querySelector('[name="' + prefix + 'profile_field_id"]');
+  const scope = id && id.closest('[data-testid=profile-custom-field]');
+  if (!scope) return null;
+  if (scope.querySelector('[role=checkbox]')) return 'checkboxes';
+  const box = scope.querySelector('[role=combobox]');
+  if (!box || scope.querySelector('[name="' + prefix + 'payload"]')) return null;  // location
+  box.setAttribute('data-warmr-click', '1');
+  return 'combobox';
+}"""
+
+MARK_OPTION_JS = """(wanted) => {
+  const norm = (t) => (t || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+  document.querySelectorAll('[data-warmr-click]').forEach((el) => el.removeAttribute('data-warmr-click'));
+  const visible = (el) => !!(el.offsetParent || el.getClientRects().length);
+  const option = [...document.querySelectorAll('[role=option]')]
+    .find((o) => visible(o) && norm(o.textContent) === norm(wanted));
+  if (!option) return false;
+  option.setAttribute('data-warmr-click', '1');
+  return true;
+}"""
+
+COMBOBOX_TEXT_JS = """(prefix) => {
+  const id = document.querySelector('[name="' + prefix + 'profile_field_id"]');
+  const box = id && id.closest('[data-testid=profile-custom-field]')?.querySelector('[role=combobox]');
+  return box ? box.textContent.replace(/\\s+/g, ' ').trim() : '';
+}"""
+
+# {prefix, wanted}: "checked" (already), "marked" (click it), or null (no
+# such box in this field).
+CHECKBOX_OPTION_JS = """({prefix, wanted}) => {
+  const norm = (t) => (t || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+  document.querySelectorAll('[data-warmr-click]').forEach((el) => el.removeAttribute('data-warmr-click'));
+  const id = document.querySelector('[name="' + prefix + 'profile_field_id"]');
+  const scope = id && id.closest('[data-testid=profile-custom-field]');
+  if (!scope) return null;
+  for (const box of scope.querySelectorAll('[role=checkbox]')) {
+    const ids = (box.getAttribute('aria-labelledby') || '').split(/\\s+/).filter(Boolean);
+    const text = ids.map((i) => document.getElementById(i)?.textContent || '').join(' ') ||
+      (box.closest('label')?.textContent || '');
+    if (norm(text) !== norm(wanted)) continue;
+    if (box.getAttribute('aria-checked') === 'true') return 'checked';
+    box.setAttribute('data-warmr-click', '1');
+    return 'marked';
+  }
+  return null;
+}"""
+
 # A "location" profile field (hrone, firefly; seen 2026-11-09) is a search box
 # (input[role=combobox], "Search location") over Circle's place suggestions;
 # the value Circle saves is the picked place's id in a hidden
@@ -831,6 +887,10 @@ class _Walk:
         prefix = f"community_member_profile_fields_attributes.{index}."
         if isinstance(value, str) and self._eval(LOCATION_INPUT_JS, prefix):
             return self._fill_location(prefix, value)
+        if not isinstance(value, bool):
+            picked = self._fill_choice_widget(prefix, value)
+            if picked is not None:
+                return picked
         elements = [e for e in (self._eval(PROFILE_FIELD_ELEMENTS_JS, prefix) or []) if e.get("visible")]
 
         def css(name: str) -> str:
@@ -864,6 +924,38 @@ class _Walk:
             self.page.fill(css(box["name"]), str(value))
             return True
         return False
+
+    def _fill_choice_widget(self, prefix: str, value: Any) -> bool | None:
+        """Pick options in Circle's own choice widgets (CHOICE_WIDGET_JS).
+        None when the field has no such widget; False when the options did
+        not take -- never typed into the widget's hidden input instead."""
+        wanted = [str(v) for v in (value if isinstance(value, list) else [value])]
+        kind = self._eval(CHOICE_WIDGET_JS, prefix)
+        if kind == "combobox" and len(wanted) == 1:
+            self.page.click('[data-warmr-click="1"]')
+            for _ in range(8):     # the options render a moment after the click
+                self.page.wait_for_timeout(300)
+                if self._eval(MARK_OPTION_JS, wanted[0]):
+                    self.page.click('[data-warmr-click="1"]')
+                    self.page.wait_for_timeout(300)
+                    shown = " ".join(str(self._eval(COMBOBOX_TEXT_JS, prefix) or "").split())
+                    return shown.lower() == " ".join(wanted[0].split()).lower()
+            try:
+                self.page.keyboard.press("Escape")
+            except Exception:  # noqa: BLE001 - the list may have closed itself
+                pass
+            return False
+        if kind == "checkboxes":
+            for text in wanted:
+                state = self._eval(CHECKBOX_OPTION_JS, {"prefix": prefix, "wanted": text})
+                if state is None:
+                    return False
+                if state == "marked":
+                    self.page.click('[data-warmr-click="1"]')
+                    self.page.wait_for_timeout(200)
+            return all(self._eval(CHECKBOX_OPTION_JS, {"prefix": prefix, "wanted": t}) == "checked"
+                       for t in wanted)
+        return None if kind is None else False
 
     def _fill_location(self, prefix: str, place: str) -> bool:
         """Type the place into Circle's location search and pick the matching

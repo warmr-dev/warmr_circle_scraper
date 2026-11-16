@@ -140,7 +140,20 @@ started by `warmr-join.timer` every four hours (`deploy/droplet/`).
   membership, a handoff) or `email_code_needed` (after it, `profile_pending`).
 - **The profile questions** are answered from `join_form_answers`
   (`forms.resolve_form`) in the same visit; a question the bot may not answer
-  stops it as `profile_incomplete`, naming the question.
+  stops it as `profile_incomplete`, naming the question. Only required
+  fields are filled. Order: a stored answer for this account; the persona's
+  facts (`config/join_personas.yaml`); since 2026-11-16 (the user's
+  decision), the most plausible answer for the persona, stored with source
+  `ai_invented` so it can be reviewed in `join_form_answers`. Never made up:
+  a contact detail, link, ID, date or a single yes/no box. An opt-in to share
+  the member's data or receive marketing takes the declining option (source
+  `rule`), without the model.
+- **Circle's own choice widgets.** A one-option field is a button
+  `[role=combobox]` over `[role=option]` items; a checkbox field with choices
+  is a group of `[role=checkbox]`, one per option, each named by its label
+  (community.marketingtalentexchange.com, 2026-11-16). The walk opens the list
+  and clicks the option, and ticks each box it means; an option the form does
+  not offer is never typed into the widget's hidden input.
 - **Outcomes** go where the Mac's runs put them: `join_status`, the account in
   `communities.join_account`, the session through `connect_host`, every visit
   in `activity_log` (`join`), a handoff in `join_status_detail`.
@@ -269,8 +282,8 @@ because a community we had already joined still rendered a "Join" button.
   or a caller decides what to store.
 - **A form only a person can answer is `needs_human`.** `icecampus` asks for a
   passport or ID number, date of birth, phone and home address. The bot does
-  not answer that, and the status says so rather than pretending the community
-  is unreachable.
+  not answer that -- not even with a made-up answer -- and the status says so
+  rather than pretending the community is unreachable.
 
 ## Where it runs
 
