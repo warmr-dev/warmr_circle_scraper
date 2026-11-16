@@ -19,7 +19,12 @@ from sqlalchemy import select
 
 from circle_leads.scraper.http_client import shared_session
 
-from circle_leads.discovery.discover_communities import detect_platform
+from circle_leads.discovery.directory_cards import (
+    CARD_URL_PREFIX,
+    NOTE_PREFIX as CARD_NOTE_PREFIX,
+    apply_card_link,
+)
+from circle_leads.discovery.discover_communities import PLATFORM_CIRCLE, detect_platform
 from circle_leads.discovery.finder import RankedCommunity
 from circle_leads.discovery.validate_finds import (
     is_subdomain_community,
@@ -70,6 +75,9 @@ def persist_finds(
     # ones. Discover /products pages are kept only if they load a real page.
     http = session or shared_session()
     validated: list[RankedCommunity] = []
+    # A Discover card's Join link, by slug: the community's own address when
+    # it leads to one (directory_cards.apply_card_link).
+    card_links: dict[str, str] = {}
     for rc in ranked:
         if rc.score < min_score:
             continue
@@ -78,6 +86,8 @@ def persist_finds(
             if not v.ok:
                 logger.info("Dropping dead find %s (%s)", rc.slug, v.reason)
                 continue
+            if v.join_link and (rc.join_url or "").startswith(CARD_URL_PREFIX):
+                card_links[rc.slug] = v.join_link
             if v.is_free is not None:
                 rc.is_free = v.is_free
             if getattr(v, "price", None):
@@ -100,23 +110,35 @@ def persist_finds(
 
     with db.session() as s:
         for rc in validated:
-            platform = detect_platform(rc.join_url, session=http)
+            # A Discover card whose Join button leads to a Circle community is
+            # stored as that community: the card's own address
+            # (discover.circle.so) never reaches the join queue. 1647 cards
+            # sat without one on 2026-11-16 (directory_cards.py).
+            address, card_link = rc.join_url, None
+            link = card_links.get(rc.slug)
+            if link and community_host(link) and \
+                    detect_platform(link, session=http) == PLATFORM_CIRCLE:
+                address, card_link = f"https://{community_host(link)}", link
+            platform = detect_platform(address, session=http)
             # The community's own address. Without it a find never reaches the
             # join-type check or the join queue (reach.real_host): from
             # 2026-09-23, when the column came in, to 2026-11-09 every find was
             # stored without one -- 75 rows with a real address, none joined.
-            host = community_host(rc.join_url)
+            host = community_host(address)
             existing = s.scalar(select(Community).where(Community.slug == rc.slug))
             if existing is None and host:
                 # One host is one community (communities.host is unique): the
                 # same community found under another slug is not a new row.
                 existing = s.scalar(select(Community).where(Community.host == host))
+            if existing is None and card_link:
+                existing = s.scalar(select(Community).where(Community.url == address))
             if existing is None:
                 community = Community(
                     slug=rc.slug,
                     name=rc.name,
-                    url=rc.join_url,
+                    url=address,
                     host=host,
+                    notes=f"{CARD_NOTE_PREFIX} found as {rc.join_url}" if card_link else None,
                     platform=platform,
                     discovery_source=f"{source}:{niche}" if niche else source,
                     access_status=AccessState.NOT_VISITED.value,
@@ -132,7 +154,12 @@ def persist_finds(
                 result.new.append(rc)
             else:
                 changed = False
-                if host and not existing.host and s.scalar(
+                if card_link and existing.host is None and \
+                        (existing.url or "").startswith(CARD_URL_PREFIX):
+                    # The card stored on an earlier run, now with its address.
+                    changed = apply_card_link(s, existing, card_link,
+                                              PLATFORM_CIRCLE) == "resolved"
+                elif host and not existing.host and s.scalar(
                         select(Community.id).where(Community.host == host)) is None:
                     existing.host = host
                     changed = True

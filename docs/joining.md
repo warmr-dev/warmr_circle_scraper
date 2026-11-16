@@ -55,6 +55,26 @@ through `get_or_create_community`, which does the same. Until 2026-11-09 search
 finds were stored without one, so none of them ever reached the queue; 73 rows
 were filled in by hand that day (`docs/changes/2026-11-09-discovery-saves-host.md`).
 
+**A Discover card.** The card's page says where its Join button goes: the
+community's own address (a signup page, or its `/checkout/…` for a paid tier)
+or an outside sales page. `discovery/directory_cards.py` reads it — one plain
+GET, no browser — and when the button leads to a Circle community the row takes
+that host, `url` becomes `https://<host>`, and the join-type check asks Circle
+on its next pass. The card's price comes from the page's schema.org offers.
+
+- A search find gets this at once (`persist.py`, through `validate_url`).
+- Cards already stored are read by the worker before each join-type pass,
+  50 at a time, ICP-fit first (stage `directory_cards`, result in
+  `settings.directory_cards_last_result`). By hand:
+  `circle-leads resolve-cards --limit 200`.
+- A card that is settled without an address is noted in `communities.notes`
+  (`directory card: …`) and not read again: its button leads off Circle (row
+  platform `other`), the page shows no link, Circle took the listing down
+  (404), or another row already holds that host (`same community as #<id>`).
+  Clear the note to have it read again.
+- A paid card still reaches the queue only if Circle's own answer says anyone
+  can sign up (a free tier); otherwise it is the main account's, by hand.
+
 ## Automatic runs on the Mac (since 2026-11-06)
 
 The droplet cannot join any more: since the move to `circle-bot-prod`,
