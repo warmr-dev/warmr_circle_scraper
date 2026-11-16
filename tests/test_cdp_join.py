@@ -32,8 +32,11 @@ class FakeSite:
                  invite_only=False, login_host=None, login_host_is_circle=False, dead=False,
                  continue_disabled_polls=0, turnstile=False, code_after_email=False,
                  code_delay_polls=0, terms_box=False, central_says_member=False,
-                 central_session=False):
+                 central_session=False, email_choice=False):
         self.host = host
+        # "Log in" opens a page with no field, only "Sign in with an email"
+        # (and "Sign up"); the email box comes after that button.
+        self.email_choice = email_choice
         # The browser still holds the account's Circle-wide session: the
         # central sign-in page sends it straight back to the community, in.
         self.central_session = central_session
@@ -60,8 +63,13 @@ class FakeSite:
         self.member = member
         self.code_at_login = code_at_login
         self.code_after_join = code_after_join
-        self.questions = list(questions)       # [(id, label, field_type)]
-        self.answers: dict[str, str] = {}
+        # [(id, label, field_type)] or (id, label, field_type, choices)
+        self.choices = {q[0]: list(q[3]) for q in questions if len(q) > 3}
+        self.questions = [tuple(q[:3]) for q in questions]
+        self.answers: dict[str, object] = {}
+        # Circle's own widgets: the open combobox, and the ticked boxes.
+        self.combo_open = None
+        self.ticked: dict[str, list[str]] = {}
         self.profile_saved = not self.questions
         self.join_to_checkout = join_to_checkout
         self.invite_only = invite_only
@@ -160,6 +168,8 @@ class FakeSite:
     def _buttons(self) -> list[str]:
         if self.on_code:
             return ["Verify"]
+        if self.login_step == "choice":
+            return ["Sign in with an email", "Sign up"]
         if self.login_step == "email":
             return ["Continue", "Sign up"]
         if self.login_step == "password":
@@ -180,9 +190,26 @@ class FakeSite:
         if label == "__terms__":
             self.terms_agreed = True
             return
+        if str(label).startswith("__combo__"):
+            self.combo_open = int(label[len("__combo__"):])
+            return
+        if str(label).startswith("__option__"):
+            self.answers[self.questions[self.combo_open][0]] = label[len("__option__"):]
+            self.combo_open = None
+            return
+        if str(label).startswith("__tick__"):
+            index, text = label[len("__tick__"):].split("__", 1)
+            qid = self.questions[int(index)][0]
+            self.ticked.setdefault(qid, []).append(text)
+            self.answers[qid] = list(self.ticked[qid])
+            return
         if label in ("Log in", "Sign in") and self.login_step is None and not self.signed_in:
-            self.login_step = "email"
+            self.login_step = "choice" if self.email_choice else "email"
             self.url = f"https://{self.login_host}/users/sign_in"
+        elif label == "Sign in with an email" and self.login_step == "choice":
+            self.login_step = "email"
+        elif label == "Sign up":
+            raise AssertionError("the walk clicked Sign up")
         elif label == "Continue" and self.login_step == "email" and self.code_after_email:
             self.code_pending = self.code_delay_polls
             self.after_code = self._signed_in_by_code
@@ -247,6 +274,7 @@ class FakeSite:
         if path == "/internal_api/signup/profile":
             return 200, json.dumps({"name": "Bot", "time_zone": "UTC", "profile_fields": [
                 {"id": qid, "label": label, "field_type": kind, "required": True,
+                 "choices": [{"value": c} for c in self.choices.get(qid, [])],
                  "community_member_profile_field": ({"text": self.answers[qid]}
                                                     if self.answers.get(qid) else None)}
                 for qid, label, kind in self.questions]})
@@ -302,6 +330,35 @@ class FakeSite:
             return None
         if script is w.LOCATION_VALUE_JS:
             return self.answers.get(self.questions[self.location_index][0], "")
+        if script is w.CHOICE_WIDGET_JS:
+            index = int(re.search(r"\.(\d+)\.$", arg).group(1))
+            qid, _, kind = self.questions[index]
+            if kind == "checkbox" and self.choices.get(qid):
+                return "checkboxes"
+            if kind == "select" and self.choices.get(qid):
+                self.marked = f"__combo__{index}"
+                return "combobox"
+            return None
+        if script is w.MARK_OPTION_JS:
+            if self.combo_open is None:
+                return False
+            qid = self.questions[self.combo_open][0]
+            if arg not in self.choices.get(qid, []):
+                return False
+            self.marked = f"__option__{arg}"
+            return True
+        if script is w.COMBOBOX_TEXT_JS:
+            index = int(re.search(r"\.(\d+)\.$", arg).group(1))
+            return self.answers.get(self.questions[index][0]) or "Select an option"
+        if script is w.CHECKBOX_OPTION_JS:
+            index = int(re.search(r"\.(\d+)\.$", arg["prefix"]).group(1))
+            qid = self.questions[index][0]
+            if arg["wanted"] not in self.choices.get(qid, []):
+                return None
+            if arg["wanted"] in self.ticked.get(qid, []):
+                return "checked"
+            self.marked = f"__tick__{index}__{arg['wanted']}"
+            return "marked"
         if script is w.PROFILE_FIELD_ELEMENTS_JS:
             index = int(re.search(r"\.(\d+)\.$", arg).group(1))
             return [{"tag": "input", "type": "text", "name": f"{arg}text", "value": None,
@@ -565,3 +622,46 @@ def test_without_a_central_session_the_bot_signs_in_as_before():
     result, _ = walk(site)
     assert result.status == "joined", result.detail
     assert [v for _, _, v in site.filled] == [EMAIL, PASSWORD]
+
+
+def test_a_login_page_that_asks_for_the_email_option_first_is_followed():
+    # community.marketingtalentexchange.com, 2026-11-16: "Log in" opened a
+    # page with only "Sign in with an email"; the walk waited 6.4s for a field
+    # and handed the community to a person (needs_login).
+    site = FakeSite(email_choice=True)
+    result, _ = walk(site)
+    assert result.status == "joined", result.detail
+    assert [v for _, _, v in site.filled] == [EMAIL, PASSWORD]
+
+
+# --- Circle's own choice widgets on the profile step ----------------------------
+# community.marketingtalentexchange.com, 2026-11-16: a one-option field is a
+# combobox over [role=option]; a checkbox field with choices is a group of
+# [role=checkbox]. The walk typed into the combobox's hidden input and could
+# not tick a box at all.
+
+
+def test_a_one_option_field_is_picked_from_circles_list():
+    site = FakeSite(signed_in=True, questions=[("q1", "Work Style", "select",
+                                                ["Remote", "Hybrid", "In-Person"])])
+    result, _ = walk(site, answers={"Work Style": "Remote"})
+    assert result.status == "joined", result.detail
+    assert site.answers == {"q1": "Remote"}
+
+
+def test_a_checkbox_field_with_choices_ticks_each_answer():
+    site = FakeSite(signed_in=True, questions=[
+        ("q1", "Marketing Superpowers", "checkbox",
+         ["Content Marketing", "SEO / Search", "Growth & Demand Gen"])])
+    result, _ = walk(site, answers={"Marketing Superpowers": ["Content Marketing",
+                                                              "Growth & Demand Gen"]})
+    assert result.status == "joined", result.detail
+    assert site.answers == {"q1": ["Content Marketing", "Growth & Demand Gen"]}
+
+
+def test_an_option_the_list_does_not_offer_is_never_typed_in():
+    site = FakeSite(signed_in=True, questions=[("q1", "Work Style", "select",
+                                                ["Remote", "Hybrid"])])
+    result, _ = walk(site, answers={"Work Style": "Office"})
+    assert result.status == "profile_incomplete"
+    assert site.answers == {} and site.filled == []

@@ -15,6 +15,7 @@ status code.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass
@@ -53,6 +54,10 @@ class Validation:
     title: str | None = None
     price: str | None = None
     reason: str = ""
+    # For a Discover product page: where its Join button sends a visitor --
+    # the community's own address (often its /checkout/... page) or an
+    # outside sales page. None when the page shows no such link.
+    join_link: str | None = None
 
 
 # Titles served by a bot-check / interstitial page rather than the real site.
@@ -91,9 +96,12 @@ def _title(html: str) -> str | None:
 # A Discover product page renders the price into the HTML, e.g.
 #   <h2 ...>$197</h2><span ...>/month</span>
 # so pull the largest priced amount with a period, or "Free" when there is no
-# price at all.
+# price at all. Only the fallback for a page without structured data
+# (listing_from_html below). Next.js writes references into the page data as
+# quoted "$26", "$33", ...: not amounts, hence the lookbehind -- the free
+# Marketing Talent Exchange listing was stored as "$33" (2026-11-12).
 _PRICE_RX = re.compile(
-    r"\$\s?([\d,]+(?:\.\d{2})?)\s*"
+    r"(?<![\"\w])\$\s?([\d,]+(?:\.\d{2})?)\s*"
     r"(?:</[^>]+>\s*<[^>]+>\s*)?"
     r"(/\s?(?:mo|month|year|yr)|per\s?(?:month|year))?",
     re.I,
@@ -126,6 +134,89 @@ def _extract_price(html: str) -> tuple[str | None, bool | None]:
     return None, None
 
 
+# --- a Discover product page: where it sends you, and what it costs ------------
+
+@dataclass
+class Listing:
+    join_link: str | None = None
+    price_label: str | None = None
+    is_free: bool | None = None
+
+
+_LD_JSON_RX = re.compile(
+    r"<script[^>]*application/ld\+json[^>]*>(.*?)</script>", re.I | re.S)
+# The listing's Join / Buy button: an anchor wrapping the "listing-cta" button.
+# It points at the community's own address (a free signup page, or its
+# /checkout/... for a paid tier) or at an outside sales page.
+_CTA_RX = re.compile(
+    r"<a\b[^>]*\bhref=\"(https?://[^\"]+)\"[^>]*>\s*<button\b[^>]*"
+    r"data-testid=\"listing-cta", re.I)
+# The same link in the page data, for a page whose button did not render.
+_EXTERNAL_URL_RX = re.compile(r"\\?\"external_url\\?\"\s*:\s*\\?\"(https?://[^\"\\]+)")
+_PERIODS = {"MON": "/month", "ANN": "/year", "WEE": "/week", "DAY": "/day"}
+
+
+def _ld_offers(html: str) -> list[tuple[float, str | None]]:
+    """(price, unit) for every offer in the page's schema.org Product data."""
+    offers: list[tuple[float, str | None]] = []
+    for match in _LD_JSON_RX.finditer(html or ""):
+        try:
+            data = json.loads(match.group(1))
+        except ValueError:
+            continue
+        nodes = data.get("@graph", [data]) if isinstance(data, dict) else data
+        for node in nodes if isinstance(nodes, list) else []:
+            if not isinstance(node, dict) or node.get("@type") != "Product":
+                continue
+            items = node.get("offers") or []
+            for offer in [items] if isinstance(items, dict) else items:
+                if not isinstance(offer, dict):
+                    continue
+                spec = offer.get("priceSpecification") or {}
+                try:
+                    value = float(str(spec.get("price", offer.get("price"))).replace(",", ""))
+                except (TypeError, ValueError):
+                    continue
+                offers.append((value, spec.get("unitCode")))
+    return offers
+
+
+def _offers_label(offers: list[tuple[float, str | None]]) -> tuple[str | None, bool | None]:
+    if not offers:
+        return None, None
+    if any(value == 0 for value, _ in offers):
+        return "Free", True   # a free tier is a way in, whatever else is sold
+    value, unit = min(offers, key=lambda o: o[0])
+    amount = f"{value:,.0f}" if value.is_integer() else f"{value:,.2f}"
+    label = f"${amount}{_PERIODS.get(unit or '', '')}"
+    if len({v for v, _ in offers}) > 1:
+        label = f"From {label}"
+    return label, False
+
+
+def listing_from_html(html: str) -> Listing:
+    """Read a Discover product page: its Join link and its price.
+
+    The price comes from the schema.org offers the page carries, not from
+    dollar signs in the HTML. The link is the listing's button, else the
+    ``external_url`` in the page data. No browser is needed: both are in the
+    server-rendered page (checked on 23 live listings, 2026-11-16).
+    """
+    import html as _html
+
+    text = html or ""
+    link = None
+    cta = _CTA_RX.search(text)
+    if cta:
+        link = _html.unescape(cta.group(1))
+    else:
+        external = _EXTERNAL_URL_RX.search(text)
+        if external:
+            link = external.group(1).replace("\\u0026", "&")
+    label, is_free = _offers_label(_ld_offers(text))
+    return Listing(join_link=link, price_label=label, is_free=is_free)
+
+
 def validate_url(
     url: str, *, session: requests.Session | None = None, timeout: int = 12
 ) -> Validation:
@@ -153,8 +244,13 @@ def validate_url(
         # (/startups, /ai-agents) as SEO pages, not joinable communities.
         if "/products/" not in url:
             return Validation(ok=False, reason="Discover category/SEO slug, not a community")
-        price, is_free = _extract_price(resp.text)
-        return Validation(ok=True, title=_title(resp.text), is_free=is_free, price=price)
+        listing = listing_from_html(resp.text)
+        if listing.price_label:
+            price, is_free = listing.price_label, listing.is_free
+        else:
+            price, is_free = _extract_price(resp.text)
+        return Validation(ok=True, title=_title(resp.text), is_free=is_free, price=price,
+                          join_link=listing.join_link)
 
     if resp.status_code >= 400 and resp.status_code != 403:
         # 403 on a real community means "members only", which is fine.

@@ -13,10 +13,15 @@ JoinFormAnswer / JoinFormFill):
 1. A question seen before reuses its stored answer for this account.
 2. A new wording is first matched by the LLM against known questions ("Your
    role" is "Job title"), and reuses that answer.
-3. Otherwise the LLM answers it, but only from the account's persona facts
+3. Otherwise the LLM answers it from the account's persona facts
    (config/join_personas.yaml). The answer is stored and reused next time.
-4. When the facts don't cover it, the field is not filled and the community
-   goes to a human; a person's answer can be stored the same way.
+4. When the facts don't cover it, the LLM writes the most plausible answer
+   for that persona (the user's decision of 2026-11-16), stored as
+   ``ai_invented`` so a person can see which answers were made up. Never
+   for contact details, links, IDs, dates or a single yes/no box -- those go
+   to a human, as does whatever the model still declines.
+5. An opt-in to share the member's data or to receive marketing takes the
+   option that declines, without asking the model.
 
 Only required fields are filled. Every fill is logged per community and account.
 """
@@ -55,6 +60,46 @@ BOOL_TYPES = {"checkbox", "boolean", "toggle"}
 # Circle's place search ("Search location"): the persona's `location` is typed
 # in and the browser picks the matching suggestion (cdp_join._fill_location).
 LOCATION_TYPES = {"location"}
+# Field kinds the model never makes up: a contact, a link, a date, a file.
+NEVER_INVENTED_TYPES = {"link", "url", "email", "number", "date", "file", "image", *LOCATION_TYPES}
+NEVER_INVENTED_RX = re.compile(
+    r"phone|mobile|whats ?app|telegram|e-?mail|linked ?in|website|\burl\b|http|"
+    r"address|birth|passport|\bid\b|identity|social security|\bssn\b|tax|"
+    r"password|credit card|card number|iban|bank", re.I)
+# An opt-in to hand the member's contact details on, or to be marketed to.
+OPT_IN_RX = re.compile(
+    r"\bopt[- ]?in\b|share (my |your )?(contact|data|details|information)|"
+    r"receive (marketing|promotional|communications|emails?|newsletters?)|"
+    r"marketing (emails?|communications|content)|newsletter", re.I)
+DECLINE_RX = re.compile(r"^\s*no\b|do not|don'?t|opt[- ]?out|decline|not interested", re.I)
+
+
+def is_multi(f: "FormField") -> bool:
+    """A field that takes several of its options. Circle's ``checkbox`` with
+    choices is a group of boxes (Career Stage, Marketing Superpowers on
+    community.marketingtalentexchange.com), not the single yes/no box."""
+    return f.field_type in MULTI_CHOICE_TYPES or (f.field_type in BOOL_TYPES and bool(f.choices))
+
+
+def _choiceish(field_type: str, choices) -> bool:
+    return field_type in CHOICE_TYPES | MULTI_CHOICE_TYPES or (
+        field_type in BOOL_TYPES and bool(choices))
+
+
+def may_invent(f: "FormField") -> bool:
+    """A required field the model may answer without facts behind it."""
+    if f.field_type in NEVER_INVENTED_TYPES:
+        return False
+    if f.field_type in BOOL_TYPES and not f.choices:
+        return False  # a single box attests something; only rules are agreed to
+    return not NEVER_INVENTED_RX.search(f"{f.label} {f.description or ''}")
+
+
+def decline_option(f: "FormField") -> str | None:
+    """The option that says no to an opt-in, or None when this is not one."""
+    if not f.choices or not OPT_IN_RX.search(f"{f.label} {f.description or ''}"):
+        return None
+    return next((c for c in f.choices if DECLINE_RX.search(c)), None)
 
 
 @dataclass
@@ -127,7 +172,22 @@ Rules by field type:
 - text/textarea: a short, plain, first-person answer under {MAX_ANSWER_CHARS} characters.
 - link/url: a URL that appears in the facts, otherwise {CANNOT_ANSWER}.
 - choice: exactly one of the listed options, copied verbatim, or {CANNOT_ANSWER}.
+- multi_choice: one to three of the listed options, copied verbatim, one per line, or {CANNOT_ANSWER}.
 - checkbox: "true" only if it is agreeing to the community's rules, terms, guidelines or code of conduct, or the facts make the statement true; otherwise {CANNOT_ANSWER}.
+Reply with the answer only, no quotes, no explanation."""
+
+# The facts did not settle it; the user chose (2026-11-16) to have the model
+# write what this member would most plausibly say rather than hand it over.
+_INVENT_SYSTEM = f"""You fill in one required field of an online community's sign-up form on behalf of a member.
+The member's facts did not settle this question. Write the answer this member would most plausibly give:
+consistent with the facts, ordinary and modest, nothing that would stand out or that a reader could check and find false.
+Never write a phone number, email address, URL, street address, date of birth, ID or passport number, password or payment detail -- reply {CANNOT_ANSWER} instead.
+If the question asks to share the member's data with someone or to receive marketing, pick the option that declines.
+If it asks for people or companies the member knows, name no real person or company: describe them in general terms in one sentence.
+Rules by field type:
+- text/textarea: a short, plain, first-person answer under {MAX_ANSWER_CHARS} characters.
+- choice: exactly one of the listed options, copied verbatim.
+- multi_choice: one to three of the listed options, copied verbatim, one per line.
 Reply with the answer only, no quotes, no explanation."""
 
 _MATCH_SYSTEM = """You compare form questions. Given a new question and a numbered list of known questions,
@@ -159,13 +219,13 @@ def _ask(llm, system: str, payload: dict) -> str:
         return ""
 
 
-def _generate_answer(llm, persona: dict, f: FormField) -> str | None:
+def _generate_answer(llm, persona: dict, f: FormField, *, invent: bool = False) -> str | None:
     if llm is None or not persona:
         return None
-    kind = "choice" if f.field_type in CHOICE_TYPES else (
+    kind = "multi_choice" if is_multi(f) else "choice" if f.field_type in CHOICE_TYPES else (
         "checkbox" if f.field_type in BOOL_TYPES else f.field_type
     )
-    reply = _ask(llm, _ANSWER_SYSTEM, {
+    reply = _ask(llm, _INVENT_SYSTEM if invent else _ANSWER_SYSTEM, {
         "facts": persona,
         "question": f.label,
         "description": f.description,
@@ -190,24 +250,46 @@ def _match_known(llm, f: FormField, known: list[JoinFormQuestion]) -> JoinFormQu
     return known[idx - 1] if 1 <= idx <= len(known) else None
 
 
+def _clean_option(text: str) -> str:
+    """An option as a model writes it in a list: "- Partner.", "2) Networking"."""
+    text = re.sub(r"^\s*(?:[-*•]|\d+[.)])\s*", "", text or "")
+    return text.strip().strip("\"'`").rstrip(".").strip()
+
+
 def _fit_to_field(llm, f: FormField, answer: str) -> Any | None:
     """Turn a stored answer into a value this form accepts, or None."""
-    if f.field_type in BOOL_TYPES:
+    if f.field_type in BOOL_TYPES and not f.choices:
         return True if answer.strip().lower() in {"true", "yes", "1"} else None
-    if f.field_type in CHOICE_TYPES | MULTI_CHOICE_TYPES:
+    if _choiceish(f.field_type, f.choices):
         if not f.choices:
             return None
+        multi = is_multi(f)
         exact = {c.strip().lower(): c for c in f.choices}
-        if answer.strip().lower() in exact:
-            picked = exact[answer.strip().lower()]
-        else:
-            if llm is None:
-                return None
-            reply = _ask(llm, _CHOICE_SYSTEM, {"answer": answer, "options": f.choices}).strip().strip('"')
-            picked = exact.get(reply.lower())
-            if picked is None:
-                return None
-        return [picked] if f.field_type in MULTI_CHOICE_TYPES else picked
+        picked: list[str] = []
+        parts = [_clean_option(p) for p in answer.splitlines() if p.strip()] if multi else [answer]
+        if multi and len(parts) == 1 and parts[0].lower() not in exact:
+            # One line for several options: "Networking, Industry insights".
+            pieces = [_clean_option(p) for p in re.split(r"[;,]", parts[0]) if p.strip()]
+            if all(p.lower() in exact for p in pieces):
+                parts = pieces
+        # Several options are stored one per line.
+        for part in parts:
+            if part.strip().lower() in exact:
+                choice = exact[part.strip().lower()]
+            elif _clean_option(part).lower() in exact:
+                choice = exact[_clean_option(part).lower()]
+            else:
+                if llm is None:
+                    continue
+                reply = _ask(llm, _CHOICE_SYSTEM, {"answer": part, "options": f.choices}).strip().strip('"')
+                choice = exact.get(reply.lower())
+                if choice is None:
+                    continue
+            if choice not in picked:
+                picked.append(choice)
+        if not picked:
+            return None
+        return picked if multi else picked[0]
     if f.field_type in {"link", "url"} and not re.match(r"https?://", answer.strip()):
         return None
     if f.field_type in TEXT_TYPES | LOCATION_TYPES:
@@ -260,6 +342,30 @@ def save_answer(db: Database, question_id: int, account: str, answer: str,
             row.updated_at = utcnow()
 
 
+def _new_answer(s, llm, persona: dict, f: FormField, question_id: int,
+                account: str) -> JoinFormAnswer | None:
+    """Write and store this account's first answer to a question."""
+    # A place is a fact, not something to word: the persona's own, or a
+    # person's -- never the model's.
+    if f.field_type in LOCATION_TYPES:
+        place = persona.get("location")
+        generated, source = (str(place) if place else None), "persona"
+    elif decline_option(f) is not None:
+        generated, source = decline_option(f), "rule"
+    else:
+        generated, source = _generate_answer(llm, persona, f), "ai"
+        if generated is None and may_invent(f):
+            generated = _generate_answer(llm, persona, f, invent=True)
+            source = "ai_invented"
+    if generated is None:
+        return None
+    ans = JoinFormAnswer(question_id=question_id, account=account,
+                         answer=generated, source=source, reviewed=False)
+    s.add(ans)
+    s.flush()
+    return ans
+
+
 def resolve_form(
     db: Database,
     account: str,
@@ -289,8 +395,8 @@ def resolve_form(
                             JoinFormQuestion.same_as_id.is_(None),
                         )
                     ).all()
-                    if (k.field_type in CHOICE_TYPES | MULTI_CHOICE_TYPES)
-                    == (f.field_type in CHOICE_TYPES | MULTI_CHOICE_TYPES)
+                    if _choiceish(k.field_type, k.example_choices)
+                    == _choiceish(f.field_type, f.choices)
                 ]
                 twin = _match_known(llm, f, known)
                 if twin is not None:
@@ -299,20 +405,18 @@ def resolve_form(
                     ans = _stored_answer(s, canonical_id, account)
 
             if ans is None:
-                # A place is a fact, not something to word: the persona's own,
-                # or a person's -- never the model's.
-                if f.field_type in LOCATION_TYPES:
-                    place = persona.get("location")
-                    generated, source = (str(place) if place else None), "persona"
-                else:
-                    generated, source = _generate_answer(llm, persona, f), "ai"
-                if generated is not None:
-                    ans = JoinFormAnswer(question_id=canonical_id, account=account,
-                                         answer=generated, source=source, reviewed=False)
-                    s.add(ans)
-                    s.flush()
+                ans = _new_answer(s, llm, persona, f, canonical_id, account)
 
             value = _fit_to_field(llm, f, ans.answer) if ans is not None else None
+            if value is None and ans is not None and canonical_id != q.id:
+                # The matched question's answer fits none of this form's
+                # options, so it was not the same question: IAUG's "Please
+                # Select a Member Type" took Marketing Talent Exchange's "I'm
+                # here as" and its "Talent" (2026-11-16). Answer it on its own.
+                q.same_as_id = None
+                own = _stored_answer(s, q.id, account) or _new_answer(
+                    s, llm, persona, f, q.id, account)
+                value = _fit_to_field(llm, f, own.answer) if own is not None else None
             if value is None:
                 result.needs_human.append(f)
             else:

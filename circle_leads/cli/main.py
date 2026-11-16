@@ -186,6 +186,26 @@ def find_cmd(ctx, from_html, urls, free_only, min_score, limit, allow_custom_dom
 
 
 
+@cli.command("resolve-cards")
+@click.option("--limit", type=int, default=50, show_default=True,
+              help="Cards to read this run (0 = all).")
+@click.option("--pause", type=float, default=1.0, show_default=True,
+              help="Seconds between cards.")
+@click.pass_context
+def resolve_cards_cmd(ctx, limit, pause):
+    """Give Discover cards (discover.circle.so/products/...) their community's address.
+
+    The worker runs this every join-type pass (50 cards); this is the same
+    step by hand. Plain HTTP, no browser. See
+    circle_leads/discovery/directory_cards.py.
+    """
+    from circle_leads.discovery.directory_cards import resolve_directory_cards
+
+    stats = resolve_directory_cards(ctx.obj["db"], limit=limit or None, pause=pause)
+    click.echo(", ".join(f"{k} {v}" for k, v in stats.items()))
+    return stats
+
+
 @cli.command("discover-directory")
 @click.option("--incremental", is_flag=True,
               help="Skip listings already synced since the last run (by directory id).")
@@ -1573,10 +1593,27 @@ def _run_community_maintenance(db, req, *, use_llm):
             # type stays "unknown" is in no queue at all, because
             # nothing knows whether we could get in. Prod had 446 of
             # them sitting still for days.
+            from circle_leads.discovery.directory_cards import (
+                SCHEDULED_BATCH as CARD_BATCH,
+                resolve_directory_cards,
+            )
             from circle_leads.discovery.join_type import (
                 SCHEDULED_BATCH as JOIN_TYPE_BATCH,
                 classify_join_type_pending,
             )
+
+            # Discover cards first: one whose Join button leads to a Circle
+            # community gets that address here and is asked about in this
+            # same pass. Nothing ran this before 2026-11-16, and 1647 cards
+            # sat with no address, out of the join queue for good.
+            try:
+                with runtime.stage("directory_cards"):
+                    cards = resolve_directory_cards(db, limit=CARD_BATCH)
+                click.echo(f"  scheduled directory cards: {cards}")
+                record_stage_finish(db, "directory_cards", result=cards)
+            except Exception as exc:  # noqa: BLE001 - the join-type check still runs
+                record_stage_error(db, "directory_cards", exc)
+                click.echo(f"  directory cards error: {exc.__class__.__name__}", err=True)
 
             with runtime.stage("join_type"):
                 jt = classify_join_type_pending(db, limit=JOIN_TYPE_BATCH, scheduled=True)
