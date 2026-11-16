@@ -77,6 +77,10 @@ LOGIN_PIVOT_TEXTS = [
     "Sign in", "Log in", "Sign in with an email", "Continue with email", "Log in with email",
     "Se connecter", "Anmelden", "Iniciar sesión", "Accedi", "Zaloguj się", "Inloggen",
 ]
+# A login page that asks how to sign in before it shows any field: the email
+# box comes only after this button (community.marketingtalentexchange.com,
+# 2026-11-16 -- "Log in to your account", one "Sign in with an email" button).
+EMAIL_CHOICE_TEXTS = [t for t in LOGIN_PIVOT_TEXTS if "email" in t.lower()]
 PROFILE_CONTINUE_TEXTS = [
     "Continue", "Save", "Save and continue", "Next", "Done", "Finish",
     "Continuer", "Enregistrer", "Suivant", "Terminer",
@@ -595,6 +599,7 @@ class _Walk:
                 return {"hasEmail": False, "hasPassword": False}
 
         saw_form = False
+        chose_email = False
         for _ in range(8):
             self.page.wait_for_timeout(800)
             ms = self._member_state()
@@ -604,6 +609,11 @@ class _Walk:
             if f.get("hasEmail") or f.get("hasPassword"):
                 saw_form = True
                 break
+            # The page asks how to sign in first; only "Sign in with an email"
+            # brings the box. The walk used to wait out the 6.4s for a field
+            # that never came and hand the community to a person.
+            if not chose_email and self._click_first(EMAIL_CHOICE_TEXTS):
+                chose_email = True
         if not saw_form:
             return {"ok": False,
                     "reason": "clicking Log in neither signed in nor showed a form within 6.4s"}

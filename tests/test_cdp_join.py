@@ -32,8 +32,11 @@ class FakeSite:
                  invite_only=False, login_host=None, login_host_is_circle=False, dead=False,
                  continue_disabled_polls=0, turnstile=False, code_after_email=False,
                  code_delay_polls=0, terms_box=False, central_says_member=False,
-                 central_session=False):
+                 central_session=False, email_choice=False):
         self.host = host
+        # "Log in" opens a page with no field, only "Sign in with an email"
+        # (and "Sign up"); the email box comes after that button.
+        self.email_choice = email_choice
         # The browser still holds the account's Circle-wide session: the
         # central sign-in page sends it straight back to the community, in.
         self.central_session = central_session
@@ -160,6 +163,8 @@ class FakeSite:
     def _buttons(self) -> list[str]:
         if self.on_code:
             return ["Verify"]
+        if self.login_step == "choice":
+            return ["Sign in with an email", "Sign up"]
         if self.login_step == "email":
             return ["Continue", "Sign up"]
         if self.login_step == "password":
@@ -181,8 +186,12 @@ class FakeSite:
             self.terms_agreed = True
             return
         if label in ("Log in", "Sign in") and self.login_step is None and not self.signed_in:
-            self.login_step = "email"
+            self.login_step = "choice" if self.email_choice else "email"
             self.url = f"https://{self.login_host}/users/sign_in"
+        elif label == "Sign in with an email" and self.login_step == "choice":
+            self.login_step = "email"
+        elif label == "Sign up":
+            raise AssertionError("the walk clicked Sign up")
         elif label == "Continue" and self.login_step == "email" and self.code_after_email:
             self.code_pending = self.code_delay_polls
             self.after_code = self._signed_in_by_code
@@ -562,6 +571,16 @@ def test_the_central_session_signs_in_without_a_new_login():
 
 def test_without_a_central_session_the_bot_signs_in_as_before():
     site = FakeSite()
+    result, _ = walk(site)
+    assert result.status == "joined", result.detail
+    assert [v for _, _, v in site.filled] == [EMAIL, PASSWORD]
+
+
+def test_a_login_page_that_asks_for_the_email_option_first_is_followed():
+    # community.marketingtalentexchange.com, 2026-11-16: "Log in" opened a
+    # page with only "Sign in with an email"; the walk waited 6.4s for a field
+    # and handed the community to a person (needs_login).
+    site = FakeSite(email_choice=True)
     result, _ = walk(site)
     assert result.status == "joined", result.detail
     assert [v for _, _, v in site.filled] == [EMAIL, PASSWORD]
