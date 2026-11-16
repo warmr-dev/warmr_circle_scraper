@@ -111,6 +111,12 @@ Chrome on its own profile:
   signed in and ended none. The walk tries that first and signs in fully only
   when it does not work. Communities with their own login (la-fusee, hero,
   hailerz) were not affected.
+- **A login page that asks how first.** Some communities' "Log in" opens a
+  page with no field and a "Sign in with an email" button (beside SSO
+  buttons, or alone). The walk clicks that button (`EMAIL_CHOICE_TEXTS`, the
+  email entries of `LOGIN_PIVOT_TEXTS`) while it waits for the form; it never
+  clicks "Sign up" there. Before 2026-11-16 it waited 6.4 s for a field and
+  handed the community over (`needs_login`, community.marketingtalentexchange.com).
 - **Circle's own profile-step pieces**: the "I agree to the terms and privacy
   policy" box is ticked; a "Location" field (a place search, `field_type`
   `location`) gets the persona's `location`, typed in and picked from Circle's
