@@ -18,10 +18,12 @@ EnvironmentFile=/etc/warmr/warmr-join.env
 Environment=CIRCLE_GOVERNOR_FILE=/var/lib/warmr/circle-governor.json
 # The daily cap and the queue order read data/join_attempts.log under the
 # working directory. Screenshots of every stop go to join-shots/.
-ExecStart=/opt/warmr/current/venv/bin/circle-leads auto-join --driver cdp --account 4 --limit 5 --screenshot-dir /var/lib/warmr/join-shots
-# A visit can wait up to 7 minutes for Circle's code; five visits and the
-# pauses between them fit in well under this.
-TimeoutStartSec=90min
+# One community a run, every 15 minutes (the timer): a new community is joined
+# within about 15 minutes, a backlog at most 4 an hour, under the 25-a-day cap.
+ExecStart=/opt/warmr/current/venv/bin/circle-leads auto-join --driver cdp --account 4 --limit 1 --screenshot-dir /var/lib/warmr/join-shots
+# A visit can wait up to 7 minutes for Circle's code. A run still going when
+# the timer fires again is not started twice (a oneshot unit is still active).
+TimeoutStartSec=30min
 
 NoNewPrivileges=true
 PrivateTmp=true

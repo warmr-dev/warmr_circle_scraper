@@ -79,7 +79,7 @@ One community, by hand, first (replace <slug>) -- the same environment the timer
     -p Environment=CIRCLE_GOVERNOR_FILE=/var/lib/warmr/circle-governor.json \
     /opt/warmr/current/venv/bin/circle-leads auto-join --driver cdp --account 4 \
     --host <slug> --screenshot-dir /var/lib/warmr/join-shots
-Then every 4 hours:
+Then every 15 minutes, one community a run:
   systemctl enable --now warmr-join.timer
 NEXT
 REMOTE
