@@ -220,7 +220,11 @@ def ensure_watch_rows(db: Database, *, quiet_days: int = 14) -> int:
                 WatchState(
                     community_id=community_id,
                     host=host,
-                    mode=WatchMode.ANON.value,
+                    # A stored session is read with those cookies from the first
+                    # check. Starting on anon sends none, so one public space
+                    # answering 200 hides every private space.
+                    mode=(WatchMode.COOKIE.value if host in has_session
+                          else WatchMode.ANON.value),
                     tier="fast" if community_id in recently_posted | members else "slow",
                     next_check_at=_now(),
                     recent_ids=[],
@@ -229,13 +233,15 @@ def ensure_watch_rows(db: Database, *, quiet_days: int = 14) -> int:
             created += 1
         # A community we belong to stays on the fast tier, whatever its
         # history. Rows made before this rule sat on the slow tier (or off)
-        # for weeks after the bot had joined.
+        # for weeks after the bot had joined. One that already has a session
+        # is read with it, even when the row was left on anon: the anonymous
+        # home feed can answer from a single public space.
         for row in s.scalars(select(WatchState).where(WatchState.community_id.in_(members))):
             if row.host in paused_hosts:
                 row.mode = WatchMode.OFF.value
                 continue
             row.tier = "fast"
-            if row.mode == WatchMode.OFF.value and row.host in has_session:
+            if row.host in has_session and row.mode != WatchMode.COOKIE.value:
                 row.mode = WatchMode.COOKIE.value
                 row.next_check_at = _now()
         # Nothing is read with a session it does not have.
@@ -289,9 +295,13 @@ def watch_member_now(db: Database, host: str) -> int | None:
             row = WatchState(community_id=community.id, host=host,
                              mode=WatchMode.ANON.value, recent_ids=[])
             s.add(row)
-        if row.mode == WatchMode.OFF.value:
-            # The anonymous feed already refused us; the session is what reads it.
-            row.mode = WatchMode.COOKIE.value if has_session else WatchMode.ANON.value
+        if has_session:
+            # Anonymous mode keeps sending no cookies. A public space then
+            # answers 200 and the private spaces are never read.
+            row.mode = WatchMode.COOKIE.value
+        elif row.mode == WatchMode.OFF.value:
+            # The anonymous feed already refused us, and there is still no session.
+            row.mode = WatchMode.ANON.value
         row.host = host
         row.tier = "fast"
         row.consecutive_errors = 0

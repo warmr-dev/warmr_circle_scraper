@@ -184,6 +184,15 @@ the watcher's long-lived HTTP session kept the dead `_circle_session` Circle
 had handed back to the old login, sent it alongside the new one, and got 401
 until `warmr-watcher` was restarted.)
 
+A stored member session is read in cookie mode. Saving the session
+(`connect_host`) and the watch-list refresh both switch that community from
+anonymous, or off, to cookie — including a paid community and one whose home
+feed still answers without a login. The anonymous home feed only shows public
+spaces; cookie mode sends the stored session, so member-only spaces are read
+too. An operator pause still forces the row off. Saving also links
+`circle_connections.community_id` to the community with that host when the
+connection did not already point at one.
+
 ---
 
 ## Deploy (dashboard + worker + Supabase)

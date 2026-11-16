@@ -677,10 +677,15 @@ def test_a_session_for_a_host_we_have_never_seen_creates_its_row(db):
     connect_host(db, "new.example.com", [{"name": "_circle_session", "value": "x"}])
     with db.session() as s:
         from sqlalchemy import select
+        from circle_leads.storage.models import CircleConnection
         c = s.scalar(select(Community).where(Community.host == "new.example.com"))
         assert c is not None and c.watching
         cid = c.id
+        conn = s.scalar(select(CircleConnection).where(
+            CircleConnection.host == "new.example.com"))
+        assert conn is not None and conn.community_id == cid
     assert read_row(db, cid).tier == "fast"
+    assert read_row(db, cid).mode == WatchMode.COOKIE.value
 
 
 def test_a_joined_community_with_no_posts_starts_fast(db):
@@ -693,6 +698,7 @@ def test_a_joined_community_with_no_posts_starts_fast(db):
         cid = c.id
     ensure_watch_rows(db, quiet_days=14)
     assert read_row(db, cid).tier == "fast"
+    assert read_row(db, cid).mode == WatchMode.ANON.value
 
 
 def test_the_resync_lifts_a_member_left_on_the_slow_tier_or_off(db, community):
@@ -709,6 +715,94 @@ def test_the_resync_lifts_a_member_left_on_the_slow_tier_or_off(db, community):
     row = read_row(db, community)
     assert row.tier == "fast"
     assert row.mode == WatchMode.COOKIE.value
+
+
+def test_an_anonymous_row_with_a_stored_session_is_read_in_cookie_mode(db, community):
+    """One public space answers the home feed with 200 and no cookies, so a
+    row left on anon never sends the member session and never sees the
+    private spaces. The resync switches it."""
+    from circle_leads.web.replay_store import store_session
+
+    ensure_watch_rows(db)
+    assert read_row(db, community).mode == WatchMode.ANON.value
+    store_session(db, HOST, [{"name": "_circle_session", "value": "member"}])
+
+    ensure_watch_rows(db)
+    assert read_row(db, community).mode == WatchMode.COOKIE.value
+
+
+def test_watch_member_now_switches_anonymous_to_cookie_when_a_session_exists(db, community):
+    from circle_leads.watch.poller import watch_member_now
+    from circle_leads.web.replay_store import store_session
+
+    ensure_watch_rows(db)
+    store_session(db, HOST, [{"name": "_circle_session", "value": "member"}])
+    watch_member_now(db, HOST)
+    assert read_row(db, community).mode == WatchMode.COOKIE.value
+
+
+def test_a_paid_community_with_a_session_starts_on_cookie(db):
+    from circle_leads.web.replay_store import store_session
+
+    with db.session() as s:
+        c = get_or_create_community(s, slug="paid-bought", url="https://paid-bought.circle.so",
+                                    platform="circle")
+        c.join_type = "paid"
+        c.icp_flag = True
+        s.flush()
+        cid = c.id
+    store_session(db, "paid-bought.circle.so", [{"name": "_circle_session", "value": "bought"}])
+
+    ensure_watch_rows(db)
+    assert read_row(db, cid).mode == WatchMode.COOKIE.value
+
+
+def test_cookie_mode_sends_the_stored_session_on_a_feed_that_also_answers_anonymously(
+        db, community, monkeypatch):
+    from circle_leads.web.replay_store import connect_host
+
+    connect_host(db, HOST, [{"name": "_circle_session", "value": "member"}])
+    assert read_row(db, community).mode == WatchMode.COOKIE.value
+    monkeypatch.setattr("circle_leads.triage.pipeline.triage_records", triage_spy([]))
+
+    class Recording:
+        def __init__(self):
+            self.cookies = None
+            self.headers = {}
+
+        def get(self, url, headers=None, cookies=None, timeout=None, allow_redirects=None):
+            self.cookies = cookies
+            return feed([make_record(30)])
+
+    session = Recording()
+    out = check_community(db, state_for(db, community), Requirements(),
+                          session=session, tuning=WatchTuning())
+    assert out.status == "ok"
+    assert session.cookies == {"_circle_session": "member"}
+
+
+def test_connect_host_links_the_community_and_does_not_replace_an_existing_link(db, community):
+    from sqlalchemy import select
+    from circle_leads.storage.models import CircleConnection, ConnectionState
+    from circle_leads.web.replay_store import connect_host
+
+    connect_host(db, HOST, [{"name": "_circle_session", "value": "member"}])
+    with db.session() as s:
+        conn = s.scalar(select(CircleConnection).where(CircleConnection.host == HOST))
+        assert conn.community_id == community
+
+    with db.session() as s:
+        other = get_or_create_community(s, slug="other", url="https://other.circle.so",
+                                        platform="circle")
+        s.flush()
+        other_id = other.id
+        conn = s.scalar(select(CircleConnection).where(CircleConnection.host == HOST))
+        conn.community_id = other_id
+        conn.state = ConnectionState.CONNECTED.value
+    connect_host(db, HOST, [{"name": "_circle_session", "value": "member"}])
+    with db.session() as s:
+        conn = s.scalar(select(CircleConnection).where(CircleConnection.host == HOST))
+        assert conn.community_id == other_id
 
 
 def test_a_quiet_member_stays_on_the_fast_tier(db, community, monkeypatch):

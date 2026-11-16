@@ -101,13 +101,35 @@ def connect_host(db: Database, host: str, cookies: list[dict],
     circle_leads/join/joiner.py after an auto-join). Both scan_cookie_host()
     and cookie_hosts_vip_first() (circle_leads/scanning.py) key off a
     CircleConnection row existing; without it the worker would never pick the
-    host up despite the cookie being stored."""
+    host up despite the cookie being stored. The connection is linked to the
+    community with this host when it does not already point at one."""
     result = store_session(db, host, cookies, member_label=member_label)
     with db.session() as s:
         if s.scalar(select(CircleConnection).where(CircleConnection.host == host)) is None:
             s.add(CircleConnection(host=host, state=ConnectionState.NOT_CONNECTED.value))
     _watch_now(db, host)
+    # After the watch handoff, so a community created for a new host is linked too.
+    _link_host_community(db, host)
     return result
+
+
+def _link_host_community(db: Database, host: str) -> None:
+    """Point the connection at this host's community when it points at none.
+
+    Join selection and the member scan read ``CircleConnection.community_id``.
+    A session stored for a community we already know used to leave that null,
+    so the connection and the community row never met. An id already set is
+    left alone: a person may have pointed the connection at a chosen row.
+    """
+    with db.session() as s:
+        conn = s.scalar(select(CircleConnection).where(CircleConnection.host == host))
+        if conn is None or conn.community_id is not None:
+            return
+        community_id = s.scalar(
+            select(Community.id).where(Community.host == host).order_by(Community.id).limit(1)
+        )
+        if community_id is not None:
+            conn.community_id = community_id
 
 
 def _watch_now(db: Database, host: str) -> None:
