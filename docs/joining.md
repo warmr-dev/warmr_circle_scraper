@@ -55,6 +55,26 @@ through `get_or_create_community`, which does the same. Until 2026-11-09 search
 finds were stored without one, so none of them ever reached the queue; 73 rows
 were filled in by hand that day (`docs/changes/2026-11-09-discovery-saves-host.md`).
 
+**A Discover card.** The card's page says where its Join button goes: the
+community's own address (a signup page, or its `/checkout/…` for a paid tier)
+or an outside sales page. `discovery/directory_cards.py` reads it — one plain
+GET, no browser — and when the button leads to a Circle community the row takes
+that host, `url` becomes `https://<host>`, and the join-type check asks Circle
+on its next pass. The card's price comes from the page's schema.org offers.
+
+- A search find gets this at once (`persist.py`, through `validate_url`).
+- Cards already stored are read by the worker before each join-type pass,
+  50 at a time, ICP-fit first (stage `directory_cards`, result in
+  `settings.directory_cards_last_result`). By hand:
+  `circle-leads resolve-cards --limit 200`.
+- A card that is settled without an address is noted in `communities.notes`
+  (`directory card: …`) and not read again: its button leads off Circle (row
+  platform `other`), the page shows no link, Circle took the listing down
+  (404), or another row already holds that host (`same community as #<id>`).
+  Clear the note to have it read again.
+- A paid card still reaches the queue only if Circle's own answer says anyone
+  can sign up (a free tier); otherwise it is the main account's, by hand.
+
 ## Automatic runs on the droplet (since 2026-11-09)
 
 Joins run on `circle-bot-prod` again, as they did on `warmr-1` from 2026-09-29
@@ -131,15 +151,37 @@ What `warmr-1` had and its replacement lacked, in order:
   membership, a handoff) or `email_code_needed` (after it, `profile_pending`).
 - **The profile questions** are answered from `join_form_answers`
   (`forms.resolve_form`) in the same visit; a question the bot may not answer
-  stops it as `profile_incomplete`, naming the question.
+  stops it as `profile_incomplete`, naming the question. Only required
+  fields are filled. Order: a stored answer for this account; the persona's
+  facts (`config/join_personas.yaml`); since 2026-11-16 (the user's
+  decision), the most plausible answer for the persona, stored with source
+  `ai_invented` so it can be reviewed in `join_form_answers`. Never made up:
+  a contact detail, link, ID, date or a single yes/no box. An opt-in to share
+  the member's data or receive marketing takes the declining option (source
+  `rule`), without the model.
+- **Circle's own choice widgets.** A one-option field is a button
+  `[role=combobox]` over `[role=option]` items; a checkbox field with choices
+  is a group of `[role=checkbox]`, one per option, each named by its label
+  (community.marketingtalentexchange.com, 2026-11-16). The walk opens the list
+  and clicks the option, and ticks each box it means; an option the form does
+  not offer is never typed into the widget's hidden input.
 - **Outcomes** go to the database: `join_status`, the account in
   `communities.join_account`, the session through `connect_host`, every visit
-  in `activity_log` (`join`), a handoff in `join_status_detail`.
+  in `activity_log` (`join`), a handoff in `join_status_detail` and
+  `join_attempted_at`.
 - **A handoff rests for a week** (`reach.HANDOFF_REST`). A community the bot
   stopped on -- a question it may not answer, a page it could not name --
   sits out the automatic runs for 7 days and is not counted as waiting on the
-  dashboard; `--host` retries it at once. Before this, every run walked the
-  same few stuck hosts again, each visit mailing a new login code.
+  dashboard; `--host` retries it at once. The rest is
+  `communities.join_attempted_at`, written when the handoff is recorded.
+  `join_status` stays `not_attempted` (or `profile_pending` when the
+  membership already exists), so the row returns to the bot after the week.
+  Left unset, those rows still counted as waiting and the join queue looked
+  stuck while the bot had nothing to take. The per-account daily cap still
+  counts every visit from `data/join_attempts.log`. The timestamp is one
+  community, not one visit, and it does not say which account opened the page.
+  Before the week's rest, every run walked the same few stuck hosts again,
+  each visit mailing a new login code.
 - **Enter through the central session first.** A full sign-in (email, code)
   on a community behind Circle's central login ended the account's sessions in
   the other such communities: on 2026-11-09 six re-entries in a row left only
@@ -148,6 +190,12 @@ What `warmr-1` had and its replacement lacked, in order:
   signed in and ended none. The walk tries that first and signs in fully only
   when it does not work. Communities with their own login (la-fusee, hero,
   hailerz) were not affected.
+- **A login page that asks how first.** Some communities' "Log in" opens a
+  page with no field and a "Sign in with an email" button (beside SSO
+  buttons, or alone). The walk clicks that button (`EMAIL_CHOICE_TEXTS`, the
+  email entries of `LOGIN_PIVOT_TEXTS`) while it waits for the form; it never
+  clicks "Sign up" there. Before 2026-11-16 it waited 6.4 s for a field and
+  handed the community over (`needs_login`, community.marketingtalentexchange.com).
 - **Circle's own profile-step pieces**: the "I agree to the terms and privacy
   policy" box is ticked; a "Location" field (a place search, `field_type`
   `location`) gets the persona's `location`, typed in and picked from Circle's
@@ -295,8 +343,8 @@ because a community we had already joined still rendered a "Join" button.
   or a caller decides what to store.
 - **A form only a person can answer is `needs_human`.** `icecampus` asks for a
   passport or ID number, date of birth, phone and home address. The bot does
-  not answer that, and the status says so rather than pretending the community
-  is unreachable.
+  not answer that -- not even with a made-up answer -- and the status says so
+  rather than pretending the community is unreachable.
 
 ## Where it runs
 

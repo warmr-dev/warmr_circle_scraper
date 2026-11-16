@@ -433,10 +433,9 @@ def test_a_terminal_outcome_does_not_de_prioritise_a_host(monkeypatch, tmp_path)
 
 
 def test_handoff_outcome_is_logged_even_though_not_persisted_to_the_db(monkeypatch, tmp_path):
-    # application_form_detected (and every other handoff) used to vanish
-    # entirely once the process exited -- nothing in the DB (by design, see
-    # the test above) and nothing durable anywhere else. This is the only
-    # record that a given UI/form variant was ever seen.
+    # The attempt log is the per-visit record of a form the bot would not
+    # answer, including the question text. The community row keeps the handoff
+    # (status detail and join_attempted_at) but not a terminal join_status.
     db = _db()
     _seed(db, "a", icp_score=20)
 
@@ -459,6 +458,10 @@ def test_handoff_outcome_is_logged_even_though_not_persisted_to_the_db(monkeypat
     assert entry["slug"] == "a"
     assert entry["status"] == "application_form_detected"
     assert "Why do you want to join?" in entry["detail"]
+    with db.session() as s:
+        row = s.scalar(select(Community).where(Community.slug == "a"))
+        assert row.join_status == JoinStatus.NOT_ATTEMPTED.value
+        assert row.join_attempted_at is not None
 
 
 def test_daily_cap_blocks_the_batch_before_any_bridge_call(monkeypatch):
@@ -496,11 +499,12 @@ def test_visits_count_toward_the_cap_even_when_no_join_is_recorded(monkeypatch):
 
     result = joiner.run_auto_join(db, pacing=JoinPacingConfig(max_joins_per_day=2))
 
-    assert result.attempted == ["a", "b"]  # visited two, stopped -- nothing persisted
+    assert result.attempted == ["a", "b"]  # visited two, then the cap stopped the batch
     assert result.joined == []
     assert "cap" in result.stop_reason
-
-    assert joins_attempted_today(db) == 0  # the DB, on its own, saw nothing at all
+    # Each handoff stamps join_attempted_at so the dashboard can rest the row.
+    # The cap itself stopped on the in-batch visit count, before "c" and "d".
+    assert joins_attempted_today(db) == 2
 
 
 def test_cap_stops_the_batch_at_the_limit(monkeypatch):
@@ -523,8 +527,9 @@ def test_cap_stops_the_batch_at_the_limit(monkeypatch):
 
 
 def test_todays_visits_block_a_fresh_run_even_with_an_empty_db(monkeypatch, tmp_path):
-    # A run that ends entirely in handoffs writes nothing to the DB, so without
-    # reading the log a new process would start over at 0/25 and keep visiting.
+    # The earlier visit is only in the log: it is not a row in this database,
+    # so the DB count is still 0. Without the log a new process would start
+    # over at 0/25 and keep visiting.
     db = _db()
     _seed(db, "a", icp_score=10)
     log_path = tmp_path / "join_attempts.log"
@@ -1166,13 +1171,24 @@ def test_a_handoff_says_why_on_the_row_and_stays_in_the_queue(monkeypatch):
         assert row.join_status_detail.startswith(
             f"{JOIN_HANDOFF_PREFIX} challenge_stop — Cloudflare challenge on the login page (")
         assert row.join_attempts == 1
-        # The daily cap and the queue's "last moved" read this as a terminal
-        # outcome; a handoff is not one.
-        assert row.join_attempted_at is None
+        # The dashboard's rest and "last moved" read this. join_status stays
+        # not_attempted, so the row is still a join candidate after the week.
+        assert row.join_attempted_at is not None
+        attempted_at = row.join_attempted_at
     assert _join_rows(db) == [("a", "warning", "challenge_stop")]
-    # Still in the queue: resting now, named by hand it is there at once.
+    # Resting now, so the automatic queue and the dashboard both skip it.
+    # Named by hand, it is there at once.
     assert joiner.select_join_candidates(db) == []
     assert [c["slug"] for c in joiner.select_join_candidates(db, host="a")] == ["a"]
+    from circle_leads.web.overview import build_queues
+    from sqlalchemy import and_
+
+    named = and_(Community.name.is_not(None), Community.name != "")
+    with db.session() as s:
+        queues = {q["key"]: q for q in build_queues(s, attempted_at, named=named)}
+    assert queues["join"]["waiting"] == 0
+    assert queues["join"]["stale"] is False
+    assert queues["join"]["last_moved"] is not None
 
 
 def test_a_handoff_without_detail_still_says_something(monkeypatch):

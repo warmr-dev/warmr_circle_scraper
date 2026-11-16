@@ -244,3 +244,55 @@ def test_a_hostless_row_gets_its_address_when_found_again(db):
         s.scalar(select(Community).where(Community.slug == "a")).host = None
     save(db, [rc("a", 60)], min_score=25)
     assert _rows(db) == {"a": "a.circle.so"}
+
+
+# --- a Discover card whose Join button leads to a Circle community ------------
+
+def _card_session():
+    from tests.card_pages import card_html
+
+    class Resp:
+        def __init__(self, text, content_type="text/html"):
+            self.status_code, self.text = 200, text
+            self.headers = {"content-type": content_type}
+
+    return StubSession({
+        "products/mte": Resp(card_html(
+            link="https://community.mte.com/joinus?utm_source=circle_discover",
+            offers=[(0, None)])),
+        "community.mte.com/internal_api/spaces": Resp('{"records": []}', "application/json"),
+    })
+
+
+def _row(db, slug):
+    from sqlalchemy import select
+
+    from circle_leads.storage.models import Community
+    with db.session() as s:
+        row = s.scalar(select(Community).where(Community.slug == slug))
+        s.expunge(row)
+        return row
+
+
+def test_a_discover_find_is_stored_as_its_community(db):
+    """Marketing Talent Exchange, 2026-11-12: stored as the card, priced "$33",
+    no address -- a free community the join bot could never reach."""
+    card = "https://discover.circle.so/products/mte"
+    persist_finds(db, [rc("mte", 60, url=card)], min_score=25, validate=True,
+                  session=_card_session())
+    row = _row(db, "mte")
+    assert (row.host, row.url, row.platform) == (
+        "community.mte.com", "https://community.mte.com", "circle")
+    assert row.price_label == "Free"
+    assert row.notes == f"directory card: found as {card}"
+
+
+def test_a_card_stored_earlier_gets_its_address_when_found_again(db):
+    card = "https://discover.circle.so/products/mte"
+    save(db, [rc("mte", 60, url=card)], min_score=25)
+    assert _row(db, "mte").host is None
+    again = persist_finds(db, [rc("mte", 60, url=card)], min_score=25, validate=True,
+                          session=_card_session())
+    assert len(again.updated) == 1
+    row = _row(db, "mte")
+    assert (row.host, row.url) == ("community.mte.com", "https://community.mte.com")
