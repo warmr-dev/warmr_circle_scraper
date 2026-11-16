@@ -115,11 +115,13 @@ def _record_visit(db: Database, candidate: dict, status: str, detail: str, accou
 def _record_handoff(db: Database, community_id: int, status: str, detail: str) -> None:
     """Say on the community row that the bot stopped there, and why.
 
-    Before this a handoff left nothing in the database: the join "did not
-    work" and nobody could say why without the batch machine's log file.
     join_status stays as it is, so the row stays in the queue and the bot comes
-    back once the blocker is gone. join_attempted_at stays too: the daily cap
-    and the join queue's "last moved" read it as a terminal outcome.
+    back once the blocker is gone and the week's rest is over. join_attempted_at
+    is set: ``resting_after_handoff`` and the join queue's "last moved" read it.
+    Left unset, a handed-off community still counts as waiting and the queue
+    looks stuck while the bot has nothing to take. The per-account daily cap
+    still counts every visit from the attempt log. This timestamp is one
+    community, not one visit, and it does not say which account opened the page.
     """
     stamp = utcnow().strftime("%Y-%m-%d %H:%M UTC")
     text = f"{JOIN_HANDOFF_PREFIX} {status} — {detail or 'the driver gave no detail'} ({stamp})"
@@ -130,6 +132,7 @@ def _record_handoff(db: Database, community_id: int, status: str, detail: str) -
                 return
             community.join_status_detail = text[:2000]
             community.join_attempts = (community.join_attempts or 0) + 1
+            community.join_attempted_at = utcnow()
     except Exception:  # noqa: BLE001 - the attempt log already has it
         logger.warning("could not record the handoff on community %s", community_id,
                        exc_info=True)
@@ -161,9 +164,10 @@ def _visits_today_for_account(account: str, entries: "list[dict] | None" = None)
     let the 2026-09-16 run visit 70 hosts while counting 25, and finish the
     day at 29/25 -- the cap both breached and ineffective.
 
-    The DB can't supply this number: join_attempted_at is only ever written
-    for a terminal outcome, so it cannot see a handoff at all, and it carries
-    no per-account marker (it predates having more than one account).
+    The DB can't supply this number on its own. join_attempted_at is written
+    for a terminal outcome and for a handoff, but only once per community and
+    with no per-account marker (it predates having more than one account). A
+    second visit the same day exists only in the attempt log.
 
     ``entries`` is an already-parsed snapshot of the log (see
     ``run_auto_join``); without one the log is read and parsed here.
@@ -185,10 +189,11 @@ def _attempts_today(db: Database, account: str, entries: "list[dict] | None" = N
 
     "main" takes whichever of its two sources is larger: the DB-wide count is
     its whole real history (including attempts from before this log file
-    existed, or from another process), the log is the only one that sees
-    visits that never reached a terminal outcome. Neither can hide activity
-    the other saw. Any other account has no DB footprint to read -- see
-    _visits_today_for_account -- so the log is all there is.
+    existed, or from another process), one community per timestamp. The log
+    is what sees every visit, including a second one the same day, and which
+    account made it. Neither can hide activity the other saw. Any other
+    account has no DB footprint of its own -- see _visits_today_for_account --
+    so the log is all there is.
     """
     visits = _visits_today_for_account(account, entries)
     if account == "main":
@@ -471,10 +476,17 @@ def _replay_check(host: str, cookies: list[dict]) -> str:
 
 
 def _link_connection(db: Database, host: str, community_id: int, account_key: str) -> None:
+    """Point the connection at the community this join was for.
+
+    ``connect_host`` may already have set ``community_id`` to a row created
+    from the cookie host. That host can differ from the community that was
+    queued (a custom domain after a redirect). The join's own community is the
+    one the queue must stop offering, so it wins.
+    """
     with db.session() as s:
         row = s.scalar(select(CircleConnection).where(CircleConnection.host == host))
         if row is not None:
-            row.community_id = row.community_id or community_id
+            row.community_id = community_id
             row.member_label = account_key
 
 

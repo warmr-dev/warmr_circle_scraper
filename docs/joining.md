@@ -81,8 +81,16 @@ Chrome on its own profile:
 - **A handoff rests for a week** (`reach.HANDOFF_REST`). A community the bot
   stopped on -- a question it may not answer, a page it could not name --
   sits out the automatic runs for 7 days and is not counted as waiting on the
-  dashboard; `--host` retries it at once. Before this, every run walked the
-  same few stuck hosts again, each visit mailing a new login code.
+  dashboard; `--host` retries it at once. The rest is
+  `communities.join_attempted_at`, written when the handoff is recorded.
+  `join_status` stays `not_attempted` (or `profile_pending` when the
+  membership already exists), so the row returns to the bot after the week.
+  Left unset, those rows still counted as waiting and the join queue looked
+  stuck while the bot had nothing to take. The per-account daily cap still
+  counts every visit from `data/join_attempts.log`. The timestamp is one
+  community, not one visit, and it does not say which account opened the page.
+  Before the week's rest, every run walked the same few stuck hosts again,
+  each visit mailing a new login code.
 - **Enter through the central session first.** A full sign-in (email, code)
   on a community behind Circle's central login ended the account's sessions in
   the other such communities: on 2026-11-09 six re-entries in a row left only
@@ -117,7 +125,8 @@ started by `warmr-join.timer` every four hours (`deploy/droplet/`).
   stops it as `profile_incomplete`, naming the question.
 - **Outcomes** go where the Mac's runs put them: `join_status`, the account in
   `communities.join_account`, the session through `connect_host`, every visit
-  in `activity_log` (`join`), a handoff in `join_status_detail`.
+  in `activity_log` (`join`), a handoff in `join_status_detail` and
+  `join_attempted_at`.
 - **The Mac's Ego runs are off** since 2026-09-29 (WORKLOG). The Ego path stays
   in the code for a Mac that needs it: `--driver ego` is the default.
 
