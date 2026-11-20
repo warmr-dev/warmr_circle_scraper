@@ -57,10 +57,29 @@ sendBtn.addEventListener('click', async () => {
   setStatus('Reading cookies…');
   try {
     const tab = await currentTab();
-    const cookies = await chrome.cookies.getAll({ url: tab.url });
-    const found = cookies.filter((c) => COOKIE_NAMES.includes(c.name));
+    const host = new URL(tab.url).host;
+    const angelsquad = host === 'app.angelsquad.co' || host.endsWith('.angelsquad.co');
+    let found;
+    let postHost = host;
+    if (angelsquad) {
+      const lists = await Promise.all([
+        chrome.cookies.getAll({ url: 'https://app.angelsquad.co/' }),
+        chrome.cookies.getAll({ url: 'https://api.angelsquad.co/' }),
+      ]);
+      const byName = new Map();
+      for (const cookie of lists.flat()) {
+        if (cookie.name && cookie.value) byName.set(cookie.name, cookie);
+      }
+      found = [...byName.values()];
+      postHost = 'app.angelsquad.co';
+    } else {
+      const cookies = await chrome.cookies.getAll({ url: tab.url });
+      found = cookies.filter((c) => COOKIE_NAMES.includes(c.name));
+    }
     if (!found.length) {
-      setStatus(`No Circle session cookies found on ${currentHost}. Are you logged in here?`, 'err');
+      setStatus(angelsquad
+        ? 'No Angel Squad cookies found. Log in at app.angelsquad.co first.'
+        : `No Circle session cookies found on ${currentHost}. Are you logged in here?`, 'err');
       return;
     }
 
@@ -72,7 +91,7 @@ sendBtn.addEventListener('click', async () => {
 
     setStatus(`Sending ${found.length} cookie(s)…`);
     const resp = await fetch(
-      `${dashboardUrl}/api/connections/${encodeURIComponent(currentHost)}/session`,
+      `${dashboardUrl}/api/connections/${encodeURIComponent(postHost)}/session`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Extension-Token': extensionToken },
@@ -87,7 +106,7 @@ sendBtn.addEventListener('click', async () => {
     const data = await resp.json();
     const check = data.check || {};
     if (check.verdict === 'valid') {
-      setStatus(`Session works on ${currentHost}: ${check.detail} A read is queued.`, 'ok');
+      setStatus(`Session works on ${postHost}: ${check.detail} A read is queued.`, 'ok');
     } else if (check.verdict) {
       setStatus(`Saved, but: ${check.detail}`, 'warn');
     } else if (data.missing && data.missing.length) {

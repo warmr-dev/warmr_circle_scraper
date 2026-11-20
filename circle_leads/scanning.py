@@ -106,6 +106,9 @@ def scan_cookie_host(db: Database, requirements: Requirements, host: str, *,
     rescan = _rescan_since(db, host)
     age_since = _age_since(requirements)
     since = max((d for d in (rescan, age_since) if d is not None), default=None)
+    from circle_leads.scraper.angelsquad import is_angelsquad_host
+    if is_angelsquad_host(host):
+        return _scan_angelsquad(db, requirements, cookies, unreadable, slug, use_llm, since)
     state = ConnectionState.CONNECTED
     detail = ""
     total = readable = spaces_total = leads = 0
@@ -222,6 +225,98 @@ def scan_cookie_host(db: Database, requirements: Requirements, host: str, *,
 
 # --- checking a session the moment it is saved ---------------------------------
 
+def _scan_angelsquad(db: Database, requirements: Requirements, cookies: dict,
+                     unreadable, slug: str, use_llm: bool,
+                     since: _dt.datetime | None) -> dict[str, Any]:
+    """Read https://api.angelsquad.co and file posts on the Angel Squad row."""
+    from circle_leads.scraper.angelsquad import APP_HOST, fetch_records
+    from circle_leads.scraper.normalize import parse_timestamp
+    from circle_leads.scraper.public_reader import normalize_public_post
+    from circle_leads.triage.pipeline import triage_records
+    from circle_leads.web.replay_store import SessionUnreadable
+
+    host = APP_HOST
+    state = ConnectionState.CONNECTED
+    detail = ""
+    total = readable = leads = 0
+    spaces_total = 0
+    partial = False
+    try:
+        if unreadable is not None:
+            raise unreadable
+        status, detail, records = fetch_records(cookies)
+        if status == "rejected":
+            state = ConnectionState.SESSION_EXPIRED
+            records = []
+        elif status != "valid":
+            state = ConnectionState.ERROR
+            records = []
+        else:
+            spaces_total = 1
+            fresh = []
+            for record in records:
+                published = parse_timestamp(record.get("created_at"))
+                if since is not None and published is not None and published < since:
+                    continue
+                fresh.append(record)
+            normalized = []
+            for record in fresh:
+                item = normalize_public_post(
+                    record, community_url=f"https://{host}",
+                    excluded_content=getattr(requirements, "excluded_content", None),
+                    space_slug=record.get("space_slug"),
+                )
+                if item:
+                    item["permission_reference"] = "member_session"
+                    normalized.append(item)
+            if normalized:
+                res = triage_records(
+                    db, normalized, requirements, community=slug,
+                    source_url=f"https://{host}", use_llm=use_llm,
+                )
+                leads = len(res.leads)
+                total = len(normalized)
+                readable = 1
+                detail = (f"{total} post(s), {leads} lead(s) from the Angel Squad feed")
+            elif records:
+                detail = "No new posts on the Angel Squad feed."
+            else:
+                detail = "Angel Squad feed is empty."
+    except SessionUnreadable as exc:
+        state = ConnectionState.ERROR
+        detail = str(exc)
+    except Exception as exc:  # noqa: BLE001 - one host must not stop a batch
+        state = ConnectionState.ERROR
+        detail = f"{type(exc).__name__}: {exc}"
+
+    with db.session() as s:
+        conn = s.scalar(select(CircleConnection).where(CircleConnection.host == host))
+        if conn is None:
+            conn = CircleConnection(host=host)
+            s.add(conn)
+        conn.state = state.value
+        conn.state_detail = detail or None
+        conn.spaces_readable = readable
+        conn.spaces_total = spaces_total
+        conn.last_sync_at = _dt.datetime.utcnow()
+        if state == ConnectionState.CONNECTED and spaces_total:
+            s.execute(update(Community).where(Community.host == host)
+                      .values(last_synced_at=conn.last_sync_at))
+        log_activity(
+            s, kind="ingest",
+            level="warning" if state != ConnectionState.CONNECTED
+            else ("success" if leads else "info"),
+            community=slug,
+            summary=(f"HTTP scan of {host}: {total} post(s), {leads} lead(s) "
+                     f"from {readable} space(s)"
+                     + (f" — {detail}" if state != ConnectionState.CONNECTED else "")),
+            items_seen=total, leads_found=leads,
+        )
+    return {"host": host, "state": state.value, "posts": total,
+            "spaces_readable": readable, "leads": leads, "detail": detail,
+            "partial": partial}
+
+
 def verify_session(host: str, cookies: dict[str, str], *,
                    timeout: float = 15.0) -> dict[str, Any]:
     """Ask Circle once whether these cookies read ``host``.
@@ -239,9 +334,12 @@ def verify_session(host: str, cookies: dict[str, str], *,
     "unverified" (no clear answer from here). Cookie values never appear in
     the result.
     """
+    from circle_leads.scraper.angelsquad import is_angelsquad_host, verify as verify_angelsquad
     from circle_leads.scraper.member_api_reader import (
         ChallengeHit, MemberApiReader, ProfileIncomplete, SessionInvalid,
     )
+    if is_angelsquad_host(host):
+        return verify_angelsquad(cookies, timeout=timeout)
     reader = MemberApiReader(host, cookies=cookies, request_pause=0, timeout=timeout)
     try:
         spaces = reader.probe_spaces()
