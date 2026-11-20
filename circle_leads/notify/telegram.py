@@ -148,3 +148,26 @@ def notify(title: str, body: str = "", *, level: str = "info", **kwargs) -> bool
     if body:
         text += "\n" + body
     return send(text, **kwargs)
+
+
+def cookie_problem(community: str, problem: str, *, host: str) -> bool:
+    """One plain message when a community's stored login stops working.
+
+    ``host`` is only the dedup key, so two communities that share a display
+    name still report separately, and the same dead login is not repeated on
+    every poll.
+    """
+    label = (community or "").strip() or host
+    reason = (problem or "").strip() or (
+        "Куки не действуют. Нужно зайти и отправить сессию заново."
+    )
+    return notify(
+        "Нужно заново войти",
+        "\n".join((
+            "Проект: Warmr",
+            f"Сообщество: {escape(label)}",
+            f"Проблема: {escape(reason)}",
+        )),
+        level="warning",
+        dedup_key=f"cookie:{host}",
+    )

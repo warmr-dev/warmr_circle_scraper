@@ -47,7 +47,13 @@ happened with `read_outcome` on 2026-09-23.
 journal to Telegram when a service dies. That cannot report a dead machine, so
 each service also stamps a heartbeat into the database and the dashboard's
 `/api/watchdog`, run by a Vercel cron every ten minutes, shouts when a stamp
-goes stale.
+goes stale. A community whose stored login stops working is a different
+message, sent by the worker and the watcher: project Warmr, the community
+name, and that the cookies have to be sent again. Both kinds of message use
+`TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` from `/etc/warmr/warmr.env`. The
+watchdog runs on the dashboard, so those two variables also have to be set
+there. A paused community is not reported, and one dead login is reported
+once until it works again.
 
 ## The join browser
 

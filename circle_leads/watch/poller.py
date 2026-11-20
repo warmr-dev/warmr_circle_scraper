@@ -821,11 +821,21 @@ def _finish(db: Database, state: dict, outcome: WatchOutcome, tuning: WatchTunin
             seeded: bool = False) -> WatchOutcome:
     """Write the result back. The watermark moves only on a successful read."""
     now = _now()
+    cookie_died = False
+    died_host = ""
+    died_community: int | None = None
     with db.session() as s:
         row = s.get(WatchState, state["id"])
         if row is None:
             return outcome
         row.last_checked_at = now
+        cookie_died = (
+            outcome.status == "unauthorized"
+            and row.mode == WatchMode.COOKIE.value
+            and (row.last_status or "") != "unauthorized"
+        )
+        died_host = row.host
+        died_community = row.community_id
         row.last_status = outcome.status
         row.last_detail = outcome.detail or None
 
@@ -876,6 +886,9 @@ def _finish(db: Database, state: dict, outcome: WatchOutcome, tuning: WatchTunin
             outcome.status, tuning,
         )
         row.next_check_at = now + timedelta(seconds=delay)
+    if cookie_died:
+        from circle_leads.notify.cookies import report_cookie_death
+        report_cookie_death(db, died_host, community_id=died_community)
     return outcome
 
 

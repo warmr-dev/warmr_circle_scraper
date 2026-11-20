@@ -393,6 +393,71 @@ def test_a_feed_that_closes_without_a_session_is_switched_off(db, community, mon
     assert read_row(db, community).mode == WatchMode.OFF.value
 
 
+def test_a_cookie_feed_that_starts_refusing_is_reported_once(db, community, monkeypatch):
+    from sqlalchemy import select
+
+    from circle_leads.storage.models import Community
+
+    ensure_watch_rows(db)
+    with db.session() as s:
+        row = s.scalar(select(WatchState).where(WatchState.community_id == community))
+        row.mode = WatchMode.COOKIE.value
+        row.last_status = "ok"
+        row.last_post_id = 10
+        s.get(Community, community).name = "Example Club"
+    sent = []
+    monkeypatch.setattr(
+        "circle_leads.notify.cookies.cookie_problem",
+        lambda community, problem, *, host: sent.append((community, problem, host)) or True,
+    )
+
+    out = check_community(db, state_for(db, community), Requirements(),
+                          session=FakeSession([FakeResponse(401)]), tuning=WatchTuning())
+    assert out.status == "unauthorized"
+    assert sent == [(
+        "Example Club",
+        "Куки не действуют. Нужно зайти и отправить сессию заново.",
+        HOST,
+    )]
+
+    check_community(db, state_for(db, community), Requirements(),
+                    session=FakeSession([FakeResponse(401)]), tuning=WatchTuning())
+    assert len(sent) == 1
+
+
+def test_a_paused_community_is_not_told_about_a_dead_cookie(db, community, monkeypatch):
+    from circle_leads.notify.cookies import report_cookie_death
+    from circle_leads.storage.models import CircleConnection, ConnectionPriority
+
+    with db.session() as s:
+        s.add(CircleConnection(host=HOST, community_id=community,
+                               priority=ConnectionPriority.PAUSED.value))
+    sent = []
+    monkeypatch.setattr(
+        "circle_leads.notify.cookies.cookie_problem",
+        lambda *a, **k: sent.append(a) or True,
+    )
+    assert report_cookie_death(db, HOST, community_id=community) is False
+    assert sent == []
+
+
+def test_a_scan_reports_a_login_only_when_it_newly_dies(db, monkeypatch):
+    from circle_leads.scanning import _report_new_session_death
+    from circle_leads.storage.models import ConnectionState
+
+    sent = []
+    monkeypatch.setattr(
+        "circle_leads.notify.cookies.report_cookie_death",
+        lambda *a, **k: sent.append(a) or True,
+    )
+    _report_new_session_death(db, HOST, ConnectionState.CONNECTED, None)
+    _report_new_session_death(db, HOST, ConnectionState.SESSION_EXPIRED,
+                              ConnectionState.SESSION_EXPIRED.value)
+    _report_new_session_death(db, HOST, ConnectionState.SESSION_EXPIRED,
+                              ConnectionState.CONNECTED.value)
+    assert len(sent) == 1
+
+
 def test_a_feed_that_closes_with_a_session_stored_switches_to_cookie(db, community, monkeypatch):
     from circle_leads.web.replay_store import connect_host
     ensure_watch_rows(db)
