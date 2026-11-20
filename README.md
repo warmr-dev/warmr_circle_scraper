@@ -54,6 +54,7 @@ and kept behind an off-by-default flag as evidence.
 | Classify hire-vs-seek, extract role/skills/budget, score, de-duplicate, export | ✅ |
 | **Chat / DMs** | ❌ separate real-time service with its own token; not scraped |
 | Defeat a Cloudflare / CAPTCHA challenge | ❌ never — it stops and reports |
+| Angel Squad's own app (`app.angelsquad.co`), via that site's session cookie | ✅ feed posts. Circle cookies do not work there |
 
 ---
 
@@ -170,6 +171,13 @@ Then in the dashboard → **Circle Connector** tab:
 
    The queued read waits behind a running harvest. After copying cookies, close
    the tab instead of logging out: logging out kills the copied session too.
+
+   **Angel Squad** left Circle. Open https://app.angelsquad.co, sign in with the
+   emailed code, and send that page's cookies with the extension (or paste the
+   browser's cookie export into the `app.angelsquad.co` card). The old
+   `angel-squad.circle.so` cookies are not a login there. The first save moves
+   the existing Angel Squad row onto `app.angelsquad.co` and the worker reads
+   `https://api.angelsquad.co/api/community/feed`.
 3. **Scan now** — the worker reads it; leads appear on the **Leads** tab.
 
 Every service that reads sessions (dashboard, worker, watcher) needs the

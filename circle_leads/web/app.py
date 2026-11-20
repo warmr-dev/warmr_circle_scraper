@@ -512,13 +512,17 @@ def create_app(
         from circle_leads import scanning
         from circle_leads.storage.job_queue import enqueue
         from circle_leads.web.replay_store import connect_host, record_result
-        from circle_leads.scraper.member_api_reader import SESSION_COOKIE_NAMES
+        from circle_leads.scraper.angelsquad import (
+            accepted_cookies, canonical_host, is_angelsquad_host, retarget_legacy,
+        )
 
-        host = _clean_host(host)
+        host = canonical_host(_clean_host(host))
         got: dict[str, str] = {}
+        angelsquad = is_angelsquad_host(host)
 
         # Path 1: a full cookie-export JSON array (string or already-parsed).
         raw = (payload or {}).get("cookies")
+        data = None
         if raw:
             data = raw
             if isinstance(raw, str):
@@ -527,40 +531,47 @@ def create_app(
                 except (ValueError, TypeError):
                     raise HTTPException(400, "The cookie box must contain the JSON export array.")
             if isinstance(data, list):
-                for c in data:
-                    if isinstance(c, dict) and c.get("name") in SESSION_COOKIE_NAMES:
-                        got[c["name"]] = str(c.get("value") or "")
+                got.update(accepted_cookies(host, data))
 
-        # Path 2: the two values pasted individually (OR alternative to JSON).
-        for field_name, cookie_name in (
-            ("session_cookie", "_circle_session"),
-            ("user_session_identifier", "user_session_identifier"),
-            ("remember_token", "remember_user_token"),
-        ):
-            val = str((payload or {}).get(field_name) or "").strip()
-            if val:
-                # Tolerate a "name=value" paste.
-                got[cookie_name] = (val.split("=", 1)[1]
-                                    if "=" in val and val.startswith(cookie_name) else val)
+        # Path 2: the two Circle values pasted individually (OR alternative to JSON).
+        if not angelsquad:
+            for field_name, cookie_name in (
+                ("session_cookie", "_circle_session"),
+                ("user_session_identifier", "user_session_identifier"),
+                ("remember_token", "remember_user_token"),
+            ):
+                val = str((payload or {}).get(field_name) or "").strip()
+                if val:
+                    # Tolerate a "name=value" paste.
+                    got[cookie_name] = (val.split("=", 1)[1]
+                                        if "=" in val and val.startswith(cookie_name) else val)
 
-        if "_circle_session" not in got and "user_session_identifier" not in got:
+        if angelsquad and not got:
+            raise HTTPException(
+                400, "Log in at https://app.angelsquad.co and send that site's cookies. "
+                "A Circle session does not open Angel Squad.")
+        if not angelsquad and "_circle_session" not in got and "user_session_identifier" not in got:
             raise HTTPException(
                 400, "Paste either the cookie-export JSON, or the _circle_session "
                 "and user_session_identifier values.")
         # Both are needed to actually read Circle; warn but still store what we got
         # so the user can fix it, and the scan will report if the session is invalid.
-        missing = [n for n in ("_circle_session", "user_session_identifier") if n not in got]
+        missing = ([] if angelsquad else
+                   [n for n in ("_circle_session", "user_session_identifier") if n not in got])
 
         check = scanning.verify_session(host, got)
         if check["verdict"] == "rejected":
             hint = f" Missing: {', '.join(missing)}." if missing else ""
+            who = "Angel Squad" if angelsquad else "Circle"
             raise HTTPException(
-                422, f"Circle rejected these cookies for {host}, so they were not saved. "
+                422, f"{who} rejected these cookies for {host}, so they were not saved. "
                 "They come from a logged-out session or from another account. Log in "
                 f"to {host} in the browser as a member, then copy them again.{hint}")
 
         cookies = [{"domain": host, "name": n, "value": v, "path": "/",
                     "secure": True, "session": True} for n, v in got.items()]
+        if angelsquad:
+            retarget_legacy(db)
         # connect_host() stores the cookie AND auto-creates the CircleConnection
         # row if this is a brand-new host, so pasting a cookie is the ONLY step
         # needed -- no separate "Add community" first.

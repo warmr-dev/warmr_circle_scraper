@@ -6,10 +6,12 @@ clear any onboarding — this only automates handing the resulting session
 cookie to the dashboard.
 
 **What it does:** reads `_circle_session` + `user_session_identifier` (+
-`remember_user_token` if present) for the tab you're currently on, via the
-browser's privileged cookie API (these are almost certainly `HttpOnly`, so a
-bookmarklet or page script cannot read them — an extension is the minimum
-that works), and POSTs them to
+`remember_user_token` if present) for the Circle tab you're currently on,
+via the browser's privileged cookie API (these are almost certainly
+`HttpOnly`, so a bookmarklet or page script cannot read them — an extension
+is the minimum that works). On `app.angelsquad.co` it instead sends the
+cookies that site and `api.angelsquad.co` hold — Angel Squad is no longer
+Circle. It POSTs them to
 `POST /api/connections/{host}/session` — the exact endpoint the dashboard's
 own cookie-paste form calls.
 

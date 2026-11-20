@@ -369,6 +369,14 @@ def _fetch(session: requests.Session, host: str, page: int, tuning: WatchTuning,
                        allow_redirects=False)
 
 
+def _already_seen(rid, seen: set, watermark) -> bool:
+    """A post already stored. Numeric Circle ids also sit under the watermark;
+    Angel Squad ids are strings and are remembered only in ``seen``."""
+    if rid in seen:
+        return True
+    return isinstance(rid, int) and isinstance(watermark, int) and rid <= watermark
+
+
 def check_community(
     db: Database,
     state: dict,
@@ -379,9 +387,12 @@ def check_community(
     use_llm: bool = False,
 ) -> WatchOutcome:
     """One feed check. Reads, triages anything new, then updates the row."""
+    from circle_leads.scraper.angelsquad import is_angelsquad_host
     from circle_leads.web.replay_store import load_cookies
 
     host = state["host"]
+    if is_angelsquad_host(host):
+        return _check_angelsquad(db, state, requirements, tuning=tuning, use_llm=use_llm)
     cookies = None
     if state["mode"] == WatchMode.COOKIE.value:
         cookies = {c["name"]: c["value"] for c in (load_cookies(db, host) or [])}
@@ -440,7 +451,7 @@ def check_community(
             if rid is None or rid in seen_now:
                 continue
             seen_now.append(rid)
-            if rid in seen or rid <= watermark:
+            if _already_seen(rid, seen, watermark):
                 continue
             page_new += 1
             if not seeding:
@@ -467,6 +478,42 @@ def check_community(
     return _take_new(db, state, requirements, fresh=fresh, seen_now=seen_now,
                      seeding=seeding, tuning=tuning, use_llm=use_llm,
                      member=cookies is not None, etag=etag_value)
+
+
+def _check_angelsquad(db: Database, state: dict, requirements, *,
+                      tuning: WatchTuning, use_llm: bool) -> WatchOutcome:
+    """One pass of the Angel Squad member feed. Ids are strings, so only
+    ``recent_ids`` remembers them."""
+    from circle_leads.scraper.angelsquad import fetch_records
+    from circle_leads.web.replay_store import load_cookies
+
+    host = state["host"]
+    cookies = {c["name"]: c["value"] for c in (load_cookies(db, host) or [])}
+    if not cookies:
+        return _finish(db, state, WatchOutcome(host, "unauthorized",
+                                               detail="no stored session"), tuning)
+    status, detail, records = fetch_records(cookies)
+    if status == "rejected":
+        return _finish(db, state, WatchOutcome(host, "unauthorized", detail=detail), tuning)
+    if status != "valid":
+        return _finish(db, state, WatchOutcome(host, "error", detail=detail), tuning)
+
+    seen = set(state["recent_ids"] or [])
+    watermark = state["last_post_id"] or 0
+    seeding = watermark == 0 and not seen
+    fresh: list[dict] = []
+    seen_now: list = []
+    for rec in records:
+        rid = rec.get("id")
+        if rid is None or rid in seen_now:
+            continue
+        seen_now.append(rid)
+        if _already_seen(rid, seen, watermark) or seeding:
+            continue
+        fresh.append(rec)
+    return _take_new(db, state, requirements, fresh=fresh, seen_now=seen_now,
+                     seeding=seeding, tuning=tuning, use_llm=use_llm,
+                     member=True, detail=detail)
 
 
 def _http_detail(resp: requests.Response) -> str:
@@ -794,7 +841,9 @@ def _finish(db: Database, state: dict, outcome: WatchOutcome, tuning: WatchTunin
             ids = [i for i in seen_ids if i is not None]
             keep = list(row.recent_ids or []) + ids
             row.recent_ids = keep[-RECENT_IDS_KEPT:]
-            row.last_post_id = max([row.last_post_id or 0] + ids)
+            numeric = [i for i in ids if isinstance(i, int)]
+            if numeric:
+                row.last_post_id = max([row.last_post_id or 0] + numeric)
             if not seeded:
                 row.posts_seen = (row.posts_seen or 0) + outcome.new_posts
                 row.leads_found = (row.leads_found or 0) + outcome.leads
