@@ -94,7 +94,14 @@ a job; the worker does the scanning.
 - **Worker** — `circle-leads worker`, an always-on process. It drains the
   `scan_jobs` queue (private-community scans, VIP-first) and runs the scheduled
   **public harvest** (web-search discovery + reading). Warm, pooled, no timeout —
-  this is where all the actual reading happens.
+  this is where all the actual reading happens. When a stored login stops
+  working, the worker and the feed watcher send one Telegram message: project
+  Warmr, the community name, and that the cookies have to be sent again. A
+  paused community is left quiet, and the same failure is not repeated until
+  the login has worked in between. `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`
+  on the droplet (`/etc/warmr/warmr.env`) are the bot those messages use. The
+  separate "service is silent" message is sent by the dashboard, so the same
+  two names also have to be set on Vercel.
 - **Supabase** — one Postgres database, shared by both. Holds communities,
   posts, leads, the job queue, encrypted session cookies, and settings.
 

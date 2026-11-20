@@ -183,11 +183,14 @@ def scan_cookie_host(db: Database, requirements: Requirements, host: str, *,
         state = ConnectionState.ERROR
         detail = f"{exc.__class__.__name__}: {exc}"
 
+    previous_state = None
     with db.session() as s:
         conn = s.scalar(select(CircleConnection).where(CircleConnection.host == host))
         if conn is None:
             conn = CircleConnection(host=host)
             s.add(conn)
+        else:
+            previous_state = conn.state
         conn.state = state.value
         conn.state_detail = detail or None
         if since is not None and state == ConnectionState.CONNECTED:
@@ -218,6 +221,7 @@ def scan_cookie_host(db: Database, requirements: Requirements, host: str, *,
                      + (f" — {detail}" if state != ConnectionState.CONNECTED else "")),
             items_seen=total, leads_found=leads,
         )
+    _report_new_session_death(db, host, state, previous_state)
     return {"host": host, "state": state.value, "posts": total,
             "spaces_readable": readable, "leads": leads, "detail": detail,
             "partial": partial}
@@ -289,11 +293,14 @@ def _scan_angelsquad(db: Database, requirements: Requirements, cookies: dict,
         state = ConnectionState.ERROR
         detail = f"{type(exc).__name__}: {exc}"
 
+    previous_state = None
     with db.session() as s:
         conn = s.scalar(select(CircleConnection).where(CircleConnection.host == host))
         if conn is None:
             conn = CircleConnection(host=host)
             s.add(conn)
+        else:
+            previous_state = conn.state
         conn.state = state.value
         conn.state_detail = detail or None
         conn.spaces_readable = readable
@@ -312,9 +319,21 @@ def _scan_angelsquad(db: Database, requirements: Requirements, cookies: dict,
                      + (f" — {detail}" if state != ConnectionState.CONNECTED else "")),
             items_seen=total, leads_found=leads,
         )
+    _report_new_session_death(db, host, state, previous_state)
     return {"host": host, "state": state.value, "posts": total,
             "spaces_readable": readable, "leads": leads, "detail": detail,
             "partial": partial}
+
+
+def _report_new_session_death(db: Database, host: str, state: ConnectionState,
+                              previous_state: str | None) -> None:
+    """One Telegram message when a login that worked is now refused."""
+    if state != ConnectionState.SESSION_EXPIRED:
+        return
+    if previous_state == ConnectionState.SESSION_EXPIRED.value:
+        return
+    from circle_leads.notify.cookies import report_cookie_death
+    report_cookie_death(db, host)
 
 
 def verify_session(host: str, cookies: dict[str, str], *,

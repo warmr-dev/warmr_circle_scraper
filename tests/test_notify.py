@@ -143,3 +143,21 @@ def test_an_empty_message_is_not_sent(monkeypatch, configured):
     monkeypatch.setattr(requests, "post", posted)
     assert telegram.send("   ") is False
     assert posted.calls == []
+
+
+def test_a_dead_login_names_the_project_the_community_and_the_problem(monkeypatch, configured):
+    posted = Posted()
+    monkeypatch.setattr(requests, "post", posted)
+    assert telegram.cookie_problem("Exit Five", "Куки не действуют.", host="exitfive.com")
+    text = posted.calls[0]["json"]["text"]
+    assert "Проект: Warmr" in text
+    assert "Сообщество: Exit Five" in text
+    assert "Проблема: Куки не действуют." in text
+
+
+def test_the_same_dead_login_is_reported_once(monkeypatch, configured):
+    posted = Posted()
+    monkeypatch.setattr(requests, "post", posted)
+    telegram.cookie_problem("Exit Five", "Куки не действуют.", host="exitfive.com")
+    telegram.cookie_problem("Exit Five", "всё ещё нет", host="exitfive.com")
+    assert len(posted.calls) == 1
