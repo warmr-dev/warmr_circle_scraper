@@ -1404,3 +1404,73 @@ def test_the_mailbox_is_used_when_it_is_configured(cdp, monkeypatch):
 def test_an_unknown_driver_is_refused():
     with pytest.raises(ValueError):
         joiner.run_auto_join(_db(), driver="selenium")
+
+
+# --- A browser that dies on a page must not pin that host to the queue head --
+# 2026-11-24..27: haven-online-safety killed the droplet browser on every visit;
+# the _BatchStop path wrote nothing to the attempt log or the row, so every
+# 15-minute run picked it again (282 visits) and other communities waited.
+
+class _DyingVisitor:
+    label = "browser error"
+
+    def __init__(self, dies_on):
+        self.dies_on = dies_on
+
+    def visit(self, candidate):
+        if candidate["slug"] == self.dies_on:
+            raise joiner._BatchStop("the browser went away: Target page closed", pages=1)
+        return EgoJoinResult(status="joined", detail="ok"), 1
+
+
+class _Acct:
+    key = "4"
+
+
+def _run_dying(db, slug):
+    cands = joiner.select_join_candidates(db, limit=1)
+    return joiner._run_batch(db, cands, _Acct(), JoinPacingConfig(max_joins_per_day=50), 0,
+                             joiner.JoinBatchResult(space_id=0), _DyingVisitor(slug))
+
+
+def test_a_browser_death_rests_the_host_so_the_queue_moves(monkeypatch):
+    monkeypatch.setattr(joiner, "sleep_between_attempts", lambda pacing: None)
+    db = _db()
+    _seed(db, "stuck", icp_score=30)
+    _seed(db, "next", icp_score=10)
+
+    first = _run_dying(db, "stuck")
+    assert first.stopped_for == "stuck"
+    with db.session() as s:
+        row = s.scalar(select(Community).where(Community.slug == "stuck"))
+        assert row.join_attempted_at is not None
+        assert "bridge_error" in (row.join_status_detail or "")
+
+    # The next run takes the next community, not the same one again.
+    assert [c["slug"] for c in joiner.select_join_candidates(db, limit=1)] == ["next"]
+
+
+def test_a_browser_death_rests_six_hours_even_when_it_is_the_only_host(monkeypatch):
+    db = _db()
+    _seed(db, "stuck", icp_score=30)
+    _run_dying(db, "stuck")
+    assert joiner.select_join_candidates(db) == []
+
+    later = joiner.utcnow() + timedelta(hours=6, minutes=1)
+    monkeypatch.setattr(joiner, "utcnow", lambda: later)
+    assert [c["slug"] for c in joiner.select_join_candidates(db)] == ["stuck"]
+
+
+def test_a_host_that_keeps_killing_the_browser_is_parked(monkeypatch):
+    db = _db()
+    _seed(db, "stuck", icp_score=30)
+    log = [{"at": (joiner.utcnow() - timedelta(hours=h)).isoformat(), "account": "4",
+            "slug": "stuck", "url": "https://stuck.circle.so", "status": "bridge_error",
+            "detail": "x"} for h in (7, 14)]
+    joiner.ATTEMPT_LOG_PATH.write_text("".join(json.dumps(e) + "\n" for e in log))
+
+    _run_dying(db, "stuck")
+
+    with db.session() as s:
+        row = s.scalar(select(Community).where(Community.slug == "stuck"))
+        assert row.join_status == JoinStatus.NEEDS_HUMAN.value

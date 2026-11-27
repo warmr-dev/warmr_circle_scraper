@@ -182,6 +182,22 @@ What `warmr-1` had and its replacement lacked, in order:
   community, not one visit, and it does not say which account opened the page.
   Before the week's rest, every run walked the same few stuck hosts again,
   each visit mailing a new login code.
+- **A browser death rests for 6 hours, then parks.** When the page was already
+  open and the browser goes away (`bridge_error`: "Target page, context or
+  browser has been closed", "the browser went away"), the visit is written to
+  `data/join_attempts.log` and to the row (`join_attempted_at`,
+  `join_status_detail`). The queue skips that host for 6 hours
+  (`BRIDGE_ERROR_COOLDOWN`), so the 15-minute timer moves on. Three such
+  deaths on the same host inside 3 days set `join_status` to `needs_human`.
+  Open that community by hand, then set `join_status` back to `not_attempted`.
+  A death before any page opens (the bridge binary missing) still stops the
+  batch and does not rest the host. The Attention page lists join *errors*
+  from the last 24 hours; join warnings stay on the handoff rule. The
+  overview's "not waiting" window is still 7 days for any row with
+  `join_attempted_at` (`resting_after_handoff`), including this 6-hour rest.
+  From 2026-11-24 to 2026-11-27 haven-online-safety was visited 282 times
+  because a browser death left no attempt, and intouxdesign was picked again
+  at 14:46 and 15:02 on 2026-11-27.
 - **Enter through the central session first.** A full sign-in (email, code)
   on a community behind Circle's central login ended the account's sessions in
   the other such communities: on 2026-11-09 six re-entries in a row left only
