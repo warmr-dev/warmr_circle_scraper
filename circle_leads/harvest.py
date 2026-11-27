@@ -20,6 +20,7 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 
 from sqlalchemy import func, nullsfirst, or_, select
+from sqlalchemy.orm import load_only
 
 from circle_leads.config.settings import Requirements
 from circle_leads.discovery.join_type import (
@@ -190,6 +191,15 @@ def _community_hosts(
         # real address, and no paid community we hold no login for.
         stmt = (
             select(Community)
+            # Every harvest loads the readable catalogue here. The ordering
+            # columns stay in ORDER BY; the row only needs what this function
+            # and _reads_on_circle actually touch. The rest of a communities
+            # row (descriptions, ICP notes, join detail) is most of its bytes.
+            .options(load_only(
+                Community.id, Community.slug, Community.url, Community.host,
+                Community.platform, Community.join_type, Community.watching,
+                Community.last_synced_at,
+            ))
             .where(readable())
             .order_by(
                 Community.watching.desc(),

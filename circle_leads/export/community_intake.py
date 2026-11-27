@@ -194,7 +194,8 @@ def collect_monitored_communities(session: Session) -> list[MonitoredCommunity]:
         seen_hosts.add(_norm_host(c.url))
 
     # 2. Private communities connected with a stored member session (not paused).
-    with_session = {r.host for r in session.scalars(select(ReplaySession)).all()}
+    # Hosts only: the full rows carry encrypted cookie blobs we don't need.
+    with_session = set(session.scalars(select(ReplaySession.host)).all())
     conn_stmt = (
         select(CircleConnection)
         .where(CircleConnection.priority != ConnectionPriority.PAUSED.value)

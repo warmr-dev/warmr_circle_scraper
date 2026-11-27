@@ -220,7 +220,11 @@ CIRCLE_LEADS_DB = postgresql://postgres.<ref>:<pw>@aws-0-<region>.pooler.supabas
 ```
 Use the **transaction pooler (port 6543)** — session mode (5432) exhausts the
 connection cap and hangs. The code auto-rewrites 5432→6543 for Supabase URLs, but
-set 6543 explicitly. See [`deploy/DEPLOY.md`](deploy/DEPLOY.md).
+set 6543 explicitly. Prepared statements stay off on that port: transaction mode
+does not keep them across transactions. What actually leaves the database, and
+how the watcher avoids re-reading whole rows, is in
+[`docs/supabase-egress.md`](docs/supabase-egress.md). See also
+[`deploy/DEPLOY.md`](deploy/DEPLOY.md).
 
 **Dashboard** (Vercel/Render):
 ```

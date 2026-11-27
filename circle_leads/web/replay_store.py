@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from datetime import datetime, timezone
 
 from sqlalchemy import select, update
@@ -26,6 +27,34 @@ logger = logging.getLogger(__name__)
 
 # Marks a blob stored without encryption, so load knows not to decrypt.
 _PLAINTEXT_PREFIX = "plain:"
+
+# The watcher decrypts the same blobs every check. Ten minutes of process
+# memory instead of a round trip per community. ``store_session`` drops the
+# entry it just wrote; a TTL of 0 turns the cache off. Scans use
+# ``load_cookies_strict``, which does not read this cache.
+# Keyed by engine as well as host: tests (and a dashboard plus a worker in
+# one process) must not share a blob across databases.
+_cookie_cache: dict[tuple[int, str], tuple[float, list | None]] = {}
+
+
+def _cookie_cache_ttl() -> float:
+    raw = os.environ.get("WATCH_COOKIE_CACHE_TTL", "600")
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 600.0
+
+
+def forget_cached_cookies(host: str | None = None, *, db: Database | None = None) -> None:
+    """Drop one host, or the whole cache when ``host`` is omitted."""
+    if host is None:
+        _cookie_cache.clear()
+        return
+    if db is not None:
+        _cookie_cache.pop((id(db.engine), host), None)
+        return
+    for key in [k for k in _cookie_cache if k[1] == host]:
+        _cookie_cache.pop(key, None)
 
 
 class ReplayKeyMissing(RuntimeError):
@@ -91,6 +120,7 @@ def store_session(db: Database, host: str, cookies: list[dict],
         row.last_result = None
         row.last_detail = "Stored; not yet tested from the server."
         rid = row.id
+    forget_cached_cookies(host, db=db)
     return {"host": host, "cookie_count": len(cookies)}
 
 
@@ -172,24 +202,41 @@ def encrypt_plaintext_sessions(db: Database) -> int:
     return done
 
 
-def load_cookies(db: Database, host: str) -> list[dict] | None:
-    """Decrypt and return the stored cookies for ``host``, or None."""
+def load_cookies(db: Database, host: str, *, refresh: bool = False) -> list[dict] | None:
+    """Decrypt and return the stored cookies for ``host``, or None.
+
+    Only the cookie blob is fetched. ``refresh`` skips the process cache;
+    the watcher does that when a feed refuses the cookies it just used, so a
+    session pasted on the dashboard is not reported dead for the whole TTL.
+    """
+    ttl = _cookie_cache_ttl()
+    now = time.monotonic()
+    key = (id(db.engine), host)
+    if not refresh and ttl > 0 and key in _cookie_cache:
+        stored_at, cached = _cookie_cache[key]
+        if now - stored_at < ttl:
+            return cached
     with db.session() as s:
-        row = s.scalar(select(ReplaySession).where(ReplaySession.host == host))
-        if row is None:
-            return None
-        blob = row.encrypted_cookies
-    return _deserialize(blob)
+        blob = s.scalar(
+            select(ReplaySession.encrypted_cookies).where(ReplaySession.host == host))
+    result = None if blob is None else _deserialize(blob)
+    if ttl > 0:
+        _cookie_cache[key] = (now, result)
+    return result
 
 
 def load_cookies_strict(db: Database, host: str) -> list[dict] | None:
     """Like :func:`load_cookies`, but a stored session this process cannot
-    decrypt raises :class:`SessionUnreadable` instead of reading as empty."""
+    decrypt raises :class:`SessionUnreadable` instead of reading as empty.
+
+    Not cached: a scan is how we learn that a pasted session works, so it
+    has to read the row that was just stored.
+    """
     with db.session() as s:
-        row = s.scalar(select(ReplaySession).where(ReplaySession.host == host))
-        if row is None:
+        blob = s.scalar(
+            select(ReplaySession.encrypted_cookies).where(ReplaySession.host == host))
+        if blob is None:
             return None
-        blob = row.encrypted_cookies
     if blob.startswith(_PLAINTEXT_PREFIX):
         return json.loads(blob[len(_PLAINTEXT_PREFIX):])
     key = _key()

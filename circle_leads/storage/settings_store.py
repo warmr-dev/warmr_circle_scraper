@@ -8,7 +8,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 
 from circle_leads.storage.database import Database
 from circle_leads.storage.models import Setting, utcnow
@@ -42,17 +43,42 @@ RETRY_AFTER_INTERRUPT_MINUTES = 10
 
 def get_setting(db: Database, key: str, default: str | None = None) -> str | None:
     with db.session() as s:
-        row = s.get(Setting, key)
-        return row.value if row is not None else default
+        # The value alone. ``s.get`` also downloaded ``updated_at``, and the
+        # heartbeat used to do that for a ~1 KB runtime snapshot it was about
+        # to overwrite.
+        found = s.execute(select(Setting.value).where(Setting.key == key)).first()
+        return default if found is None else found[0]
 
 
 def set_setting(db: Database, key: str, value: str | None) -> None:
+    """Write ``key`` without reading it back first.
+
+    Heartbeats call this every minute per service (and write a ~1 KB runtime
+    snapshot beside each beat). Loading the row before changing it fetched
+    that snapshot over the wire on every beat. An UPDATE returns no rows; only
+    a key seen for the first time costs an INSERT. A concurrent insert of the
+    same new key retries as an update.
+    """
     with db.session() as s:
-        row = s.get(Setting, key)
-        if row is None:
+        result = s.execute(
+            update(Setting)
+            .where(Setting.key == key)
+            .values(value=value, updated_at=utcnow())
+            .execution_options(synchronize_session=False)
+        )
+        if result.rowcount:
+            return
+        try:
             s.add(Setting(key=key, value=value))
-        else:
-            row.value = value
+            s.flush()
+        except IntegrityError:
+            s.rollback()
+            s.execute(
+                update(Setting)
+                .where(Setting.key == key)
+                .values(value=value, updated_at=utcnow())
+                .execution_options(synchronize_session=False)
+            )
 
 
 def get_schedule(db: Database) -> str:
