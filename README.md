@@ -1,4 +1,4 @@
-# Warmr Circle
+ 
 
 Detects **current or future commercial buyer demand** across authorized Circle.so
 communities, including provider requests, recommendations, solution exploration
