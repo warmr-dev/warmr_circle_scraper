@@ -1887,7 +1887,12 @@ def _retry_exports(db, retry):
 
 @cli.command("watch")
 @click.option("--fast-interval", type=int, default=120, show_default=True,
-              help="Seconds between checks of a community that posts.")
+              help="Seconds between checks of a member community that posts.")
+@click.option("--anon-fast-interval", type=int, default=None,
+              help="Seconds between checks of a public community on the fast "
+                   "tier. Default: setting watch_anon_fast_interval, else "
+                   "WATCH_ANON_FAST_INTERVAL, else 300. Members stay on "
+                   "--fast-interval.")
 @click.option("--slow-interval", type=int, default=900, show_default=True,
               help="Seconds between checks of one that has gone quiet.")
 @click.option("--quiet-days", type=int, default=14, show_default=True,
@@ -1900,7 +1905,8 @@ def _retry_exports(db, retry):
 @click.option("--sync/--no-sync", default=True, show_default=True,
               help="Create watch rows for communities that have none yet.")
 @click.pass_context
-def watch_cmd(ctx, fast_interval, slow_interval, quiet_days, per_page, use_llm, once, sync):
+def watch_cmd(ctx, fast_interval, anon_fast_interval, slow_interval, quiet_days,
+              per_page, use_llm, once, sync):
     """Poll community feeds and triage new posts within a couple of minutes.
 
     The harvest walks every space and takes hours, so a post published just
@@ -1915,7 +1921,7 @@ def watch_cmd(ctx, fast_interval, slow_interval, quiet_days, per_page, use_llm, 
     import signal
 
     from circle_leads.watch import ensure_watch_rows, run_watch
-    from circle_leads.watch.poller import WatchTuning
+    from circle_leads.watch.poller import WatchTuning, resolve_anon_fast_interval
 
     db = ctx.obj["db"]
     if use_llm is None:
@@ -1940,8 +1946,15 @@ def watch_cmd(ctx, fast_interval, slow_interval, quiet_days, per_page, use_llm, 
         fast_interval=fast_interval, slow_interval=slow_interval,
         quiet_days=quiet_days, per_page=per_page,
     )
+    if anon_fast_interval is not None:
+        tuning.anon_fast_interval = anon_fast_interval
+        tuning.anon_fast_pinned = True
+    else:
+        tuning.anon_fast_interval = resolve_anon_fast_interval(db)
     click.echo(
-        f"Watching: fast every {fast_interval}s, quiet ones every {slow_interval}s, "
+        f"Watching: members every {fast_interval}s, "
+        f"public fast every {tuning.anon_fast_interval}s, "
+        f"quiet ones every {slow_interval}s, "
         f"LLM {'on' if use_llm else 'off'}."
     )
     run_watch(db, tuning=tuning, use_llm=use_llm, once=once, stop=lambda: stopping["now"])

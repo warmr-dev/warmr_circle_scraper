@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 
 from sqlalchemy import create_engine, make_url, select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session, defer, sessionmaker
 
 from circle_leads.storage.models import (
     Author,
@@ -76,7 +76,13 @@ def _engine_kwargs(url: str) -> dict:
     kwargs: dict = {
         "future": True,
         "pool_pre_ping": True,
-        "pool_recycle": 300,
+        # Recycle well under a day, not every five minutes. Each recycle is a
+        # new Supavisor login (pgbouncer.get_auth). pool_pre_ping already
+        # drops a connection the pooler has closed, so a longer life does not
+        # keep a dead connection in the pool. 30 minutes cuts that churn
+        # without holding a session-mode slot: transaction mode (6543)
+        # releases the server connection at the end of each transaction.
+        "pool_recycle": 1800,
         # Default SQLAlchemy is pool_size=5 + max_overflow=10 = 15 connections,
         # which is exactly the Supabase session-pooler cap (EMAXCONNSESSION).
         "pool_size": 2,
@@ -624,12 +630,16 @@ def upsert_post(session: Session, *, community_id: int, record: dict) -> tuple[P
     text = record.get("content") or ""
     new_hash = content_hash(text)
 
+    # Content and the classification audit are the wide columns (about 1 KB
+    # and 2 KB). A re-read of a post we already stored compares the hash and
+    # usually stops there, so those two stay off the wire until the text
+    # actually changed.
     existing = session.scalar(
         select(Post).where(
             Post.community_id == community_id,
             Post.source_content_id == source_id,
             Post.content_type == ctype,
-        )
+        ).options(defer(Post.content), defer(Post.classification_audit))
     )
     if existing is None:
         preview, how = _stored_copy_of(
@@ -716,7 +726,7 @@ def upsert_post(session: Session, *, community_id: int, record: dict) -> tuple[P
                 Post.community_id == community_id,
                 Post.source_content_id == source_id,
                 Post.content_type == ctype,
-            )
+            ).options(defer(Post.content), defer(Post.classification_audit))
         )
         if existing is not None:
             return existing, "unchanged"

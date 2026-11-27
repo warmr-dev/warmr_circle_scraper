@@ -1173,3 +1173,120 @@ def test_a_pasted_session_is_not_shadowed_by_a_dead_copy_in_the_watchers_jar(db,
     assert [k for k, _ in circle.sent[0]].count("_circle_session") == 1
     assert first["_circle_session"] == "live"
     assert first["__cf_bm"] == "cf"           # the jar's other cookies still go out
+
+
+def _sql(db, fn) -> list[str]:
+    from sqlalchemy import event
+
+    statements: list[str] = []
+
+    def _record(conn, cursor, statement, *args):
+        statements.append(" ".join(statement.split()).lower())
+
+    event.listen(db.engine, "before_cursor_execute", _record)
+    try:
+        fn()
+    finally:
+        event.remove(db.engine, "before_cursor_execute", _record)
+    return statements
+
+
+def test_a_quiet_check_does_not_read_the_watermark_back(db, community, monkeypatch):
+    """The wide column on watch_state is recent_ids. A 304 already has it
+    from the batch that scheduled the check, so finishing must not fetch it."""
+    ensure_watch_rows(db)
+    monkeypatch.setattr("circle_leads.triage.pipeline.triage_records", triage_spy([]))
+    state = state_for(db, community)
+    statements = _sql(db, lambda: check_community(
+        db, state, Requirements(),
+        session=FakeSession([FakeResponse(304)]),
+        tuning=WatchTuning(jitter=0.0),
+    ))
+    selected = [q for q in statements if q.startswith("select") and "watch_state" in q]
+    assert selected, statements
+    assert all("recent_ids" not in q and "last_detail" not in q for q in selected), selected
+    assert not any(q.startswith("select") and " from communities" in q for q in statements)
+
+
+def test_due_states_leaves_the_unread_columns_behind(db, community):
+    ensure_watch_rows(db)
+    from circle_leads.watch.poller import due_states
+
+    with db.session() as s:
+        from sqlalchemy import select
+        row = s.scalar(select(WatchState).where(WatchState.community_id == community))
+        row.next_check_at = datetime(2020, 1, 1)
+    statements = _sql(db, lambda: due_states(db))
+    selected = [q for q in statements if "from watch_state" in q and q.startswith("select")]
+    assert selected
+    assert all("last_detail" not in q and "posts_seen" not in q for q in selected)
+    assert any("recent_ids" in q for q in selected)
+
+
+def test_a_public_fast_community_waits_five_minutes_and_a_member_two(db, community, monkeypatch):
+    ensure_watch_rows(db)
+    monkeypatch.setattr("circle_leads.triage.pipeline.triage_records", triage_spy([]))
+    tuning = WatchTuning(
+        fast_interval=120, anon_fast_interval=300, slow_interval=900, jitter=0.0,
+    )
+    check_community(db, state_for(db, community), Requirements(),
+                    session=FakeSession([feed([make_record(30)])]), tuning=tuning)
+    check_community(db, state_for(db, community), Requirements(),
+                    session=FakeSession([feed([make_record(31), make_record(30)])]),
+                    tuning=tuning)
+    row = read_row(db, community)
+    assert row.tier == "fast" and row.mode == WatchMode.ANON.value
+    assert row.next_check_at - row.last_checked_at == timedelta(seconds=300)
+
+    from circle_leads.storage.models import JoinStatus
+    with db.session() as s:
+        from sqlalchemy import select
+        s.get(Community, community).join_status = JoinStatus.JOINED.value
+        watched = s.scalar(select(WatchState).where(WatchState.community_id == community))
+        watched.tier = "fast"
+        watched.mode = WatchMode.ANON.value
+    check_community(db, state_for(db, community), Requirements(),
+                    session=FakeSession([FakeResponse(304)]), tuning=tuning)
+    row = read_row(db, community)
+    assert row.mode == WatchMode.ANON.value
+    assert row.next_check_at - row.last_checked_at == timedelta(seconds=120)
+
+    from circle_leads.web.replay_store import connect_host
+    connect_host(db, HOST, [{"name": "_circle_session", "value": "x"}])
+    check_community(db, state_for(db, community), Requirements(),
+                    session=FakeSession([FakeResponse(304)]), tuning=tuning)
+    row = read_row(db, community)
+    assert row.mode == WatchMode.COOKIE.value
+    assert row.next_check_at - row.last_checked_at == timedelta(seconds=120)
+
+
+def test_an_error_still_backs_off_from_the_same_formula(db, community, monkeypatch):
+    """Rate-limit backoff did not move when public feeds slowed down.
+
+    The first refusal is ``300 * 2^consecutive`` (consecutive is already 1),
+    which is the formula the member interval always used. It is not the
+    public five-minute interval and not ``fast_interval``.
+    """
+    ensure_watch_rows(db)
+    monkeypatch.setattr("circle_leads.triage.pipeline.triage_records", triage_spy([]))
+    tuning = WatchTuning(
+        fast_interval=120, anon_fast_interval=300, jitter=0.0,
+    )
+    check_community(db, state_for(db, community), Requirements(),
+                    session=FakeSession([FakeResponse(429)]), tuning=tuning)
+    row = read_row(db, community)
+    assert row.next_check_at - row.last_checked_at == timedelta(seconds=600)
+
+
+def test_the_public_interval_follows_the_setting_then_the_env(db, monkeypatch):
+    from circle_leads.storage.settings_store import set_setting
+    from circle_leads.watch.poller import resolve_anon_fast_interval
+
+    monkeypatch.delenv("WATCH_ANON_FAST_INTERVAL", raising=False)
+    assert resolve_anon_fast_interval(db) == 300
+    monkeypatch.setenv("WATCH_ANON_FAST_INTERVAL", "450")
+    assert resolve_anon_fast_interval(db) == 450
+    set_setting(db, "watch_anon_fast_interval", "600")
+    assert resolve_anon_fast_interval(db) == 600
+    set_setting(db, "watch_anon_fast_interval", "5")  # too small to trust
+    assert resolve_anon_fast_interval(db) == 450

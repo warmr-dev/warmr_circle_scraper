@@ -139,6 +139,33 @@ def test_a_new_session_takes_the_account_the_community_was_joined_with(monkeypat
     assert _label(db, "y.circle.so") is None
 
 
+def test_load_cookies_reuses_the_blob_until_it_is_stored_again(monkeypatch):
+    monkeypatch.delenv("CIRCLE_CRED_KEY", raising=False)
+    from sqlalchemy import event
+
+    from circle_leads.web.replay_store import forget_cached_cookies, load_cookies, store_session
+
+    db = _db()
+    forget_cached_cookies()
+    store_session(db, "x.circle.so", [{"name": "_circle_session", "value": "a"}])
+    assert load_cookies(db, "x.circle.so") == [{"name": "_circle_session", "value": "a"}]
+
+    statements: list[str] = []
+
+    def _record(conn, cursor, statement, *args):
+        statements.append(statement.lower())
+
+    event.listen(db.engine, "before_cursor_execute", _record)
+    try:
+        assert load_cookies(db, "x.circle.so")[0]["value"] == "a"
+    finally:
+        event.remove(db.engine, "before_cursor_execute", _record)
+    assert not any("replay_sessions" in q for q in statements)
+
+    store_session(db, "x.circle.so", [{"name": "_circle_session", "value": "b"}])
+    assert load_cookies(db, "x.circle.so")[0]["value"] == "b"
+
+
 # The /api/replay/* routes that used to be tested here (built by the now-
 # deleted circle_leads/web/remote_browser_api.py) were removed outright: the
 # "Session replay experiment (Version B)" panel was explicitly labeled an

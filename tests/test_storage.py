@@ -197,6 +197,8 @@ def test_supabase_session_pooler_rewrites_to_transaction_port(monkeypatch):
     assert captured["kwargs"]["pool_size"] == 2
     assert captured["kwargs"]["max_overflow"] == 1
     assert captured["kwargs"]["connect_args"]["prepare_threshold"] is None
+    assert captured["kwargs"]["pool_recycle"] == 1800
+    assert captured["kwargs"]["pool_pre_ping"] is True
 
 
 def test_empty_port_url_builds_engine(monkeypatch):

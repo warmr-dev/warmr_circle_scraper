@@ -379,3 +379,35 @@ def test_the_join_type_check_has_its_own_schedule(db):
 
     set_join_type_schedule(db, "off")
     assert not is_join_type_check_due(db, now=now + timedelta(days=7))
+
+
+def test_set_setting_writes_without_reading_the_row_back(db):
+    """A heartbeat write must not download the value it is about to replace:
+    on Supabase every SELECT of the ~1 KB runtime snapshot counts as egress."""
+    from sqlalchemy import event
+
+    from circle_leads.storage.settings_store import get_setting, set_setting
+
+    set_setting(db, "watcher_runtime", "x" * 900)
+    statements: list[str] = []
+
+    def _record(conn, cursor, statement, *args):
+        statements.append(statement.lstrip().upper())
+
+    event.listen(db.engine, "before_cursor_execute", _record)
+    try:
+        set_setting(db, "watcher_runtime", "fresh")
+    finally:
+        event.remove(db.engine, "before_cursor_execute", _record)
+
+    assert not [q for q in statements if q.startswith("SELECT") and "SETTINGS" in q]
+    assert get_setting(db, "watcher_runtime") == "fresh"
+
+
+def test_set_setting_creates_a_missing_key(db):
+    from circle_leads.storage.settings_store import get_setting, set_setting
+
+    set_setting(db, "brand_new_key", "1")
+    assert get_setting(db, "brand_new_key") == "1"
+    set_setting(db, "brand_new_key", None)
+    assert get_setting(db, "brand_new_key", "default") is None  # stored NULL, as before

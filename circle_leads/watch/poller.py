@@ -28,6 +28,7 @@ What this deliberately does not do:
 from __future__ import annotations
 
 import logging
+import os
 import random
 import re
 import time
@@ -35,7 +36,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
 import requests
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, or_, select, update
+from sqlalchemy.orm import load_only
 
 from circle_leads.reach import has_session as session_stored, readable, real_host, reading_enabled
 from circle_leads.storage.database import Database
@@ -114,6 +116,14 @@ class WatchTuning:
     """How often each tier is polled, in seconds."""
 
     fast_interval: int = 120
+    # Public communities on the fast tier. A member (joined, or a stored
+    # session) stays on fast_interval. Five minutes instead of two drops that
+    # public tier's checks by more than half; a new public post is still
+    # noticed within a few minutes. Override with the setting
+    # ``watch_anon_fast_interval``, the env ``WATCH_ANON_FAST_INTERVAL``, or
+    # ``--anon-fast-interval`` (which pins this value for the process).
+    anon_fast_interval: int = 300
+    anon_fast_pinned: bool = field(default=False, repr=False)
     slow_interval: int = 900
     off_interval: int = 86_400
     # A community drops to the slow tier after this long without a post, and
@@ -129,6 +139,29 @@ class WatchTuning:
 
 def _now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def resolve_anon_fast_interval(db: Database) -> int:
+    """Seconds for a public fast-tier community.
+
+    The database setting wins, then ``WATCH_ANON_FAST_INTERVAL``, then 300.
+    Anything under 30 seconds is ignored: a typo must not poll every second.
+    """
+    from circle_leads.storage.settings_store import get_setting
+
+    for raw in (
+        get_setting(db, "watch_anon_fast_interval"),
+        os.environ.get("WATCH_ANON_FAST_INTERVAL"),
+    ):
+        if raw is None or str(raw).strip() == "":
+            continue
+        try:
+            seconds = int(str(raw).strip())
+        except ValueError:
+            continue
+        if seconds >= 30:
+            return seconds
+    return 300
 
 
 def _classify(resp: requests.Response) -> str:
@@ -236,7 +269,14 @@ def ensure_watch_rows(db: Database, *, quiet_days: int = 14) -> int:
         # for weeks after the bot had joined. One that already has a session
         # is read with it, even when the row was left on anon: the anonymous
         # home feed can answer from a single public space.
-        for row in s.scalars(select(WatchState).where(WatchState.community_id.in_(members))):
+        for row in s.scalars(
+            select(WatchState)
+            .options(load_only(
+                WatchState.id, WatchState.host, WatchState.mode,
+                WatchState.tier, WatchState.next_check_at,
+            ))
+            .where(WatchState.community_id.in_(members))
+        ):
             if row.host in paused_hosts:
                 row.mode = WatchMode.OFF.value
                 continue
@@ -245,7 +285,14 @@ def ensure_watch_rows(db: Database, *, quiet_days: int = 14) -> int:
                 row.mode = WatchMode.COOKIE.value
                 row.next_check_at = _now()
         # Nothing is read with a session it does not have.
-        for row in s.scalars(select(WatchState).where(WatchState.mode == WatchMode.COOKIE.value)):
+        for row in s.scalars(
+            select(WatchState)
+            .options(load_only(
+                WatchState.id, WatchState.host, WatchState.mode,
+                WatchState.tier, WatchState.next_check_at,
+            ))
+            .where(WatchState.mode == WatchMode.COOKIE.value)
+        ):
             if row.host not in has_session:
                 row.mode = WatchMode.ANON.value
     return created
@@ -261,11 +308,17 @@ def _member_ids(s) -> set[int]:
     ).all())
 
 
-def _is_member(s, row: WatchState) -> bool:
-    community = s.get(Community, row.community_id)
-    if community is not None and community.join_status == JoinStatus.JOINED.value:
+def _is_member(s, community_id: int, host: str) -> bool:
+    """Joined, or a member session is stored.
+
+    One column each. The communities row is ~40 columns and this used to load
+    all of them after nearly every quiet check.
+    """
+    join_status = s.scalar(
+        select(Community.join_status).where(Community.id == community_id))
+    if join_status == JoinStatus.JOINED.value:
         return True
-    return s.scalar(select(ReplaySession.id).where(ReplaySession.host == row.host)) is not None
+    return s.scalar(select(ReplaySession.id).where(ReplaySession.host == host)) is not None
 
 
 def watch_member_now(db: Database, host: str) -> int | None:
@@ -320,6 +373,17 @@ def due_states(db: Database, limit: int = 500) -> list[dict]:
     with db.session() as s:
         rows = s.scalars(
             select(WatchState)
+            .options(load_only(
+                WatchState.id,
+                WatchState.community_id,
+                WatchState.host,
+                WatchState.mode,
+                WatchState.tier,
+                WatchState.last_post_id,
+                WatchState.recent_ids,
+                WatchState.etag,
+                WatchState.consecutive_errors,
+            ))
             .where(WatchState.next_check_at <= _now())
             .where(reading_enabled(WatchState.host))
             .order_by(WatchState.next_check_at.asc())
@@ -341,10 +405,18 @@ def due_states(db: Database, limit: int = 500) -> list[dict]:
         ]
 
 
-def _next_delay(state: dict, status: str, tuning: WatchTuning) -> int:
-    """Seconds until this community is checked again."""
+def _next_delay(state: dict, status: str, tuning: WatchTuning, *, member: bool = True) -> int:
+    """Seconds until this community is checked again.
+
+    ``member`` is false for a public fast-tier community: those wait
+    ``anon_fast_interval`` instead of ``fast_interval``. Every other status
+    keeps the intervals it had, including error backoff.
+    """
     if status in ("ok", "not_modified"):
-        base = tuning.fast_interval if state["tier"] == "fast" else tuning.slow_interval
+        if state["tier"] == "fast":
+            base = tuning.fast_interval if member else tuning.anon_fast_interval
+        else:
+            base = tuning.slow_interval
     elif status in ("ratelimited", "challenge"):
         # The governor already paused this egress; do not also hammer the one
         # host that pushed back.
@@ -377,6 +449,18 @@ def _already_seen(rid, seen: set, watermark) -> bool:
     return isinstance(rid, int) and isinstance(watermark, int) and rid <= watermark
 
 
+def _cookie_map(db: Database, host: str, *, refresh: bool = False) -> dict:
+    from circle_leads.web import replay_store
+
+    # Callers in tests still replace load_cookies with a two-argument function.
+    fn = replay_store.load_cookies
+    try:
+        loaded = fn(db, host, refresh=True) if refresh else fn(db, host)
+    except TypeError:
+        loaded = fn(db, host)
+    return {c["name"]: c["value"] for c in (loaded or [])}
+
+
 def check_community(
     db: Database,
     state: dict,
@@ -388,14 +472,13 @@ def check_community(
 ) -> WatchOutcome:
     """One feed check. Reads, triages anything new, then updates the row."""
     from circle_leads.scraper.angelsquad import is_angelsquad_host
-    from circle_leads.web.replay_store import load_cookies
 
     host = state["host"]
     if is_angelsquad_host(host):
         return _check_angelsquad(db, state, requirements, tuning=tuning, use_llm=use_llm)
     cookies = None
     if state["mode"] == WatchMode.COOKIE.value:
-        cookies = {c["name"]: c["value"] for c in (load_cookies(db, host) or [])}
+        cookies = _cookie_map(db, host) or _cookie_map(db, host, refresh=True)
         if not cookies:
             return _finish(db, state, WatchOutcome(host, "unauthorized",
                                                    detail="no stored session"), tuning)
@@ -430,6 +513,11 @@ def check_community(
         if status == "not_modified":
             return _finish(db, state, WatchOutcome(host, status), tuning)
         if status == "unauthorized" and cookies:
+            # The process cache can be a session that was just replaced. Do not
+            # report that one dead; the next check reads the row we just loaded.
+            if _cookie_map(db, host, refresh=True) != cookies:
+                return _finish(db, state, WatchOutcome(
+                    host, "error", detail="stored session changed; will retry"), tuning)
             return _check_member_spaces(db, state, requirements, session=session,
                                         tuning=tuning, cookies=cookies, use_llm=use_llm)
         if status != "ok":
@@ -485,15 +573,17 @@ def _check_angelsquad(db: Database, state: dict, requirements, *,
     """One pass of the Angel Squad member feed. Ids are strings, so only
     ``recent_ids`` remembers them."""
     from circle_leads.scraper.angelsquad import fetch_records
-    from circle_leads.web.replay_store import load_cookies
 
     host = state["host"]
-    cookies = {c["name"]: c["value"] for c in (load_cookies(db, host) or [])}
+    cookies = _cookie_map(db, host) or _cookie_map(db, host, refresh=True)
     if not cookies:
         return _finish(db, state, WatchOutcome(host, "unauthorized",
                                                detail="no stored session"), tuning)
     status, detail, records = fetch_records(cookies)
     if status == "rejected":
+        if _cookie_map(db, host, refresh=True) != cookies:
+            return _finish(db, state, WatchOutcome(
+                host, "error", detail="stored session changed; will retry"), tuning)
         return _finish(db, state, WatchOutcome(host, "unauthorized", detail=detail), tuning)
     if status != "valid":
         return _finish(db, state, WatchOutcome(host, "error", detail=detail), tuning)
@@ -819,16 +909,40 @@ def _community_slug(db: Database, community_id: int) -> str:
 def _finish(db: Database, state: dict, outcome: WatchOutcome, tuning: WatchTuning,
             *, seen_ids: list | None = None, etag: str | None = None,
             seeded: bool = False) -> WatchOutcome:
-    """Write the result back. The watermark moves only on a successful read."""
+    """Write the result back. The watermark moves only on a successful read.
+
+    Mode, tier and the counters are re-read, so a join or a tier change made
+    after this batch was loaded is what gets scheduled. ``recent_ids`` is the
+    wide column on the row and is selected only when this check has ids to
+    append. A quiet 304 does not download it, and nothing is loaded with
+    ``session.get`` (that pulled every column, aliases and all, on every check).
+    """
     now = _now()
+    columns = [
+        WatchState.mode,
+        WatchState.last_status,
+        WatchState.consecutive_errors,
+        WatchState.tier,
+        WatchState.last_new_at,
+        WatchState.created_at,
+        WatchState.host,
+        WatchState.community_id,
+        WatchState.last_post_id,
+        WatchState.posts_seen,
+        WatchState.leads_found,
+    ]
+    if seen_ids:
+        columns.append(WatchState.recent_ids)
+
     cookie_died = False
     died_host = ""
     died_community: int | None = None
     with db.session() as s:
-        row = s.get(WatchState, state["id"])
+        row = s.execute(
+            select(*columns).where(WatchState.id == state["id"])
+        ).one_or_none()
         if row is None:
             return outcome
-        row.last_checked_at = now
         cookie_died = (
             outcome.status == "unauthorized"
             and row.mode == WatchMode.COOKIE.value
@@ -836,56 +950,91 @@ def _finish(db: Database, state: dict, outcome: WatchOutcome, tuning: WatchTunin
         )
         died_host = row.host
         died_community = row.community_id
-        row.last_status = outcome.status
-        row.last_detail = outcome.detail or None
 
         if outcome.status in ("ok", "not_modified"):
-            row.consecutive_errors = 0
+            consecutive = 0
         else:
-            row.consecutive_errors = (row.consecutive_errors or 0) + 1
+            consecutive = (row.consecutive_errors or 0) + 1
 
+        values: dict = {
+            "last_checked_at": now,
+            "last_status": outcome.status,
+            "last_detail": outcome.detail or None,
+            "consecutive_errors": consecutive,
+            "updated_at": now,
+        }
         if etag is not None:
-            row.etag = etag
+            values["etag"] = etag
+
+        tier = row.tier
+        membership: bool | None = None
+
+        def is_member() -> bool:
+            nonlocal membership
+            if membership is None:
+                membership = _is_member(s, row.community_id, row.host)
+            return membership
 
         if seen_ids:
             ids = [i for i in seen_ids if i is not None]
             keep = list(row.recent_ids or []) + ids
-            row.recent_ids = keep[-RECENT_IDS_KEPT:]
+            values["recent_ids"] = keep[-RECENT_IDS_KEPT:]
             numeric = [i for i in ids if isinstance(i, int)]
             if numeric:
-                row.last_post_id = max([row.last_post_id or 0] + numeric)
+                values["last_post_id"] = max([row.last_post_id or 0] + numeric)
             if not seeded:
-                row.posts_seen = (row.posts_seen or 0) + outcome.new_posts
-                row.leads_found = (row.leads_found or 0) + outcome.leads
-                row.last_new_at = now
-                row.tier = "fast"
+                values["posts_seen"] = (row.posts_seen or 0) + outcome.new_posts
+                values["leads_found"] = (row.leads_found or 0) + outcome.leads
+                values["last_new_at"] = now
+                tier = "fast"
         elif outcome.status in ("ok", "not_modified"):
             quiet_since = row.last_new_at or row.created_at or now
-            if now - quiet_since > timedelta(days=tuning.quiet_days) and not _is_member(s, row):
-                row.tier = "slow"
+            if now - quiet_since > timedelta(days=tuning.quiet_days) and not is_member():
+                tier = "slow"
+        values["tier"] = tier
 
         # A feed that refuses us anonymously may still answer with the session
         # we already hold; one that refuses both is not worth a fast cycle.
-        if outcome.status == "unauthorized" and row.mode == WatchMode.ANON.value:
+        mode = row.mode
+        if outcome.status == "unauthorized" and mode == WatchMode.ANON.value:
             has_session = s.scalar(
                 select(ReplaySession.id).where(ReplaySession.host == row.host)
             )
-            row.mode = WatchMode.COOKIE.value if has_session else WatchMode.OFF.value
+            mode = WatchMode.COOKIE.value if has_session else WatchMode.OFF.value
         elif outcome.status == "notfound":
-            row.mode = WatchMode.OFF.value
-        elif outcome.status in PERMANENT_FAILURES and row.consecutive_errors >= PARK_AFTER:
-            row.mode = WatchMode.OFF.value
-        elif outcome.status in ("ok", "not_modified") and row.mode == WatchMode.OFF.value:
+            mode = WatchMode.OFF.value
+        elif outcome.status in PERMANENT_FAILURES and consecutive >= PARK_AFTER:
+            mode = WatchMode.OFF.value
+        elif outcome.status in ("ok", "not_modified") and mode == WatchMode.OFF.value:
             # Switched off because it refused us, and now the feed answers
             # without a login: the community opened up. Left off, it stayed on
             # the once-a-day check for good while its posts were readable.
-            row.mode = WatchMode.ANON.value
+            mode = WatchMode.ANON.value
+        values["mode"] = mode
 
-        delay = tuning.off_interval if row.mode == WatchMode.OFF.value else _next_delay(
-            {**state, "consecutive_errors": row.consecutive_errors, "tier": row.tier},
-            outcome.status, tuning,
+        # Cookie mode is a stored session, which counts as membership. A
+        # public fast community asks join_status so a joined community with
+        # no session still stays on the two-minute interval.
+        member = mode == WatchMode.COOKIE.value
+        if (
+            not member
+            and mode != WatchMode.OFF.value
+            and tier == "fast"
+            and outcome.status in ("ok", "not_modified")
+        ):
+            member = is_member()
+
+        delay = tuning.off_interval if mode == WatchMode.OFF.value else _next_delay(
+            {"consecutive_errors": consecutive, "tier": tier},
+            outcome.status, tuning, member=member,
         )
-        row.next_check_at = now + timedelta(seconds=delay)
+        values["next_check_at"] = now + timedelta(seconds=delay)
+        s.execute(
+            update(WatchState)
+            .where(WatchState.id == state["id"])
+            .values(**values)
+            .execution_options(synchronize_session=False)
+        )
     if cookie_died:
         from circle_leads.notify.cookies import report_cookie_death
         report_cookie_death(db, died_host, community_id=died_community)
@@ -943,6 +1092,8 @@ def run_watch(
     from circle_leads.storage.settings_store import load_effective_requirements
 
     tuning = tuning or WatchTuning()
+    if not tuning.anon_fast_pinned:
+        tuning.anon_fast_interval = resolve_anon_fast_interval(db)
     session = governed_session()
     session.headers.setdefault(
         "User-Agent",
@@ -976,7 +1127,10 @@ def _run_watch_loop(db: Database, session, requirements, reloaded_at, tuning,
     # Sync on the first pass, then on a timer. Without this the watch list is
     # whatever the last `watch --sync` built: the service does not pass that
     # flag, so discovery and the ICP pass fed a list the poller never re-read.
-    synced_at = 0.0
+    # Not 0: time.monotonic() starts at boot, and a machine (or this test
+    # runner) that has been up for less than RESYNC_EVERY_S would skip the
+    # first sync entirely. The first pass is supposed to build the list.
+    synced_at = time.monotonic() - RESYNC_EVERY_S - 1
     while True:
         if stop is not None and stop():
             return
@@ -984,6 +1138,8 @@ def _run_watch_loop(db: Database, session, requirements, reloaded_at, tuning,
         # without a restart, but re-reading it every cycle is a query per cycle.
         if time.monotonic() - reloaded_at > 300:
             requirements = load_effective_requirements(db)
+            if not tuning.anon_fast_pinned:
+                tuning.anon_fast_interval = resolve_anon_fast_interval(db)
             reloaded_at = time.monotonic()
 
         if time.monotonic() - synced_at > RESYNC_EVERY_S:
