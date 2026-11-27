@@ -240,23 +240,57 @@ def _handoff_counts(entries: "list[dict] | None" = None) -> dict[str, int]:
 # retry by --host skips the wait.
 HANDOFF_COOLDOWN = HANDOFF_REST  # reach.py: the dashboard uses the same week
 
+# The browser died while a page was open (``_BatchStop`` with pages > 0). Often
+# transient -- the browser service restarts itself -- so it rests hours, not a
+# week. It used to leave no trace in the attempt log at all, so the same host
+# stayed at the head of the queue: haven-online-safety took every 15-minute run
+# from 2026-11-24 to 2026-11-27 (282 visits) while other communities waited.
+BRIDGE_ERROR_STATUS = "bridge_error"
+BRIDGE_ERROR_COOLDOWN = timedelta(hours=6)
+# This many browser deaths on one host inside BRIDGE_ERROR_WINDOW: the host
+# itself kills the browser. Park it for a person (needs_human) instead.
+BRIDGE_ERROR_PARK_AFTER = 3
+BRIDGE_ERROR_WINDOW = timedelta(days=3)
+
+
+def _entry_at(entry: dict) -> datetime | None:
+    try:
+        at = datetime.fromisoformat(str(entry.get("at")))
+    except ValueError:
+        return None
+    return at.replace(tzinfo=timezone.utc) if at.tzinfo is None else at
+
 
 def _cooling_down(entries: "list[dict]", now: datetime) -> set[str]:
-    """Slugs whose latest handoff is younger than HANDOFF_COOLDOWN."""
-    cutoff = now - HANDOFF_COOLDOWN
+    """Slugs whose latest handoff is younger than HANDOFF_COOLDOWN (a browser
+    death: BRIDGE_ERROR_COOLDOWN)."""
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
     recent: set[str] = set()
     for entry in entries:
         if entry.get("status") in _TERMINAL_STATUS_MAP or not entry.get("slug"):
             continue
-        try:
-            at = datetime.fromisoformat(str(entry.get("at")))
-        except ValueError:
+        at = _entry_at(entry)
+        if at is None:
             continue
-        if at.tzinfo is None:
-            at = at.replace(tzinfo=timezone.utc)
-        if at >= cutoff:
+        rest = (BRIDGE_ERROR_COOLDOWN if entry.get("status") == BRIDGE_ERROR_STATUS
+                else HANDOFF_COOLDOWN)
+        if at >= now - rest:
             recent.add(entry["slug"])
     return recent
+
+
+def _recent_bridge_errors(slug: str, now: datetime,
+                          entries: "list[dict] | None" = None) -> int:
+    """Browser deaths on ``slug`` within BRIDGE_ERROR_WINDOW, from the attempt log."""
+    if entries is None:
+        entries = _iter_attempt_log()
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    cutoff = now - BRIDGE_ERROR_WINDOW
+    return sum(1 for e in entries
+               if e.get("slug") == slug and e.get("status") == BRIDGE_ERROR_STATUS
+               and (_entry_at(e) or cutoff) > cutoff)
 
 
 # ego-browser outcome -> Community.join_status: only these are ever persisted.
@@ -718,10 +752,24 @@ def _run_batch(db: Database, candidates: list[dict], acct, pacing: JoinPacingCon
         try:
             outcome, pages = visitor.visit(candidate)
         except _BatchStop as exc:
-            if exc.pages:
-                result.attempted.append(candidate["slug"])
             logger.error("%s on %s: %s", visitor.label, candidate["slug"], exc)
-            _record_visit(db, candidate, "bridge_error", str(exc), acct.key, level="error")
+            _record_visit(db, candidate, BRIDGE_ERROR_STATUS, str(exc), acct.key, level="error")
+            if exc.pages:
+                # The page was opened: it is a visit (daily cap) and an attempt
+                # on this host (queue order + cooldown), and the row says so --
+                # otherwise the next run picks the very same host again.
+                result.attempted.append(candidate["slug"])
+                already_today += exc.pages
+                _log_attempt(candidate, BRIDGE_ERROR_STATUS, str(exc), acct.key)
+                if _recent_bridge_errors(candidate["slug"], utcnow()) >= BRIDGE_ERROR_PARK_AFTER:
+                    _persist_terminal_outcome(
+                        db, candidate["id"], JoinStatus.NEEDS_HUMAN.value,
+                        f"The browser died on this community {BRIDGE_ERROR_PARK_AFTER} times "
+                        f"in {BRIDGE_ERROR_WINDOW.days} days ({exc}). Parked for a person: "
+                        "open it by hand, then set join_status back to not_attempted.",
+                    )
+                else:
+                    _record_handoff(db, candidate["id"], BRIDGE_ERROR_STATUS, str(exc))
             result.stopped_for = candidate["slug"]
             result.stop_reason = f"{visitor.label}: {exc}"
             break

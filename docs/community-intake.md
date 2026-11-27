@@ -24,8 +24,35 @@ by `item_index`, never by response order.
 
 Invalid JSON, missing results, duplicate or invalid indices, unknown statuses,
 missing candidate IDs, name mismatches, inconsistent counts, and non-2xx HTTP
-responses fail the batch closed. Earlier confirmed batches remain cached.
-Harvest export Activity records the actual confirmed count and any errors.
+responses confirm nothing from that POST. Earlier confirmed batches remain
+cached. When the portal refuses a multi-item body (HTTP 4xx, or a receipt that
+does not validate), the same communities are sent again one at a time, so one
+bad item does not zero the chunk. A 5xx or a connection error stays one batch
+failure and is not multiplied. Harvest export Activity records the actual
+confirmed count and any errors.
+
+## Slug sent to the portal
+
+The portal accepts a slug of lowercase letters, digits, and hyphens. It rejects
+a host (`slug must use lowercase letters, digits, and hyphens`). Custom-domain
+rows in this database keep the raw host as `communities.slug` (that value is
+the row's key). The intake payload does not send that key. It sends
+`community_slug_for_host` of the host:
+
+| host | slug sent |
+|---|---|
+| `community.everythingmarketplaces.com` | `everythingmarketplaces` |
+| `community.exitfive.com` | `exitfive` |
+| `community.steepinsights.com` | `steepinsights` |
+| `www.firefly-innovations.org` | `firefly-innovations` |
+| `www.startup-ready.com` | `startup-ready` |
+| `www.hailerz.com` | `hailerz` |
+| `<slug>.circle.so` | `<slug>` |
+
+A label that is still illegal after that (an underscore, for example) is left
+out of the POST and reported as an error. It is not cached as delivered, and
+it does not ride in a chunk with communities the portal would accept. The
+database slug is not rewritten.
 
 `settings.community_intake_state` remains the existing map of source key to
 payload fingerprint. An unchanged fingerprint is skipped. A changed or explicitly
@@ -36,15 +63,27 @@ No new migration, endpoint, background retry loop, or receiver change is needed.
 ## Historical cache and rollout boundary
 
 Legacy fingerprints may have been written without per-item confirmation. This
-fix does not clear, migrate, or replay them automatically. It prevents newly
-attempted rejected/unverified payloads from being recorded as delivered; it does
-not attest the historical cache or restore absent Warmr records.
+sender does not clear, migrate, or replay the cache by itself, and this change
+does not write to the production database.
 
-Do not use a global `--force` or clear the cache to validate a deployment. Prepare
-an exact source-key/URL manifest, verify current target candidates, and obtain
-separate approval for any bounded reconciliation. Existing invalid-slug records
-such as `www.hailerz.com` remain visible errors if explicitly attempted; this
-change does not alter their identities or import additional communities.
+A fingerprint is the hash of the payload, including `slug`. Communities that
+were cached with the raw host as `slug` (including `www.hailerz.com`) no longer
+match. The next ordinary intake, harvest or `push-communities` without
+`--force`, sends them again with the registrable label. That is the resend.
+Do not clear `settings.community_intake_state` and do not pass `--force` to
+validate a deploy: a global force would resend every monitored community, not
+only the ones whose slug changed.
+
+The cache key stays `community:<stored slug>` or `connection:<host>`. The
+portal may already hold a rejected candidate under the dotted slug. The resend
+registers the hyphenated slug as its own candidate. It does not rename or
+delete the old portal row. Prepare an exact source-key/URL manifest and obtain
+separate approval before any cleanup of those old portal rows.
+
+A changed or rejected attempt still drops that key's old fingerprint, so a
+previously cached dotted slug is not left looking delivered after a failed
+resend. Communities that leave the monitored set are still forgotten from the
+cache only. No new migration, endpoint, or background retry loop is added.
 
 Deploy through the existing Circle release procedure only after the normal
 release decision. Observe the next naturally due export using the per-item
@@ -60,5 +99,7 @@ git diff --check
 
 Tests use isolated SQLite databases and mocked HTTP responses. They exercise
 full success, existing candidates, mixed/all rejection, malformed receipts,
-retry selection, forced rejection, cross-batch failure, and harvest Activity.
-They make no production requests or model calls.
+retry selection, forced rejection, cross-batch failure, harvest Activity,
+registrable-label slugs (including a cached dotted slug resent as `hailerz`),
+an illegal slug held out of the POST, and a rejected batch retried one
+community at a time. They make no production requests or model calls.

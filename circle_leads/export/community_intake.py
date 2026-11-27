@@ -146,6 +146,41 @@ def _norm_host(url_or_host: str) -> str:
     return h.split("/")[0]
 
 
+# The portal rejects a slug that is not lowercase letters, digits and hyphens
+# ("slug must use lowercase letters, digits, and hyphens") and, on that
+# rejection, confirms none of the chunk. Custom-domain rows store the raw host
+# as slug, so one dotted slug used to zero the whole batch.
+_PORTAL_SLUG = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+
+
+def intake_slug(host: str | None = None, url: str = "", stored_slug: str = "") -> str:
+    """Slug the portal accepts, taken from the community's host.
+
+    ``community_slug_for_host`` is the registrable label:
+    ``community.everythingmarketplaces.com`` -> ``everythingmarketplaces``,
+    ``www.firefly-innovations.org`` -> ``firefly-innovations``. A
+    ``*.circle.so`` host stays the subdomain. The stored slug is only a
+    fallback for a row with no host and no URL.
+    """
+    source = (host or "").strip().lower() or _norm_host(url) or (stored_slug or "").strip().lower()
+    return community_slug_for_host(source)
+
+
+def _portal_slug_ok(slug: str) -> bool:
+    return _PORTAL_SLUG.fullmatch(slug) is not None
+
+
+def _item_level_rejection(exc: BaseException) -> bool:
+    """True when the portal refused the body, rather than the transport failing.
+
+    A 4xx or an unverifiable receipt confirms nothing in that POST. Sending the
+    same items one at a time keeps one bad payload from dropping the others. A
+    5xx or a connection error is left as one batch failure.
+    """
+    text = str(exc)
+    return "HTTP 4" in text or text.startswith("Invalid community intake receipt")
+
+
 def collect_monitored_communities(session: Session) -> list[MonitoredCommunity]:
     """The communities we actively monitor, as portal-intake payloads.
 
@@ -177,7 +212,7 @@ def collect_monitored_communities(session: Session) -> list[MonitoredCommunity]:
         entry_cost = parse_entry_cost(c.price_label)
         payload: dict[str, Any] = {
             "name": name,
-            "slug": c.slug,
+            "slug": intake_slug(c.host, c.url, c.slug),
             "platform": "circle",
             "join_link": c.url,
             "is_active": True,
@@ -207,7 +242,7 @@ def collect_monitored_communities(session: Session) -> list[MonitoredCommunity]:
             continue
         payload = {
             "name": (conn.name or host).strip(),
-            "slug": community_slug_for_host(host),
+            "slug": intake_slug(host),
             "platform": "circle",
             "join_link": f"https://{host}",
             "visibility": "private",
@@ -341,6 +376,43 @@ def _validate_receipt(
     return result
 
 
+def _deliver_batch(
+    batch: list[dict[str, Any]],
+    batch_keys: list[str],
+    fingerprints: dict[str, str],
+    new_state: dict[str, str],
+    result: IntakeResult,
+    cfg: CommunityIntakeConfig,
+    http: requests.Session,
+) -> None:
+    """POST one chunk. A body the portal refuses is retried one community at a time."""
+    # A changed or explicitly forced payload needs a fresh confirmation.
+    # Do not retain an old fingerprint if this attempt is rejected/unknown.
+    for key in batch_keys:
+        new_state.pop(key, None)
+    try:
+        receipt = post_communities(batch, config=cfg, session=http)
+    except Exception as exc:  # noqa: BLE001 - report per batch, keep going
+        if len(batch) > 1 and _item_level_rejection(exc):
+            logger.warning(
+                "Community intake rejected a batch of %d; retrying each community",
+                len(batch),
+            )
+            for item, key in zip(batch, batch_keys):
+                _deliver_batch([item], [key], fingerprints, new_state, result, cfg, http)
+            return
+        result.errors.append(str(exc))
+        logger.exception(
+            "Failed to push %d community/ies to the portal", len(batch)
+        )
+        return
+    for index in receipt.confirmed_indices:
+        k = batch_keys[index]
+        new_state[k] = fingerprints[k]
+    result.sent += len(receipt.confirmed_indices)
+    result.errors.extend(receipt.errors)
+
+
 def push_monitored_communities(
     db: Database,
     *,
@@ -367,6 +439,7 @@ def push_monitored_communities(
     fingerprints: dict[str, str] = {}
     pending: list[dict[str, Any]] = []
     pending_keys: list[str] = []
+    new_state = dict(state)
 
     for mc in monitored:
         fp = _fingerprint(mc.payload)
@@ -374,33 +447,29 @@ def push_monitored_communities(
         if not force and state.get(mc.key) == fp:
             result.skipped += 1
             continue
+        slug = str(mc.payload.get("slug") or "")
+        if not _portal_slug_ok(slug):
+            # Held out of the POST: one illegal slug used to make the portal
+            # reject the chunk and confirm nothing. Do not keep a fingerprint
+            # of a payload we are not sending.
+            result.attempted += 1
+            result.errors.append(
+                f"Community intake skipped {mc.key}: slug {slug!r} must use "
+                "lowercase letters, digits, and hyphens"
+            )
+            new_state.pop(mc.key, None)
+            continue
         pending.append(mc.payload)
         pending_keys.append(mc.key)
 
-    result.attempted = len(pending)
+    result.attempted += len(pending)
 
     http = session or requests.Session()
-    new_state = dict(state)
     for i in range(0, len(pending), CHUNK):
-        batch = pending[i:i + CHUNK]
-        batch_keys = pending_keys[i:i + CHUNK]
-        # A changed or explicitly forced payload needs a fresh confirmation.
-        # Do not retain an old fingerprint if this attempt is rejected/unknown.
-        for key in batch_keys:
-            new_state.pop(key, None)
-        try:
-            receipt = post_communities(batch, config=cfg, session=http)
-        except Exception as exc:  # noqa: BLE001 - report per batch, keep going
-            result.errors.append(str(exc))
-            logger.exception(
-                "Failed to push %d community/ies to the portal", len(batch)
-            )
-            continue
-        for index in receipt.confirmed_indices:
-            k = batch_keys[index]
-            new_state[k] = fingerprints[k]
-        result.sent += len(receipt.confirmed_indices)
-        result.errors.extend(receipt.errors)
+        _deliver_batch(
+            pending[i:i + CHUNK], pending_keys[i:i + CHUNK],
+            fingerprints, new_state, result, cfg, http,
+        )
 
     # Forget communities that left the monitored set so the cache can't grow
     # forever and a re-added one re-syncs. (The portal is not told they left --

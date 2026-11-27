@@ -21,7 +21,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy import and_, delete, func, select
+from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from circle_leads.join.accounts import is_retired
@@ -537,7 +537,11 @@ def _log_problems(ctx: Ctx) -> list[dict]:
     ).where(
         ActivityLog.level.in_(("warning", "error")),
         ActivityLog.created_at >= ctx.now - timedelta(hours=24),
-        ActivityLog.kind.notin_(("export", "join")),  # rules of their own
+        # export and join have rules of their own -- except a join *error*
+        # (the browser died mid-visit): no row-based rule sees it, and hiding
+        # it let one host loop for three days (2026-11-24..27) unseen.
+        or_(ActivityLog.kind.notin_(("export", "join")),
+            and_(ActivityLog.kind == "join", ActivityLog.level == "error")),
     ).order_by(ActivityLog.id.desc()).limit(2000)).all()
     post_ids = {audit.get("post_id") for kind, _, _, _, _, audit in rows
                 if kind == "classify" and isinstance(audit, dict)

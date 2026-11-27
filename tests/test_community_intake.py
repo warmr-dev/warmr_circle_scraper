@@ -493,3 +493,104 @@ def test_harvest_activity_reports_confirmed_count_and_rejections(db, monkeypatch
         assert activity.detail["sent"] == 2
         assert activity.detail["attempted"] == 3
         assert "Invalid community slug" in activity.detail["errors"]
+
+
+# --- portal slug -------------------------------------------------------
+# Custom-domain rows store the raw host as slug. The portal accepts only
+# lowercase letters, digits and hyphens, and a dotted slug used to make the
+# whole chunk register 0.
+
+
+@pytest.mark.parametrize("host,expected", [
+    ("community.everythingmarketplaces.com", "everythingmarketplaces"),
+    ("community.exitfive.com", "exitfive"),
+    ("community.steepinsights.com", "steepinsights"),
+    ("www.firefly-innovations.org", "firefly-innovations"),
+    ("www.startup-ready.com", "startup-ready"),
+    ("www.hailerz.com", "hailerz"),
+])
+def test_a_custom_domain_is_sent_as_its_registrable_label(db, host, expected):
+    with db.session() as s:
+        s.add(Community(
+            slug=host, name=expected, url=f"https://{host}", host=host,
+            platform="circle", watching=True,
+        ))
+    with db.session() as s:
+        got = collect_monitored_communities(s)
+    assert len(got) == 1
+    assert got[0].payload["slug"] == expected
+    assert got[0].key == f"community:{host}"
+
+
+def test_a_cached_dotted_slug_is_resent_with_the_normalized_one(db, monkeypatch):
+    from circle_leads.export.community_intake import _fingerprint
+    from circle_leads.storage.settings_store import get_setting, set_setting
+
+    host = "www.hailerz.com"
+    with db.session() as s:
+        s.add(Community(
+            slug=host, name="Hailerz", url=f"https://{host}", host=host,
+            platform="circle", watching=True,
+        ))
+    with db.session() as s:
+        payload = collect_monitored_communities(s)[0].payload
+    assert payload["slug"] == "hailerz"
+    stale = dict(payload)
+    stale["slug"] = host
+    set_setting(db, "community_intake_state", json.dumps(
+        {f"community:{host}": _fingerprint(stale)},
+    ))
+    monkeypatch.setenv("COMMUNITY_INTAKE_API_SECRET", "fixture")
+    http = MagicMock()
+    http.post.side_effect = lambda url, *, json, **kw: _http_response(_receipt(json))
+    result = push_monitored_communities(db, session=http)
+    assert result.skipped == 0
+    assert result.sent == 1
+    assert http.post.call_args.kwargs["json"][0]["slug"] == "hailerz"
+    assert json.loads(get_setting(db, "community_intake_state"))[f"community:{host}"] == (
+        _fingerprint(payload)
+    )
+
+
+def test_an_illegal_slug_is_held_out_of_the_batch(db, monkeypatch):
+    with db.session() as s:
+        s.add(Community(
+            slug="good", name="Good", url="https://good.circle.so",
+            platform="circle", watching=True,
+        ))
+        s.add(Community(
+            slug="bad_name.com", name="Bad", url="https://bad_name.com",
+            host="bad_name.com", platform="circle", watching=True,
+        ))
+    monkeypatch.setenv("COMMUNITY_INTAKE_API_SECRET", "fixture")
+    http = MagicMock()
+    http.post.side_effect = lambda url, *, json, **kw: _http_response(_receipt(json))
+    result = push_monitored_communities(db, session=http)
+    assert [item["slug"] for item in http.post.call_args.kwargs["json"]] == ["good"]
+    assert result.sent == 1
+    assert result.attempted == 2
+    assert any("bad_name" in err for err in result.errors)
+
+
+def test_a_rejected_batch_is_retried_one_community_at_a_time(db, monkeypatch):
+    _seed(db)
+    monkeypatch.setenv("COMMUNITY_INTAKE_API_SECRET", "fixture")
+    http = MagicMock()
+
+    def reply(url, *, json, **kwargs):
+        if len(json) > 1 or json[0]["slug"] == "private":
+            response = _http_response({}, status=400)
+            response.text = "slug must use lowercase letters, digits, and hyphens"
+            response.reason = "Bad Request"
+            return response
+        return _http_response(_receipt(json))
+
+    http.post.side_effect = reply
+    result = push_monitored_communities(db, session=http)
+    assert result.sent == 2
+    assert result.attempted == 3
+    assert any("slug must use lowercase" in err for err in result.errors)
+    sent = [call.kwargs["json"][0]["slug"]
+            for call in http.post.call_args_list if len(call.kwargs["json"]) == 1
+            and call.kwargs["json"][0]["slug"] != "private"]
+    assert sorted(sent) == ["approved", "watched"]

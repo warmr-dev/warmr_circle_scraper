@@ -266,6 +266,28 @@ def test_jobs_queues_and_the_log(app):
     assert log[0]["link"] == {"section": "log", "q": "Session cookie invalid"}
 
 
+def test_a_join_error_shows_and_a_join_warning_does_not(app):
+    # Join warnings already have a row-based rule. A join error is the browser
+    # dying mid-visit: nothing else on this page used to mention it.
+    client, db, app_ = app
+    with db.session() as s:
+        s.add(ActivityLog(kind="join", level="error", community="haven-online-safety",
+                          summary="Join bridge_error: haven-online-safety",
+                          created_at=NOW - timedelta(hours=1), detail={},
+                          items_seen=0, leads_found=0))
+        s.add(ActivityLog(kind="join", level="warning", community="other",
+                          summary="Join needs_login: other",
+                          created_at=NOW - timedelta(hours=1), detail={},
+                          items_seen=0, leads_found=0))
+        s.add(ActivityLog(kind="export", level="error", community="x",
+                          summary="export failed",
+                          created_at=NOW - timedelta(hours=1), detail={},
+                          items_seen=0, leads_found=0))
+    _clear_cache(app_)
+    titles = [item["title"] for item in _rules(client)["log_problems"]["items"]]
+    assert titles == ["Join bridge_error: haven-online-safety"]
+
+
 def test_plaintext_cookies(app):
     client, db, app_ = app
     with db.session() as s:
